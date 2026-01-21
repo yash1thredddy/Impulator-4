@@ -84,29 +84,30 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                 style.textContent = `
                     #structure-panel-{chart_id} {{
                         position: fixed;
-                        top: 80px;
-                        right: 10px;
-                        width: 340px;
-                        max-height: 520px;
+                        width: 300px;
+                        max-height: 480px;
                         background: white;
                         border: 1px solid #e0e0e0;
                         border-radius: 10px;
-                        box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+                        box-shadow: 0 4px 20px rgba(0,0,0,0.25);
                         z-index: 9999;
-                        transform: translateX(calc(100% + 20px));
-                        transition: transform 0.3s ease-in-out, box-shadow 0.2s;
                         overflow-y: auto;
-                        display: flex;
+                        display: none;
                         flex-direction: column;
                         cursor: default;
+                        opacity: 0;
+                        transform: scale(0.95);
+                        transition: opacity 0.2s ease-out, transform 0.2s ease-out;
                     }}
 
                     #structure-panel-{chart_id}.open {{
-                        transform: translateX(0);
+                        display: flex;
+                        opacity: 1;
+                        transform: scale(1);
                     }}
 
                     #structure-panel-{chart_id}.dragging {{
-                        box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+                        box-shadow: 0 8px 24px rgba(0,0,0,0.3);
                         opacity: 0.95;
                     }}
 
@@ -369,12 +370,6 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                 panelStartX = rect.left;
                 panelStartY = rect.top;
 
-                // Remove transform and set position directly
-                panel.style.transform = 'none';
-                panel.style.left = rect.left + 'px';
-                panel.style.top = rect.top + 'px';
-                panel.style.right = 'auto';
-
                 e.preventDefault();
             }});
 
@@ -583,28 +578,38 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                 
                 console.log('[Structure Viewer {chart_id}] ✅ Attaching click listener');
                 
+                // Track last mouse position for positioning the popup
+                let lastClickX = 0;
+                let lastClickY = 0;
+
+                // Capture mouse position on any click within the chart
+                plotlyDiv.addEventListener('click', function(e) {{
+                    lastClickX = e.clientX;
+                    lastClickY = e.clientY;
+                }}, true);
+
                 // Listen for Plotly click events
                 plotlyDiv.on('plotly_click', function(data) {{
                     console.log('[Structure Viewer {chart_id}] 🖱️ Click detected!', data);
-                    
+
                     if (!data.points || data.points.length === 0) {{
                         console.warn('[Structure Viewer {chart_id}] No points in click data');
                         return;
                     }}
-                    
+
                     const point = data.points[0];
                     console.log('[Structure Viewer {chart_id}] Point data:', point);
-                    
+
                     // Extract data from customdata
                     // Format can be: [SMILES, name, index] or [SMILES, index]
                     let smiles = null;
                     let moleculeName = null;
                     let pointIndex = null;
-                    
+
                     if (point.customdata) {{
                         console.log('[Structure Viewer {chart_id}] customdata:', point.customdata);
                         smiles = point.customdata[0];
-                        
+
                         // Check format: if length is 3, we have [SMILES, name, index]
                         if (point.customdata.length === 3) {{
                             moleculeName = point.customdata[1];
@@ -616,9 +621,10 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                     }} else {{
                         console.warn('[Structure Viewer {chart_id}] No customdata found');
                     }}
-                    
+
                     if (!smiles || smiles === null || smiles === 'null') {{
                         console.warn('[Structure Viewer {chart_id}] Invalid SMILES:', smiles);
+                        positionPanelNearClick(lastClickX, lastClickY);
                         infoDiv.innerHTML = `
                             <div class="error-message-{chart_id}">
                                 No SMILES data available for this point<br>
@@ -628,9 +634,9 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                         panel.classList.add('open');
                         return;
                     }}
-                    
+
                     console.log('[Structure Viewer {chart_id}] Rendering SMILES:', smiles, 'Name:', moleculeName);
-                    
+
                     // Pass column names for display
                     const columnNames = {{
                         x: {repr(x_col) if x_col else 'null'},
@@ -638,17 +644,61 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                         z: {repr(z_col) if z_col else 'null'},
                         name: {repr(name_col) if name_col else 'null'}
                     }};
-                    
-                    renderStructure(smiles, moleculeName, pointIndex, point, columnNames);
+
+                    renderStructure(smiles, moleculeName, pointIndex, point, columnNames, lastClickX, lastClickY);
                 }});
                 
                 console.log('[Structure Viewer {chart_id}] ✅ Click listener attached successfully');
             }}
-            
+
+            // Position panel near the clicked point
+            function positionPanelNearClick(clickX, clickY) {{
+                const panelWidth = 300;
+                const panelHeight = 480;
+                const padding = 15;  // Distance from click point
+                const edgePadding = 10;  // Distance from viewport edge
+
+                const viewportWidth = parentWin.innerWidth;
+                const viewportHeight = parentWin.innerHeight;
+
+                // Default: position to the right and below the click
+                let left = clickX + padding;
+                let top = clickY + padding;
+
+                // If panel would go off right edge, position to the left of click
+                if (left + panelWidth > viewportWidth - edgePadding) {{
+                    left = clickX - panelWidth - padding;
+                }}
+
+                // If panel would go off left edge, clamp to left edge
+                if (left < edgePadding) {{
+                    left = edgePadding;
+                }}
+
+                // If panel would go off bottom edge, position above the click
+                if (top + panelHeight > viewportHeight - edgePadding) {{
+                    top = clickY - panelHeight - padding;
+                }}
+
+                // If panel would go off top edge, clamp to top edge
+                if (top < edgePadding) {{
+                    top = edgePadding;
+                }}
+
+                panel.style.left = left + 'px';
+                panel.style.top = top + 'px';
+                panel.style.right = 'auto';
+
+                console.log('[Structure Viewer {chart_id}] Positioned panel at:', left, top, 'from click:', clickX, clickY);
+            }}
+
             // Render molecular structure
-            function renderStructure(smiles, moleculeName, pointIndex, pointData, columnNames) {{
+            function renderStructure(smiles, moleculeName, pointIndex, pointData, columnNames, clickX, clickY) {{
                 console.log('[Structure Viewer {chart_id}] renderStructure called for:', smiles);
-                
+
+                // Position panel near the click point
+                positionPanelNearClick(clickX || 100, clickY || 100);
+
                 infoDiv.innerHTML = '<div class="loading-message-{chart_id}">Rendering structure...</div>';
                 panel.classList.add('open');
                 
@@ -901,6 +951,6 @@ def get_structure_viewer_hint():
         gap: 8px;
     ">
         <span style="font-size: 16px;">📍</span>
-        <span><strong>Tip:</strong> Click on any data point to view its 2D molecular structure in the side panel</span>
+        <span><strong>Tip:</strong> Click on any data point to view its 2D molecular structure (popup appears near click)</span>
     </div>
     """
