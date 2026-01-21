@@ -28,38 +28,37 @@ def test_client():
     with patch('backend.core.azure_sync.is_azure_configured', return_value=False):
         with patch('backend.core.azure_sync.download_db_from_azure'):
             with patch('backend.core.azure_sync.sync_db_to_azure'):
-                with patch('backend.core.azure_sync.sync_compound_table_from_azure'):
-                    with patch('backend.core.azure_sync.sync_logs_to_azure'):
-                        # Mock scheduler trigger to prevent background DB access conflicts
-                        # The scheduler's trigger() method starts background threads
-                        with patch('backend.core.scheduler.job_scheduler.trigger'):
-                            # Clear settings cache to pick up test DATABASE_URL
-                            from backend.config import get_settings
-                            get_settings.cache_clear()
+                with patch('backend.core.azure_sync.sync_logs_to_azure'):
+                    # Mock scheduler trigger to prevent background DB access conflicts
+                    # The scheduler's trigger() method starts background threads
+                    with patch('backend.core.scheduler.job_scheduler.trigger'):
+                        # Clear settings cache to pick up test DATABASE_URL
+                        from backend.config import get_settings
+                        get_settings.cache_clear()
 
-                            # Reset the engine to use in-memory DB
-                            from backend.core import database
-                            from sqlalchemy import create_engine
-                            from sqlalchemy.pool import StaticPool
+                        # Reset the engine to use in-memory DB
+                        from backend.core import database
+                        from sqlalchemy import create_engine
+                        from sqlalchemy.pool import StaticPool
 
-                            # Create fresh in-memory engine
-                            database.engine = create_engine(
-                                "sqlite:///:memory:",
-                                connect_args={"check_same_thread": False},
-                                poolclass=StaticPool,
-                            )
-                            database.SessionLocal.configure(bind=database.engine)
+                        # Create fresh in-memory engine
+                        database.engine = create_engine(
+                            "sqlite:///:memory:",
+                            connect_args={"check_same_thread": False},
+                            poolclass=StaticPool,
+                        )
+                        database.SessionLocal.configure(bind=database.engine)
 
-                            # Create tables
-                            from backend.models.database import Base
-                            Base.metadata.create_all(bind=database.engine)
+                        # Create tables
+                        from backend.models.database import Base
+                        Base.metadata.create_all(bind=database.engine)
 
-                            from backend.main import app
-                            with TestClient(app) as client:
-                                yield client
+                        from backend.main import app
+                        with TestClient(app) as client:
+                            yield client
 
-                            # Ensure scheduler is stopped after test
-                            job_scheduler._running = False
+                        # Ensure scheduler is stopped after test
+                        job_scheduler._running = False
 
 
 @pytest.fixture

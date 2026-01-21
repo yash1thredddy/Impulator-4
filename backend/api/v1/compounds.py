@@ -13,9 +13,8 @@ from sqlalchemy import desc
 
 from backend.core.database import get_db
 from backend.core.auth import validate_session_id, truncate_session_id
-from backend.core.azure_sync import delete_result_from_azure, delete_result_from_azure_by_entry_id
+from backend.core.azure_sync import delete_result_from_azure_by_entry_id
 from backend.core.audit import log_job_deleted
-from backend.core import sanitize_compound_name
 from backend.models.database import Compound, DeletedCompound
 from backend.config import settings
 
@@ -82,6 +81,9 @@ async def list_compounds(
             "total_activities": compound.total_activities,
             "imp_candidates": compound.imp_candidates,
             "avg_oqpla_score": compound.avg_oqpla_score,
+            "similarity_threshold": compound.similarity_threshold,
+            "qed": compound.qed,
+            "num_outliers": compound.num_outliers,
             "storage_path": compound.storage_path,
             "processed_at": compound.processed_at.isoformat() if compound.processed_at else None,
             "is_duplicate": compound.is_duplicate,
@@ -148,43 +150,23 @@ async def delete_compound(
         raise HTTPException(status_code=404, detail="Compound not found")
 
     compound_name = compound.compound_name
-    safe_name = sanitize_compound_name(compound_name)
 
-    # Delete from Azure - try both UUID-based and name-based paths
-    azure_deleted_uuid = False
-    azure_deleted_name = False
+    # Delete from Azure (UUID-based storage only)
+    azure_deleted = delete_result_from_azure_by_entry_id(entry_id)
+    if azure_deleted:
+        logger.info(f"Deleted result from Azure: {entry_id}")
 
-    if entry_id:
-        azure_deleted_uuid = delete_result_from_azure_by_entry_id(entry_id)
-        if azure_deleted_uuid:
-            logger.info(f"Deleted UUID-based result from Azure: {entry_id}")
-
-    azure_deleted_name = delete_result_from_azure(compound_name)
-    if azure_deleted_name:
-        logger.info(f"Deleted name-based result from Azure: {compound_name}")
-
-    # Delete local ZIP files - try both UUID-based and name-based filenames
+    # Delete local ZIP file (UUID-based path only)
     local_deleted = []
-    local_files_to_delete = []
-
-    # UUID-based path: results/{prefix}/{entry_id}.zip
-    if entry_id:
-        prefix = entry_id[:2].lower()
-        local_files_to_delete.append(settings.RESULTS_DIR / prefix / f"{entry_id}.zip")
-        # Also check root for older files
-        local_files_to_delete.append(settings.RESULTS_DIR / f"{entry_id}.zip")
-
-    # Legacy name-based path
-    local_files_to_delete.append(settings.RESULTS_DIR / f"{safe_name}.zip")
-
-    for local_zip in local_files_to_delete:
-        if local_zip.exists():
-            try:
-                local_zip.unlink()
-                local_deleted.append(str(local_zip))
-                logger.info(f"Deleted local result: {local_zip}")
-            except Exception as e:
-                logger.warning(f"Failed to delete local result {local_zip}: {e}")
+    prefix = entry_id[:2].lower()
+    local_zip = settings.RESULTS_DIR / prefix / f"{entry_id}.zip"
+    if local_zip.exists():
+        try:
+            local_zip.unlink()
+            local_deleted.append(str(local_zip))
+            logger.info(f"Deleted local result: {local_zip}")
+        except Exception as e:
+            logger.warning(f"Failed to delete local result {local_zip}: {e}")
 
     # Archive to deleted_compounds table before deletion
     deleted_record = DeletedCompound(
@@ -217,6 +199,6 @@ async def delete_compound(
         "message": "Compound deleted successfully",
         "entry_id": entry_id,
         "compound_name": compound_name,
-        "azure_deleted": azure_deleted_uuid or azure_deleted_name,
+        "azure_deleted": azure_deleted,
         "local_deleted": local_deleted,
     }

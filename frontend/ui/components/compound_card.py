@@ -34,22 +34,23 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "") -> bool
             - compound_name: Name of the compound
             - smiles: SMILES string
             - created_at: Creation timestamp
-            - similar_count: Number of similar compounds found
+            - similarity_threshold: Similarity threshold % used for search
             - has_imp_warning: Whether IMP warning exists
             - chembl_id: Optional ChEMBL ID
             - total_activities: Optional activity count
             - num_outliers: Optional outlier count
             - qed: Optional QED score
-            - similarity_threshold: Optional similarity threshold
         key_prefix: Prefix for widget keys to ensure uniqueness
 
     Returns:
         bool: True if the "View" button was clicked
     """
     compound_name = compound.get('compound_name', 'Unknown')
+    entry_id = compound.get('entry_id', '')  # Unique identifier for key generation
     smiles = compound.get('smiles', '')
-    similar_count = compound.get('similar_count', 0)
     has_imp_warning = compound.get('has_imp_warning', False)
+    is_duplicate = compound.get('is_duplicate', False)
+    duplicate_of = compound.get('duplicate_of', '')
 
     # Optional fields from metadata
     chembl_id = compound.get('chembl_id', '')
@@ -66,6 +67,16 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "") -> bool
     safe_compound_name = html.escape(compound_name)
 
     with st.container(border=True):
+        # Duplicate tag if applicable
+        if is_duplicate:
+            st.markdown(
+                "<div style='text-align: center; margin-bottom: 4px;'>"
+                "<span style='background: #ff6b35; color: white; padding: 2px 8px; "
+                "border-radius: 4px; font-size: 11px; font-weight: 500;'>DUPLICATE</span>"
+                "</div>",
+                unsafe_allow_html=True
+            )
+
         # Compound name centered - larger font, minimal top margin
         st.markdown(
             f"<h2 style='text-align: center; margin: 0 0 10px 0; padding-top: 0; overflow: hidden; "
@@ -112,8 +123,14 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "") -> bool
             unsafe_allow_html=True
         )
 
-        # View button
-        if st.button("View Details", key=f"{key_prefix}view_{compound_name}", type="primary", use_container_width=True):
+        # View button - key_prefix already contains unique grid position
+        # Use entry_id if available for extra uniqueness with duplicate compound names
+        if entry_id:
+            button_key = f"{key_prefix}view_{entry_id}"
+        else:
+            # For legacy compounds without entry_id, key_prefix alone is unique per grid position
+            button_key = f"{key_prefix}view"
+        if st.button("View Details", key=button_key, type="primary", use_container_width=True):
             return True
 
     return False
@@ -253,7 +270,8 @@ def render_compound_grid(compounds: list, columns: int = 3) -> Optional[str]:
 
         for i, compound in enumerate(row_compounds):
             with cols[i]:
-                if render_compound_card(compound, key_prefix=f"grid_{row_start}_"):
+                # Use row_start + i to create unique keys per grid position
+                if render_compound_card(compound, key_prefix=f"grid_{row_start + i}_"):
                     clicked_compound = {
                         'compound_name': compound.get('compound_name'),
                         'entry_id': compound.get('entry_id'),
@@ -281,25 +299,32 @@ def render_compound_list(compounds: list) -> Optional[dict]:
         compound_name = compound.get('compound_name', 'Unknown')
         entry_id = compound.get('entry_id')
         smiles = compound.get('smiles', '')[:50]  # Truncate
-        similar_count = compound.get('similar_count', 0)
+        similarity_threshold = compound.get('similarity_threshold', 90)
         has_imp_warning = compound.get('has_imp_warning', False)
+        is_duplicate = compound.get('is_duplicate', False)
 
         col1, col2, col3, col4 = st.columns([3, 4, 2, 2])
 
         with col1:
-            if has_imp_warning:
-                st.markdown(f"**{compound_name}** ")
+            # Escape compound name for XSS prevention
+            safe_name = html.escape(compound_name)
+            if is_duplicate:
+                st.markdown(f"**{safe_name}** <span style='color: #ff6b35; font-size: 12px;'>[DUP]</span>", unsafe_allow_html=True)
+            elif has_imp_warning:
+                st.markdown(f"**{safe_name}** ")
             else:
-                st.markdown(f"**{compound_name}**")
+                st.markdown(f"**{safe_name}**")
 
         with col2:
             st.code(smiles + "..." if len(compound.get('smiles', '')) > 50 else smiles)
 
         with col3:
-            st.caption(f" {similar_count}")
+            st.caption(f"Sim: {similarity_threshold}%")
 
         with col4:
-            if st.button("View", key=f"list_view_{i}_{compound_name}"):
+            # Use index + entry_id for unique key (handles duplicate compound names)
+            button_key = f"list_view_{i}_{entry_id}" if entry_id else f"list_view_{i}"
+            if st.button("View", key=button_key):
                 clicked_compound = {
                     'compound_name': compound_name,
                     'entry_id': entry_id,

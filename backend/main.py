@@ -20,7 +20,6 @@ from backend.core.azure_sync import (
     AzureSyncRotatingFileHandler,
     download_db_from_azure,
     sync_db_to_azure,
-    sync_compound_table_from_azure,
     sync_logs_to_azure,
     is_azure_configured,
 )
@@ -114,9 +113,8 @@ async def lifespan(app: FastAPI):
     init_db()
     logger.info("Database initialized")
 
-    # Sync Compound table with Azure (ensure consistency)
-    if is_azure_configured():
-        sync_compound_table_from_azure()
+    # Note: Legacy compound table sync removed - database is the source of truth
+    # for all compound metadata. UUID-based storage paths are the only supported format.
 
     # Recover stalled jobs and start scheduler if needed
     _recover_stalled_jobs()

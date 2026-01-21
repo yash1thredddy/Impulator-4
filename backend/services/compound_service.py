@@ -31,7 +31,6 @@ from backend.config import settings
 from backend.core.database import SessionLocal, get_db_session
 from backend.core.azure_sync import (
     sync_db_to_azure,
-    upload_result_to_azure,
     upload_result_to_azure_by_entry_id,
     get_storage_path_from_entry_id,
 )
@@ -228,10 +227,17 @@ class CompoundService:
                 self._update_progress(db, job_id, 92, "Uploading to Azure...")
                 # Use UUID-based storage path for better organization and duplicate support
                 try:
-                    upload_result_to_azure_by_entry_id(result_path, entry_id)
-                    # Store the UUID-based path in result_summary for later retrieval
-                    result_summary['storage_path'] = get_storage_path_from_entry_id(entry_id)
-                    self._update_progress(db, job_id, 95, "Upload complete")
+                    upload_success = upload_result_to_azure_by_entry_id(result_path, entry_id)
+                    if upload_success:
+                        # Store the UUID-based path in result_summary for later retrieval
+                        result_summary['storage_path'] = get_storage_path_from_entry_id(entry_id)
+                        self._update_progress(db, job_id, 95, "Upload complete")
+                    else:
+                        # Upload returned False (failed without exception)
+                        logger.error(f"Azure upload returned False for job {job_id}")
+                        result_summary['storage_path'] = None
+                        result_summary['azure_upload_error'] = "Upload failed (returned False)"
+                        self._update_progress(db, job_id, 95, "Upload failed (results saved locally)")
                 except Exception as azure_error:
                     # Log Azure upload failure but don't fail the job
                     logger.error(f"Azure upload failed for job {job_id}: {azure_error}")

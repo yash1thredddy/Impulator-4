@@ -279,9 +279,15 @@ class JobService:
             recent_query = recent_query.filter(Job.session_id == session_id)
         recent_jobs = recent_query.all()
 
-        # Combine and sort by created_at
+        # Combine and sort: completed jobs first, then by created_at (newest first within each group)
         all_jobs = active_jobs + recent_jobs
-        all_jobs.sort(key=lambda j: j.created_at or datetime.min.replace(tzinfo=timezone.utc))
+        # Sort key: (0 if completed/failed, 1 otherwise), then by created_at descending
+        all_jobs.sort(
+            key=lambda j: (
+                0 if j.status in [JobStatus.COMPLETED, JobStatus.FAILED] else 1,
+                -(j.created_at or datetime.min.replace(tzinfo=timezone.utc)).timestamp()
+            )
+        )
 
         result = []
         for job in all_jobs:
@@ -299,23 +305,27 @@ class JobService:
             compound_name = params.get("compound_name", "Unknown")
             item["compound_name"] = compound_name
 
-            # For completed jobs, include entry_id for UUID-based storage lookup
+            # For completed jobs, include entry_id and storage_path for UUID-based storage lookup
             entry_id = None
+            storage_path = None
             if job.status == JobStatus.COMPLETED:
                 # First try result_summary
                 result_data = _safe_json_loads(job.result_summary, {})
                 entry_id = result_data.get("entry_id")
+                storage_path = result_data.get("storage_path")
 
                 # Fallback: look up from Compound table
-                if not entry_id and compound_name != "Unknown":
+                if (not entry_id or not storage_path) and compound_name != "Unknown":
                     from backend.models.database import Compound
                     compound = db.query(Compound).filter(
                         Compound.compound_name == compound_name
                     ).order_by(Compound.processed_at.desc()).first()
                     if compound:
-                        entry_id = compound.entry_id
+                        entry_id = entry_id or compound.entry_id
+                        storage_path = storage_path or compound.storage_path
 
             item["entry_id"] = entry_id
+            item["storage_path"] = storage_path
             result.append(item)
 
         return result
@@ -413,8 +423,9 @@ class JobService:
         """
         Check which compounds already have completed results.
 
-        Checks both local SQLite Compound table AND Azure Blob storage.
-        This ensures duplicates are detected even if local DB is out of sync.
+        Checks the SQLite Compound table (database is the source of truth).
+        UUID-based storage paths are used, so Azure lookup by name is not supported.
+        Use InChIKey for accurate duplicate detection instead of compound names.
 
         Args:
             db: Database session
@@ -424,7 +435,6 @@ class JobService:
             Dict mapping compound_name -> exists (True if already processed)
         """
         from backend.models.database import Compound
-        from backend.core.azure_sync import check_result_exists_in_azure, is_azure_configured
 
         # Batch query: get all matching compounds in a single query
         existing_compounds = (
@@ -436,13 +446,7 @@ class JobService:
 
         result = {}
         for name in compound_names:
-            if name in local_existing:
-                result[name] = True
-            elif is_azure_configured():
-                # Only check Azure for compounds not found locally
-                result[name] = check_result_exists_in_azure(name)
-            else:
-                result[name] = False
+            result[name] = name in local_existing
 
         return result
 
@@ -454,7 +458,8 @@ class JobService:
         """
         Check which compounds are currently being processed.
 
-        Uses efficient SQL LIKE filtering instead of loading all jobs.
+        Fetches all pending/processing jobs once and filters in Python
+        for accurate JSON matching (avoids SQL LIKE injection issues).
 
         Args:
             db: Database session
@@ -466,25 +471,33 @@ class JobService:
         if not compound_names:
             return {}
 
+        # Convert to set for O(1) lookups
+        names_to_check = set(compound_names)
         result = {}
 
-        # For each compound name, check if any pending/processing job has it
-        # This is more efficient than loading ALL pending jobs when checking few compounds
-        for name in compound_names:
-            # Use SQL LIKE to filter by compound name in JSON
-            # Escape special characters for LIKE pattern (\ is escape char)
-            escaped_name = name.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-            pattern = f'%"compound_name": "{escaped_name}"%'
-            job = (
-                db.query(Job)
-                .filter(
-                    Job.status.in_([JobStatus.PENDING, JobStatus.PROCESSING]),
-                    Job.input_params.like(pattern, escape='\\')
-                )
-                .first()
-            )
-            if job:
-                result[name] = job.id
+        # Fetch all pending/processing jobs in one query
+        pending_jobs = (
+            db.query(Job)
+            .filter(Job.status.in_([JobStatus.PENDING, JobStatus.PROCESSING]))
+            .all()
+        )
+
+        # Parse JSON and match compound names
+        for job in pending_jobs:
+            if not job.input_params:
+                continue
+            try:
+                params = json.loads(job.input_params)
+                job_compound_name = params.get('compound_name')
+                if job_compound_name and job_compound_name in names_to_check:
+                    result[job_compound_name] = job.id
+                    # Remove from set to avoid duplicate matches
+                    names_to_check.discard(job_compound_name)
+                    # Early exit if all found
+                    if not names_to_check:
+                        break
+            except (json.JSONDecodeError, TypeError):
+                continue
 
         return result
 
@@ -615,6 +628,11 @@ class JobService:
         from backend.models.database import Compound
         import uuid
 
+        # Validate result_summary before accessing
+        if not result_summary or not isinstance(result_summary, dict):
+            logger.warning("Invalid result_summary (None or not dict), skipping Compound update")
+            return
+
         compound_name = result_summary.get('compound_name')
         if not compound_name:
             logger.warning("No compound_name in result_summary, skipping Compound update")
@@ -635,6 +653,11 @@ class JobService:
         storage_path = result_summary.get('storage_path') or result_path
 
         try:
+            # Extract additional summary fields for home page display
+            similarity_threshold = result_summary.get('similarity_threshold', 90)
+            qed = result_summary.get('qed', 0.0)
+            num_outliers = result_summary.get('num_outliers', 0)
+
             # For duplicates, always create new entry (don't update existing)
             if is_duplicate:
                 # Use entry_id from summary or generate new one
@@ -649,6 +672,9 @@ class JobService:
                     total_activities=result_summary.get('total_activities', 0),
                     imp_candidates=result_summary.get('imp_candidates', 0),
                     avg_oqpla_score=result_summary.get('avg_oqpla_score'),
+                    similarity_threshold=similarity_threshold,
+                    qed=qed,
+                    num_outliers=num_outliers,
                     storage_path=storage_path,
                     is_duplicate=True,
                     duplicate_of=duplicate_of,
@@ -682,6 +708,9 @@ class JobService:
                 existing.total_activities = result_summary.get('total_activities', 0)
                 existing.imp_candidates = result_summary.get('imp_candidates', 0)
                 existing.avg_oqpla_score = result_summary.get('avg_oqpla_score')
+                existing.similarity_threshold = similarity_threshold
+                existing.qed = qed
+                existing.num_outliers = num_outliers
                 existing.storage_path = storage_path
                 existing.processed_at = datetime.now(timezone.utc)  # Update timestamp
                 # Update entry_id if missing (for older records) or use the new one
@@ -701,6 +730,9 @@ class JobService:
                     total_activities=result_summary.get('total_activities', 0),
                     imp_candidates=result_summary.get('imp_candidates', 0),
                     avg_oqpla_score=result_summary.get('avg_oqpla_score'),
+                    similarity_threshold=similarity_threshold,
+                    qed=qed,
+                    num_outliers=num_outliers,
                     storage_path=storage_path,
                     is_duplicate=False,
                     duplicate_of=None,

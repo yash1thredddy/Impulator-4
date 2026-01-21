@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from frontend.utils import sanitize_compound_name
+# Note: sanitize_compound_name removed - only UUID-based storage paths are supported now
 
 logger = logging.getLogger(__name__)
 
@@ -101,28 +101,14 @@ def list_local_results() -> List[Dict[str, Any]]:
     """
     List all locally cached result files.
 
-    Scans both:
-    - Root directory for legacy name-based files (results/{name}.zip)
-    - Subfolders for UUID-based files (results/{prefix}/{uuid}.zip)
+    Scans subfolders for UUID-based files (results/{prefix}/{uuid}.zip).
+    Only UUID-based storage is supported.
 
     Returns:
         List of compound info dictionaries
     """
     results = []
     try:
-        # Scan root directory for legacy name-based files
-        for zip_path in LOCAL_CACHE_DIR.glob("*.zip"):
-            identifier = zip_path.stem  # filename without extension
-            stat = zip_path.stat()
-            results.append({
-                "compound_name": identifier,
-                "entry_id": identifier if _is_uuid(identifier) else None,
-                "blob_name": f"results/{identifier}.zip",
-                "size": stat.st_size,
-                "last_modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
-                "source": "local",
-            })
-
         # Scan subfolders for UUID-based files (results/{prefix}/{uuid}.zip)
         for subdir in LOCAL_CACHE_DIR.iterdir():
             if subdir.is_dir() and len(subdir.name) == 2:
@@ -200,53 +186,42 @@ def list_results(use_local_cache: bool = True) -> List[Dict[str, Any]]:
         return local_results
 
 
-def _get_local_cache_path(identifier: str) -> Path:
-    """Get local cache path for a compound.
+def _get_local_cache_path(entry_id: str) -> Path:
+    """Get local cache path for a compound by entry_id (UUID).
 
-    Supports both:
-    - UUID-based storage (new): results/{prefix}/{entry_id}.zip
-    - Name-based storage (legacy): results/{sanitized_name}.zip
+    Only UUID-based storage is supported: results/{prefix}/{entry_id}.zip
 
     Args:
-        identifier: Either entry_id (UUID) or compound_name
+        entry_id: UUID of the compound entry
     """
-    if _is_uuid(identifier):
-        # UUID-based path with subfolder
-        prefix = identifier[:2].lower()
-        subdir = LOCAL_CACHE_DIR / prefix
-        subdir.mkdir(parents=True, exist_ok=True)
-        return subdir / f"{identifier}.zip"
-    else:
-        # Legacy name-based path
-        safe_name = sanitize_compound_name(identifier)
-        return LOCAL_CACHE_DIR / f"{safe_name}.zip"
+    if not _is_uuid(entry_id):
+        raise ValueError(f"entry_id must be a valid UUID, got: {entry_id}")
+
+    # UUID-based path with subfolder
+    prefix = entry_id[:2].lower()
+    subdir = LOCAL_CACHE_DIR / prefix
+    subdir.mkdir(parents=True, exist_ok=True)
+    return subdir / f"{entry_id}.zip"
 
 
-def _is_cached_locally(identifier: str) -> bool:
-    """Check if compound result is cached locally.
+def _is_cached_locally(entry_id: str) -> bool:
+    """Check if compound result is cached locally by entry_id (UUID)."""
+    if not _is_uuid(entry_id):
+        return False
 
-    Checks both UUID-based and legacy paths.
-    """
-    cache_path = _get_local_cache_path(identifier)
-    if cache_path.exists() and cache_path.stat().st_size > 0:
-        return True
-
-    # Also check legacy path for UUIDs (backward compatibility)
-    if _is_uuid(identifier):
-        legacy_path = LOCAL_CACHE_DIR / f"{identifier}.zip"
-        if legacy_path.exists() and legacy_path.stat().st_size > 0:
-            return True
-
-    return False
+    cache_path = _get_local_cache_path(entry_id)
+    return cache_path.exists() and cache_path.stat().st_size > 0
 
 
-def _read_from_local_cache(identifier: str) -> Optional[bytes]:
-    """Read result from local cache.
+def _read_from_local_cache(entry_id: str) -> Optional[bytes]:
+    """Read result from local cache by entry_id (UUID).
 
     Updates modification time on read (LRU behavior).
-    Checks both UUID-based subfolder path and legacy root path.
     """
-    cache_path = _get_local_cache_path(identifier)
+    if not _is_uuid(entry_id):
+        return None
+
+    cache_path = _get_local_cache_path(entry_id)
     if cache_path.exists():
         try:
             data = cache_path.read_bytes()
@@ -256,26 +231,19 @@ def _read_from_local_cache(identifier: str) -> Optional[bytes]:
         except Exception as e:
             logger.warning(f"Failed to read from cache: {e}")
 
-    # Fallback: check legacy path for UUIDs (files saved before subfolder structure)
-    if _is_uuid(identifier):
-        legacy_path = LOCAL_CACHE_DIR / f"{identifier}.zip"
-        if legacy_path.exists():
-            try:
-                data = legacy_path.read_bytes()
-                legacy_path.touch()
-                return data
-            except Exception as e:
-                logger.warning(f"Failed to read from legacy cache: {e}")
-
     return None
 
 
-def _write_to_local_cache(compound_name: str, data: bytes) -> bool:
-    """Write result to local cache."""
-    cache_path = _get_local_cache_path(compound_name)
+def _write_to_local_cache(entry_id: str, data: bytes) -> bool:
+    """Write result to local cache by entry_id (UUID)."""
+    if not _is_uuid(entry_id):
+        logger.warning(f"Cannot cache: entry_id must be a valid UUID, got: {entry_id}")
+        return False
+
+    cache_path = _get_local_cache_path(entry_id)
     try:
         cache_path.write_bytes(data)
-        logger.info(f"Cached {compound_name} locally ({len(data)} bytes)")
+        logger.info(f"Cached {entry_id} locally ({len(data)} bytes)")
         # Evict oldest files if cache exceeds limit
         _evict_oldest_from_cache()
         return True
@@ -289,7 +257,7 @@ def _evict_oldest_from_cache() -> int:
     Evict oldest files from cache if it exceeds MAX_CACHE_ITEMS.
 
     Uses LRU strategy based on file modification time.
-    Scans both root directory and subfolders.
+    Scans subfolders for UUID-based files.
 
     Returns:
         Number of files evicted
@@ -297,14 +265,6 @@ def _evict_oldest_from_cache() -> int:
     try:
         # Get all cached ZIP files with their modification times
         cached_files = []
-
-        # Scan root directory
-        for zip_path in LOCAL_CACHE_DIR.glob("*.zip"):
-            try:
-                stat = zip_path.stat()
-                cached_files.append((zip_path, stat.st_mtime))
-            except OSError:
-                continue
 
         # Scan subfolders (UUID-based paths)
         for subdir in LOCAL_CACHE_DIR.iterdir():
@@ -349,7 +309,7 @@ def get_cache_stats() -> Dict[str, Any]:
     """
     Get cache statistics.
 
-    Scans both root directory and subfolders.
+    Scans subfolders for UUID-based files.
 
     Returns:
         Dict with cache size, count, and limit info
@@ -372,10 +332,6 @@ def get_cache_stats() -> Dict[str, Any]:
                     newest_mtime = stat.st_mtime
             except OSError:
                 pass
-
-        # Scan root directory
-        for zip_path in LOCAL_CACHE_DIR.glob("*.zip"):
-            _process_zip(zip_path)
 
         # Scan subfolders (UUID-based paths)
         for subdir in LOCAL_CACHE_DIR.iterdir():
@@ -406,86 +362,74 @@ def _get_uuid_blob_path(entry_id: str) -> str:
     return f"results/{prefix}/{entry_id}.zip"
 
 
-def download_result(identifier: str, force_refresh: bool = False) -> Optional[bytes]:
+def download_result(entry_id: str, force_refresh: bool = False) -> Optional[bytes]:
     """
-    Download a result ZIP file, using local cache when available.
+    Download a result ZIP file by entry_id (UUID), using local cache when available.
 
-    Supports both:
-    - UUID-based storage (new): results/{prefix}/{entry_id}.zip
-    - Name-based storage (legacy): results/{sanitized_name}.zip
+    Only UUID-based storage is supported: results/{prefix}/{entry_id}.zip
 
     Args:
-        identifier: Either entry_id (UUID) or compound_name
+        entry_id: UUID of the compound entry
         force_refresh: If True, skip cache and download from Azure
 
     Returns:
         ZIP file bytes, or None if not found
     """
+    if not _is_uuid(entry_id):
+        logger.warning(f"download_result requires a valid UUID, got: {entry_id}")
+        return None
+
     # Check local cache first (unless force refresh)
-    if not force_refresh and _is_cached_locally(identifier):
-        logger.debug(f"Using cached result for {identifier}")
-        return _read_from_local_cache(identifier)
+    if not force_refresh and _is_cached_locally(entry_id):
+        logger.debug(f"Using cached result for {entry_id}")
+        return _read_from_local_cache(entry_id)
 
     # Download from Azure
     if not is_azure_configured():
         # Fallback: try local cache even without Azure
-        return _read_from_local_cache(identifier)
+        return _read_from_local_cache(entry_id)
 
     container = _get_container_client()
     if container is None:
-        return _read_from_local_cache(identifier)
+        return _read_from_local_cache(entry_id)
 
-    # Determine blob path based on identifier format
-    if _is_uuid(identifier):
-        # UUID-based storage (new format)
-        blob_name = _get_uuid_blob_path(identifier)
-    else:
-        # Legacy name-based storage
-        safe_name = sanitize_compound_name(identifier)
-        blob_name = f"results/{safe_name}.zip"
+    # UUID-based storage path
+    blob_name = _get_uuid_blob_path(entry_id)
 
     try:
         blob_client = container.get_blob_client(blob_name)
 
         if not blob_client.exists():
-            # If UUID path failed, try legacy path as fallback
-            if _is_uuid(identifier):
-                legacy_blob_name = f"results/{identifier}.zip"
-                blob_client = container.get_blob_client(legacy_blob_name)
-                if not blob_client.exists():
-                    logger.warning(f"Result not found for {identifier} (tried {blob_name} and {legacy_blob_name})")
-                    return None
-            else:
-                logger.warning(f"Result {blob_name} not found in Azure")
-                return None
+            logger.warning(f"Result {blob_name} not found in Azure")
+            return None
 
         download_stream = blob_client.download_blob()
         data = download_stream.readall()
-        logger.info(f"Downloaded {identifier} from Azure ({len(data)} bytes)")
+        logger.info(f"Downloaded {entry_id} from Azure ({len(data)} bytes)")
 
         # Cache locally for future use
-        _write_to_local_cache(identifier, data)
+        _write_to_local_cache(entry_id, data)
 
         return data
 
     except Exception as e:
         logger.error(f"Failed to download result: {e}")
         # Try local cache as fallback
-        return _read_from_local_cache(identifier)
+        return _read_from_local_cache(entry_id)
 
 
-def load_result_dataframe(compound_name: str, filename: str = "similar_compounds.csv") -> Optional[pd.DataFrame]:
+def load_result_dataframe(entry_id: str, filename: str = "similar_compounds.csv") -> Optional[pd.DataFrame]:
     """
-    Load a specific CSV from a result ZIP file.
+    Load a specific CSV from a result ZIP file by entry_id (UUID).
 
     Args:
-        compound_name: Name of the compound
+        entry_id: UUID of the compound entry
         filename: CSV filename within the ZIP (default: similar_compounds.csv)
 
     Returns:
         DataFrame or None if not found
     """
-    zip_data = download_result(compound_name)
+    zip_data = download_result(entry_id)
     if zip_data is None:
         return None
 
@@ -495,7 +439,7 @@ def load_result_dataframe(compound_name: str, filename: str = "similar_compounds
                 with zf.open(filename) as f:
                     return pd.read_csv(f)
             else:
-                logger.warning(f"{filename} not found in {compound_name}.zip")
+                logger.warning(f"{filename} not found in {entry_id}.zip")
                 return None
 
     except Exception as e:
@@ -503,18 +447,18 @@ def load_result_dataframe(compound_name: str, filename: str = "similar_compounds
         return None
 
 
-def load_result_json(compound_name: str, filename: str = "summary.json") -> Optional[Dict]:
+def load_result_json(entry_id: str, filename: str = "summary.json") -> Optional[Dict]:
     """
-    Load a specific JSON from a result ZIP file.
+    Load a specific JSON from a result ZIP file by entry_id (UUID).
 
     Args:
-        compound_name: Name of the compound
+        entry_id: UUID of the compound entry
         filename: JSON filename within the ZIP
 
     Returns:
         Dict or None if not found
     """
-    zip_data = download_result(compound_name)
+    zip_data = download_result(entry_id)
     if zip_data is None:
         return None
 
@@ -524,7 +468,7 @@ def load_result_json(compound_name: str, filename: str = "summary.json") -> Opti
                 with zf.open(filename) as f:
                     return json.load(f)
             else:
-                logger.warning(f"{filename} not found in {compound_name}.zip")
+                logger.warning(f"{filename} not found in {entry_id}.zip")
                 return None
 
     except Exception as e:
@@ -532,17 +476,17 @@ def load_result_json(compound_name: str, filename: str = "summary.json") -> Opti
         return None
 
 
-def get_result_files(compound_name: str) -> List[str]:
+def get_result_files(entry_id: str) -> List[str]:
     """
-    List all files in a result ZIP.
+    List all files in a result ZIP by entry_id (UUID).
 
     Args:
-        compound_name: Name of the compound
+        entry_id: UUID of the compound entry
 
     Returns:
         List of filenames in the ZIP
     """
-    zip_data = download_result(compound_name)
+    zip_data = download_result(entry_id)
     if zip_data is None:
         return []
 
@@ -556,19 +500,19 @@ def get_result_files(compound_name: str) -> List[str]:
 
 
 @lru_cache(maxsize=50)
-def get_cached_result(compound_name: str) -> Optional[Dict]:
+def get_cached_result(entry_id: str) -> Optional[Dict]:
     """
-    Get cached result summary for a compound.
+    Get cached result summary for a compound by entry_id (UUID).
 
     Uses LRU cache to avoid repeated Azure downloads.
 
     Args:
-        compound_name: Name of the compound
+        entry_id: UUID of the compound entry
 
     Returns:
         Result summary dict or None
     """
-    return load_result_json(compound_name, "summary.json")
+    return load_result_json(entry_id, "summary.json")
 
 
 def clear_cache():
@@ -577,23 +521,27 @@ def clear_cache():
     logger.info("Azure result cache cleared")
 
 
-def delete_from_cache(compound_name: str) -> bool:
+def delete_from_cache(entry_id: str) -> bool:
     """
-    Delete a compound from the local cache.
+    Delete a compound from the local cache by entry_id (UUID).
 
     Called when a compound is deleted from the backend.
 
     Args:
-        compound_name: Name of the compound to delete
+        entry_id: UUID of the compound entry to delete
 
     Returns:
         True if deleted, False if not found or error
     """
-    cache_path = _get_local_cache_path(compound_name)
+    if not _is_uuid(entry_id):
+        logger.warning(f"delete_from_cache requires a valid UUID, got: {entry_id}")
+        return False
+
+    cache_path = _get_local_cache_path(entry_id)
     try:
         if cache_path.exists():
             cache_path.unlink()
-            logger.info(f"Deleted {compound_name} from local cache")
+            logger.info(f"Deleted {entry_id} from local cache")
             # Also clear from LRU cache
             get_cached_result.cache_clear()
             return True
@@ -603,41 +551,46 @@ def delete_from_cache(compound_name: str) -> bool:
         return False
 
 
-def delete_from_azure(compound_name: str) -> bool:
+def delete_from_azure(entry_id: str) -> bool:
     """
-    Delete a compound result from Azure Blob Storage.
+    Delete a compound result from Azure Blob Storage by entry_id (UUID).
 
     This allows deletion even when backend is unavailable.
 
     Args:
-        compound_name: Name of the compound to delete
+        entry_id: UUID of the compound entry to delete
 
     Returns:
         True if deleted, False on error
     """
+    if not _is_uuid(entry_id):
+        logger.warning(f"delete_from_azure requires a valid UUID, got: {entry_id}")
+        return False
+
     container = _get_container_client()
     if container is None:
         logger.warning("Azure not configured, cannot delete from Azure")
         return False
 
-    # Sanitize name (consistent with backend)
-    safe_name = sanitize_compound_name(compound_name)
-    blob_name = f"results/{safe_name}.zip"
+    blob_name = _get_uuid_blob_path(entry_id)
 
     try:
         blob_client = container.get_blob_client(blob_name)
-        blob_client.delete_blob()
-        logger.info(f"Deleted {compound_name} from Azure: {blob_name}")
-        return True
+        if blob_client.exists():
+            blob_client.delete_blob()
+            logger.info(f"Deleted {entry_id} from Azure: {blob_name}")
+            return True
+        else:
+            logger.debug(f"Result {blob_name} not found in Azure (nothing to delete)")
+            return True
     except Exception as e:
-        # May fail if blob doesn't exist - that's OK
-        logger.warning(f"Failed to delete from Azure (may not exist): {e}")
+        logger.warning(f"Failed to delete from Azure: {e}")
         return False
 
 
-def delete_compound(compound_name: str) -> bool:
+def delete_compound(entry_id: str) -> bool:
     """
-    Delete a compound from all storage locations.
+    Delete a compound from all storage locations by entry_id (UUID).
 
     Deletes from:
     - Azure Blob Storage
@@ -646,19 +599,23 @@ def delete_compound(compound_name: str) -> bool:
     Note: Does NOT delete from backend database (use backend API for that).
 
     Args:
-        compound_name: Name of the compound to delete
+        entry_id: UUID of the compound entry to delete
 
     Returns:
         True if deleted from at least one location
     """
-    azure_deleted = delete_from_azure(compound_name)
-    cache_deleted = delete_from_cache(compound_name)
+    if not _is_uuid(entry_id):
+        logger.warning(f"delete_compound requires a valid UUID, got: {entry_id}")
+        return False
+
+    azure_deleted = delete_from_azure(entry_id)
+    cache_deleted = delete_from_cache(entry_id)
 
     if azure_deleted or cache_deleted:
-        logger.info(f"Deleted compound {compound_name}: azure={azure_deleted}, cache={cache_deleted}")
+        logger.info(f"Deleted compound {entry_id}: azure={azure_deleted}, cache={cache_deleted}")
         return True
 
-    logger.warning(f"Compound {compound_name} not found in any storage")
+    logger.warning(f"Compound {entry_id} not found in any storage")
     return False
 
 
@@ -688,8 +645,15 @@ def get_storage_path_from_entry_id(entry_id: str) -> str:
 
 
 def _get_local_cache_path_by_entry_id(entry_id: str) -> Path:
-    """Get local cache path for a compound by entry_id."""
-    return LOCAL_CACHE_DIR / f"{entry_id.lower()}.zip"
+    """Get local cache path for a compound by entry_id.
+
+    Uses subfolder structure: results/{prefix}/{entry_id}.zip
+    """
+    entry_id = entry_id.lower()
+    prefix = entry_id[:2]
+    subdir = LOCAL_CACHE_DIR / prefix
+    subdir.mkdir(parents=True, exist_ok=True)
+    return subdir / f"{entry_id}.zip"
 
 
 def download_result_by_entry_id(entry_id: str, force_refresh: bool = False) -> Optional[bytes]:
@@ -758,10 +722,10 @@ def download_result_by_storage_path(storage_path: str, entry_id: str = None, for
     """
     Download a result ZIP file by storage path.
 
-    Supports both new UUID-based paths and legacy name-based paths.
+    Only UUID-based paths are supported: results/{prefix}/{entry_id}.zip
 
     Args:
-        storage_path: Storage path (e.g., "results/3a/3a4f8c9e....zip" or "results/Aspirin.zip")
+        storage_path: Storage path (e.g., "results/3a/3a4f8c9e-....zip")
         entry_id: Optional entry_id for local caching (if not provided, extracts from path)
         force_refresh: If True, skip cache and download from Azure
 
@@ -771,9 +735,19 @@ def download_result_by_storage_path(storage_path: str, entry_id: str = None, for
     if not storage_path:
         return None
 
-    # Extract cache key from storage path (filename without extension)
-    cache_key = Path(storage_path).stem
-    cache_path = LOCAL_CACHE_DIR / f"{cache_key}.zip"
+    # Extract entry_id (UUID) from storage path for local caching
+    # storage_path format: results/{prefix}/{entry_id}.zip
+    cache_key = Path(storage_path).stem  # The UUID
+    if _is_uuid(cache_key):
+        # Use proper subfolder structure for UUID-based paths
+        prefix = cache_key[:2].lower()
+        cache_subdir = LOCAL_CACHE_DIR / prefix
+        cache_subdir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_subdir / f"{cache_key}.zip"
+    else:
+        # Non-UUID path - this shouldn't happen with UUID-only storage
+        logger.warning(f"Non-UUID storage path detected: {storage_path}")
+        return None
 
     # Check local cache first (unless force refresh)
     if not force_refresh and cache_path.exists():
@@ -878,7 +852,6 @@ def load_result_json_by_entry_id(entry_id: str, filename: str = "summary.json") 
 
 
 def smart_download_result(
-    compound_name: str = None,
     entry_id: str = None,
     storage_path: str = None,
     force_refresh: bool = False
@@ -887,14 +860,12 @@ def smart_download_result(
     Smart download that tries multiple strategies.
 
     Priority:
-    1. storage_path (if provided - most reliable)
+    1. storage_path (if provided - most reliable, from database)
     2. entry_id (if provided - UUID-based path)
-    3. compound_name (legacy name-based path)
 
     Args:
-        compound_name: Name of the compound (legacy)
-        entry_id: UUID of the compound entry (new)
-        storage_path: Full storage path (most reliable)
+        entry_id: UUID of the compound entry
+        storage_path: Full storage path from database (most reliable)
         force_refresh: If True, skip cache
 
     Returns:
@@ -912,8 +883,93 @@ def smart_download_result(
         if data:
             return data
 
-    # Fall back to compound_name-based path (legacy)
-    if compound_name:
-        return download_result(compound_name, force_refresh)
-
+    logger.warning("smart_download_result requires either storage_path or entry_id")
     return None
+
+
+def smart_load_summary(
+    entry_id: str = None,
+    storage_path: str = None,
+    force_refresh: bool = False
+) -> Optional[Dict]:
+    """
+    Smart summary loader that tries multiple strategies.
+
+    Priority:
+    1. storage_path (if provided - most reliable, from database)
+    2. entry_id (if provided - UUID-based path)
+
+    Args:
+        entry_id: UUID of the compound entry
+        storage_path: Full storage path from database (most reliable)
+        force_refresh: If True, skip cache
+
+    Returns:
+        Summary dict, or None if not found
+    """
+    zip_data = smart_download_result(
+        entry_id=entry_id,
+        storage_path=storage_path,
+        force_refresh=force_refresh
+    )
+
+    if zip_data is None:
+        return None
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
+            if "summary.json" in zf.namelist():
+                with zf.open("summary.json") as f:
+                    return json.load(f)
+            else:
+                logger.warning(f"summary.json not found in ZIP (storage_path={storage_path}, entry_id={entry_id})")
+                return None
+
+    except Exception as e:
+        logger.error(f"Failed to extract summary.json: {e}")
+        return None
+
+
+def smart_load_dataframe(
+    filename: str,
+    entry_id: str = None,
+    storage_path: str = None,
+    force_refresh: bool = False
+) -> Optional[pd.DataFrame]:
+    """
+    Smart dataframe loader that tries multiple strategies.
+
+    Priority:
+    1. storage_path (if provided - most reliable, from database)
+    2. entry_id (if provided - UUID-based path)
+
+    Args:
+        filename: CSV filename within the ZIP
+        entry_id: UUID of the compound entry
+        storage_path: Full storage path from database (most reliable)
+        force_refresh: If True, skip cache
+
+    Returns:
+        DataFrame, or None if not found
+    """
+    zip_data = smart_download_result(
+        entry_id=entry_id,
+        storage_path=storage_path,
+        force_refresh=force_refresh
+    )
+
+    if zip_data is None:
+        return None
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
+            if filename in zf.namelist():
+                with zf.open(filename) as f:
+                    return pd.read_csv(f)
+            else:
+                logger.warning(f"{filename} not found in ZIP (storage_path={storage_path}, entry_id={entry_id})")
+                return None
+
+    except Exception as e:
+        logger.error(f"Failed to extract {filename}: {e}")
+        return None

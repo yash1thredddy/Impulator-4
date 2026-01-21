@@ -201,21 +201,31 @@ def extract_classyfire_fields(cf_data: Optional[Dict]) -> Dict[str, str]:
         }
 
     try:
+        # Helper to safely extract nested values (handles None values)
+        def safe_get(d, key1, key2='name', default=''):
+            """Safely get nested dict value, handling None at any level."""
+            val = d.get(key1) if d else None
+            if val is None:
+                return default
+            if isinstance(val, dict):
+                return val.get(key2, default) or default
+            return str(val) if val else default
+
         return {
             # Standard taxonomy levels
-            'Kingdom': cf_data.get('kingdom', {}).get('name', ''),
-            'Superclass': cf_data.get('superclass', {}).get('name', ''),
-            'Class': cf_data.get('class', {}).get('name', ''),
-            'Subclass': cf_data.get('subclass', {}).get('name', ''),
+            'Kingdom': safe_get(cf_data, 'kingdom', 'name'),
+            'Superclass': safe_get(cf_data, 'superclass', 'name'),
+            'Class': safe_get(cf_data, 'class', 'name'),
+            'Subclass': safe_get(cf_data, 'subclass', 'name'),
 
             # Enhanced fields
-            'Direct_Parent': cf_data.get('direct_parent', {}).get('name', ''),
-            'Molecular_Framework': cf_data.get('molecular_framework', ''),
-            'Description': cf_data.get('description', ''),
+            'Direct_Parent': safe_get(cf_data, 'direct_parent', 'name'),
+            'Molecular_Framework': cf_data.get('molecular_framework', '') or '',
+            'Description': cf_data.get('description', '') or '',
 
             # ChEMONT ontology IDs
-            'ChEMONT_ID_Class': cf_data.get('class', {}).get('chemont_id', ''),
-            'ChEMONT_ID_Subclass': cf_data.get('subclass', {}).get('chemont_id', '')
+            'ChEMONT_ID_Class': safe_get(cf_data, 'class', 'chemont_id'),
+            'ChEMONT_ID_Subclass': safe_get(cf_data, 'subclass', 'chemont_id')
         }
     except Exception as e:
         logger.error(f"Error extracting ClassyFire fields: {str(e)}")

@@ -229,18 +229,17 @@ class SessionState:
         cls.set_view(VIEW_ANALYZE)
 
     @classmethod
-    def navigate_to_compound(cls, compound_name: str, entry_id: str = None) -> None:
+    def navigate_to_compound(cls, compound_name: str, entry_id: str = None, storage_path: str = None) -> None:
         """Navigate to compound details view.
 
         Args:
             compound_name: Display name of the compound
             entry_id: UUID entry_id for storage lookup (optional, for new storage format)
+            storage_path: Full Azure storage path from database (most reliable for fetching results)
         """
         cls.set('selected_compound', compound_name)
-        if entry_id:
-            cls.set('selected_compound_entry_id', entry_id)
-        else:
-            cls.set('selected_compound_entry_id', None)
+        cls.set('selected_compound_entry_id', entry_id)
+        cls.set('selected_compound_storage_path', storage_path)
         cls.set_view(VIEW_COMPOUND_DETAILS)
 
     # Job management helpers

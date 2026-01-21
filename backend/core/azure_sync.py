@@ -94,7 +94,8 @@ def _sanitize_compound_name(name: str) -> str:
     Sanitize compound name for filesystem and Azure storage.
 
     Internal function - use backend.core.sanitize_compound_name for external use.
-    Duplicated here to avoid circular imports.
+    Duplicated here to avoid circular imports (backend.core.__init__ imports from this file).
+    Must stay in sync with backend.core.sanitize_compound_name.
     """
     safe = name.replace(' ', '_').replace('/', '_').replace('\\', '_')
     safe = re.sub(r'[^a-zA-Z0-9\-_]', '_', safe)
@@ -242,121 +243,8 @@ def sync_db_to_azure() -> bool:
         return False
 
 
-def upload_result_to_azure(local_path: str, compound_name: str) -> bool:
-    """
-    Upload result ZIP file to Azure Blob storage with verification.
-
-    Args:
-        local_path: Path to the local ZIP file
-        compound_name: Name of the compound (used for blob name)
-
-    Returns:
-        True if upload successful and verified, or Azure not configured
-    """
-    if not is_azure_configured():
-        return True
-
-    # Sanitize compound name for blob path
-    safe_name = _sanitize_compound_name(compound_name)
-    blob_name = f"results/{safe_name}.zip"
-
-    blob = _get_blob_client(blob_name)
-    if blob is None:
-        return False
-
-    try:
-        # Get local file size for verification
-        local_path_obj = Path(local_path)
-        if not local_path_obj.exists():
-            logger.error(f"Local file not found: {local_path}")
-            return False
-
-        local_size = local_path_obj.stat().st_size
-
-        # Upload the file
-        with open(local_path, "rb") as f:
-            blob.upload_blob(f, overwrite=True)
-
-        # Verify upload by checking blob properties
-        blob_properties = blob.get_blob_properties()
-        uploaded_size = blob_properties.size
-
-        if uploaded_size != local_size:
-            logger.error(
-                f"Upload verification failed for {compound_name}: "
-                f"local size={local_size}, uploaded size={uploaded_size}"
-            )
-            return False
-
-        logger.info(f"Uploaded and verified {compound_name}.zip to Azure ({blob_name}, {uploaded_size} bytes)")
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to upload result to Azure: {e}")
-        return False
-
-
-def download_result_from_azure(compound_name: str, local_path: str) -> bool:
-    """
-    Download result ZIP file from Azure Blob storage.
-
-    Args:
-        compound_name: Name of the compound
-        local_path: Where to save the downloaded file
-
-    Returns:
-        True if download successful
-    """
-    if not is_azure_configured():
-        return False
-
-    safe_name = _sanitize_compound_name(compound_name)
-    blob_name = f"results/{safe_name}.zip"
-
-    blob = _get_blob_client(blob_name)
-    if blob is None:
-        return False
-
-    try:
-        # Security: Validate path to prevent path traversal attacks
-        resolved_path = Path(local_path).resolve()
-        allowed_dirs = [
-            Path(settings.RESULTS_DIR).resolve(),
-            Path(settings.DATA_DIR).resolve(),
-            Path("/tmp").resolve() if not os.name == 'nt' else Path(os.environ.get('TEMP', 'C:\\Temp')).resolve(),
-        ]
-
-        path_is_safe = any(
-            str(resolved_path).startswith(str(allowed_dir))
-            for allowed_dir in allowed_dirs
-        )
-
-        if not path_is_safe:
-            logger.error(f"Path traversal attempt blocked: {local_path}")
-            # Audit log for security monitoring
-            try:
-                from backend.core.audit import log_path_traversal_blocked
-                log_path_traversal_blocked(local_path)
-            except ImportError:
-                pass  # Audit module may not be available during startup
-            return False
-
-        if not blob.exists():
-            logger.warning(f"Result {blob_name} not found in Azure")
-            return False
-
-        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-
-        with open(local_path, "wb") as f:
-            download_stream = blob.download_blob()
-            f.write(download_stream.readall())
-
-        logger.info(f"Downloaded {compound_name}.zip from Azure")
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to download result from Azure: {e}")
-        return False
+# Legacy upload/download functions removed - use upload_result_to_azure_by_entry_id
+# and download_result_from_azure_by_entry_id instead
 
 
 def _is_uuid_path(blob_name: str) -> bool:
@@ -399,12 +287,10 @@ def _extract_entry_id_from_blob(blob_name: str) -> Optional[str]:
 
 def list_results_in_azure() -> list:
     """
-    List all result files in Azure Blob storage.
+    List all result entry_ids in Azure Blob storage (UUID-based only).
 
     Returns:
-        List of compound names for name-based paths (legacy format).
-        Note: UUID-based paths are NOT included as they don't contain compound names.
-        Use list_results_in_azure_detailed() for full information.
+        List of entry_ids (UUIDs) for stored results
     """
     if not is_azure_configured():
         return []
@@ -417,17 +303,10 @@ def list_results_in_azure() -> list:
         blobs = container.list_blobs(name_starts_with="results/")
         results = []
         for blob in blobs:
-            # Skip UUID-based paths (they don't contain compound name info)
             if _is_uuid_path(blob.name):
-                continue
-
-            # Extract compound name from legacy path: results/compound_name.zip
-            name = blob.name.replace("results/", "").replace(".zip", "")
-            # Skip if name contains "/" (corrupted or unexpected format)
-            if "/" in name:
-                logger.warning(f"Skipping blob with unexpected path format: {blob.name}")
-                continue
-            results.append(name)
+                entry_id = _extract_entry_id_from_blob(blob.name)
+                if entry_id:
+                    results.append(entry_id)
         return results
 
     except Exception as e:
@@ -435,181 +314,9 @@ def list_results_in_azure() -> list:
         return []
 
 
-def list_results_in_azure_detailed() -> dict:
-    """
-    List all result files in Azure Blob storage with detailed info.
-
-    Returns:
-        Dict with:
-        - 'uuid_based': List of entry_ids (UUIDs) for new storage format
-        - 'name_based': List of compound names for legacy storage format
-    """
-    if not is_azure_configured():
-        return {'uuid_based': [], 'name_based': []}
-
-    container = _get_container_client()
-    if container is None:
-        return {'uuid_based': [], 'name_based': []}
-
-    try:
-        blobs = container.list_blobs(name_starts_with="results/")
-        uuid_based = []
-        name_based = []
-
-        for blob in blobs:
-            if _is_uuid_path(blob.name):
-                entry_id = _extract_entry_id_from_blob(blob.name)
-                if entry_id:
-                    uuid_based.append(entry_id)
-            else:
-                # Legacy name-based path
-                name = blob.name.replace("results/", "").replace(".zip", "")
-                if "/" not in name:  # Skip corrupted paths
-                    name_based.append(name)
-
-        return {'uuid_based': uuid_based, 'name_based': name_based}
-
-    except Exception as e:
-        logger.error(f"Failed to list results from Azure: {e}")
-        return {'uuid_based': [], 'name_based': []}
-
-
-def delete_result_from_azure(compound_name: str) -> bool:
-    """
-    Delete a result ZIP file from Azure Blob storage.
-
-    Args:
-        compound_name: Name of the compound to delete
-
-    Returns:
-        True if deletion successful
-    """
-    if not is_azure_configured():
-        return True
-
-    safe_name = _sanitize_compound_name(compound_name)
-    blob_name = f"results/{safe_name}.zip"
-
-    blob = _get_blob_client(blob_name)
-    if blob is None:
-        return False
-
-    try:
-        if blob.exists():
-            blob.delete_blob()
-            logger.info(f"Deleted {compound_name}.zip from Azure")
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to delete result from Azure: {e}")
-        return False
-
-
-def sync_compound_table_from_azure() -> int:
-    """
-    Sync local Compound table with Azure Blob storage.
-
-    IMPORTANT: This function only syncs LEGACY name-based results (results/name.zip).
-    UUID-based results (results/xx/uuid.zip) are NOT synced because:
-    - They don't contain compound name information
-    - The database is the authoritative source for compound metadata
-    - UUID-based paths require the database to have the entry_id -> compound_name mapping
-
-    For UUID-based storage, the database MUST be present. If it's lost:
-    - The database is the source of truth and should be restored from Azure backup
-    - Result ZIPs can be downloaded by entry_id but compound names come from DB
-
-    Uses batch processing for efficiency:
-    - Fetches all existing compounds in a single query
-    - Batch inserts new compounds in groups of 100
-    - Commits per batch to avoid large transactions
-
-    Returns:
-        Number of compound entries added (only from legacy name-based paths)
-    """
-    if not is_azure_configured():
-        return 0
-
-    # Get detailed list separating UUID-based from name-based paths
-    azure_results = list_results_in_azure_detailed()
-    legacy_compounds = azure_results.get('name_based', [])
-    uuid_compounds = azure_results.get('uuid_based', [])
-
-    if uuid_compounds:
-        logger.info(f"Found {len(uuid_compounds)} UUID-based results in Azure (not synced - DB is source of truth)")
-
-    if not legacy_compounds:
-        logger.info("No legacy name-based results to sync from Azure")
-        return 0
-
-    added_count = 0
-    BATCH_SIZE = 100
-
-    try:
-        # Import here to avoid circular imports
-        from backend.core.database import get_db_session
-        from backend.models.database import Compound
-
-        with get_db_session() as db:
-            # Batch query: get all existing compound names in one query
-            existing_compounds = db.query(Compound.compound_name).all()
-            existing_names = {row[0] for row in existing_compounds}
-
-            # Find compounds that need to be added (only legacy name-based)
-            new_compounds = [name for name in legacy_compounds if name not in existing_names]
-
-            if not new_compounds:
-                logger.info("Compound table already in sync with Azure (legacy paths)")
-                return 0
-
-            # Batch insert new compounds
-            for i in range(0, len(new_compounds), BATCH_SIZE):
-                batch = new_compounds[i:i + BATCH_SIZE]
-                for compound_name in batch:
-                    compound = Compound(
-                        compound_name=compound_name,
-                        storage_path=f"results/{_sanitize_compound_name(compound_name)}.zip",
-                    )
-                    db.add(compound)
-                    added_count += 1
-
-                # Commit after each batch
-                db.commit()
-                logger.info(f"Synced batch {i // BATCH_SIZE + 1}: {len(batch)} compounds (legacy)")
-
-            logger.info(f"Synced {added_count} compound entries from Azure (legacy name-based only)")
-
-    except Exception as e:
-        logger.error(f"Failed to sync compound table from Azure: {e}")
-
-    return added_count
-
-
-def check_result_exists_in_azure(compound_name: str) -> bool:
-    """
-    Check if a compound result exists in Azure Blob storage.
-
-    Args:
-        compound_name: Name of the compound
-
-    Returns:
-        True if result exists in Azure
-    """
-    if not is_azure_configured():
-        return False
-
-    safe_name = _sanitize_compound_name(compound_name)
-    blob_name = f"results/{safe_name}.zip"
-
-    blob = _get_blob_client(blob_name)
-    if blob is None:
-        return False
-
-    try:
-        return blob.exists()
-    except Exception as e:
-        logger.error(f"Failed to check if result exists in Azure: {e}")
-        return False
+# Legacy delete_result_from_azure and sync_compound_table_from_azure removed
+# - Use delete_result_from_azure_by_entry_id instead
+# - Database is the source of truth, no legacy sync needed
 
 
 def sync_logs_to_azure() -> bool:

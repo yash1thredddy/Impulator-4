@@ -4,6 +4,9 @@ Backfill script to populate Compound table from ZIP files.
 This script reads the summary.json from each compound's ZIP file
 and updates the Compound table with the missing data.
 
+NOTE: This script uses UUID-based storage paths (entry_id).
+Legacy name-based paths are no longer supported.
+
 Usage:
     python -m backend.scripts.backfill_compounds
 """
@@ -22,8 +25,7 @@ if PROJECT_ROOT not in sys.path:
 
 from backend.config import settings
 from backend.core.database import SessionLocal
-from backend.core.azure_sync import download_result_from_azure, is_azure_configured
-from backend.core import sanitize_compound_name
+from backend.core.azure_sync import download_result_from_azure_by_entry_id, is_azure_configured
 from backend.models.database import Compound
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -51,28 +53,36 @@ def backfill_compound(db, compound: Compound) -> bool:
     """
     Backfill a single compound's data from its ZIP file.
 
+    Uses entry_id (UUID) to locate the ZIP file.
+
     Returns True if updated, False otherwise.
     """
     compound_name = compound.compound_name
-    safe_name = sanitize_compound_name(compound_name)
-    logger.info(f"Processing: {compound_name} (safe: {safe_name})")
+    entry_id = compound.entry_id
 
-    # Try local file first (use sanitized name)
-    local_path = Path(settings.RESULTS_DIR) / f"{safe_name}.zip"
+    if not entry_id:
+        logger.warning(f"No entry_id for {compound_name}, skipping")
+        return False
+
+    logger.info(f"Processing: {compound_name} (entry_id: {entry_id})")
+
+    # UUID-based local path: results/{prefix}/{entry_id}.zip
+    prefix = entry_id[:2].lower()
+    local_path = Path(settings.RESULTS_DIR) / prefix / f"{entry_id}.zip"
 
     # If not local, try to download from Azure
     if not local_path.exists() and is_azure_configured():
         with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp:
             tmp_path = tmp.name
 
-        if download_result_from_azure(compound_name, tmp_path):
+        if download_result_from_azure_by_entry_id(entry_id, tmp_path):
             local_path = Path(tmp_path)
         else:
-            logger.warning(f"Could not download {compound_name} from Azure")
+            logger.warning(f"Could not download {entry_id} from Azure")
             return False
 
     if not local_path.exists():
-        logger.warning(f"ZIP file not found for {compound_name}")
+        logger.warning(f"ZIP file not found for {compound_name} (entry_id: {entry_id})")
         return False
 
     # Extract summary
@@ -138,9 +148,9 @@ def main():
     db = SessionLocal()
 
     try:
-        # Get all compounds
-        compounds = db.query(Compound).all()
-        logger.info(f"Found {len(compounds)} compounds to process")
+        # Get all compounds with entry_id (UUID-based storage)
+        compounds = db.query(Compound).filter(Compound.entry_id.isnot(None)).all()
+        logger.info(f"Found {len(compounds)} compounds with entry_id to process")
 
         updated_count = 0
         error_count = 0

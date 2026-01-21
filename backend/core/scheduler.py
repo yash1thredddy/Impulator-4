@@ -148,9 +148,28 @@ class JobScheduler:
                     job.current_step = "Starting..."
                     db.commit()
 
-                    # Parse input params
-                    params = json.loads(job.input_params) if job.input_params else {}
+                    # Parse input params with validation
                     job_id = job.id
+                    try:
+                        params = json.loads(job.input_params) if job.input_params else {}
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Job {job_id} has malformed input_params: {e}")
+                        job.status = JobStatus.FAILED
+                        job.error_message = "Invalid input parameters (malformed JSON)"
+                        job.completed_at = datetime.now(timezone.utc)
+                        db.commit()
+                        continue
+
+                    # Validate required parameters
+                    compound_name = params.get('compound_name')
+                    smiles = params.get('smiles')
+                    if not compound_name or not smiles:
+                        logger.error(f"Job {job_id} missing required params: compound_name={compound_name}, smiles={bool(smiles)}")
+                        job.status = JobStatus.FAILED
+                        job.error_message = "Missing required parameters (compound_name or smiles)"
+                        job.completed_at = datetime.now(timezone.utc)
+                        db.commit()
+                        continue
 
                 # Import here to avoid circular imports
                 from backend.services.compound_service import process_compound_job
@@ -158,8 +177,8 @@ class JobScheduler:
                 job_executor.submit(
                     job_id,
                     process_compound_job,
-                    compound_name=params['compound_name'],
-                    smiles=params['smiles'],
+                    compound_name=compound_name,
+                    smiles=smiles,
                     similarity_threshold=params.get('similarity_threshold', 90),
                     activity_types=params.get('activity_types', []),
                 )

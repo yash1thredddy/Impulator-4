@@ -106,6 +106,11 @@ class Compound(Base):
     imp_candidates = Column(Integer, default=0)
     avg_oqpla_score = Column(Float, nullable=True)
 
+    # Additional summary fields (for home page display without ZIP download)
+    similarity_threshold = Column(Integer, default=90)  # Similarity threshold % used for search
+    qed = Column(Float, nullable=True)  # Average QED score
+    num_outliers = Column(Integer, default=0)  # Number of outliers detected
+
     # Storage location
     storage_path = Column(String(500), nullable=True)
 
@@ -127,6 +132,9 @@ class Compound(Base):
             "total_activities": self.total_activities,
             "imp_candidates": self.imp_candidates,
             "avg_oqpla_score": self.avg_oqpla_score,
+            "similarity_threshold": self.similarity_threshold,
+            "qed": self.qed,
+            "num_outliers": self.num_outliers,
             "storage_path": self.storage_path,
             "processed_at": self.processed_at.isoformat() if self.processed_at else None,
         }

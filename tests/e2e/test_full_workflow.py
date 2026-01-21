@@ -43,10 +43,9 @@ def mock_azure():
     """Mock Azure storage for tests."""
     with patch('backend.core.azure_sync.is_azure_configured', return_value=False):
         with patch('backend.core.azure_sync.sync_db_to_azure', return_value=True):
-            with patch('backend.core.azure_sync.delete_result_from_azure', return_value=True):
-                with patch('backend.core.azure_sync.delete_result_from_azure_by_entry_id', return_value=True):
-                    with patch('backend.core.azure_sync.upload_result_to_azure_by_entry_id', return_value=True):
-                        yield
+            with patch('backend.core.azure_sync.delete_result_from_azure_by_entry_id', return_value=True):
+                with patch('backend.core.azure_sync.upload_result_to_azure_by_entry_id', return_value=True):
+                    yield
 
 
 @pytest.fixture

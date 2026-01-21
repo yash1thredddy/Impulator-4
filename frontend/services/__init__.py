@@ -18,6 +18,10 @@ from frontend.services.azure_storage import (
     get_cache_stats,
     delete_from_cache,
     clear_cache as clear_azure_cache,
+    # Smart loaders that use storage_path first
+    smart_download_result,
+    smart_load_summary,
+    smart_load_dataframe,
 )
 
 __all__ = [
@@ -39,4 +43,8 @@ __all__ = [
     "get_cache_stats",
     "delete_from_cache",
     "clear_azure_cache",
+    # Smart loaders that use storage_path first
+    "smart_download_result",
+    "smart_load_summary",
+    "smart_load_dataframe",
 ]

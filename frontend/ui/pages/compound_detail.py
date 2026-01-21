@@ -21,6 +21,8 @@ from frontend.services import (
     load_result_dataframe,
     get_cached_result,
     get_result_files,
+    smart_load_summary,
+    smart_load_dataframe,
 )
 from frontend.utils import SessionState, sanitize_compound_name
 from frontend.ui.components import render_2d_structure, embed_structure_viewer, render_structure_viewer_hint
@@ -33,6 +35,7 @@ def render_compound_detail_page() -> None:
     """Render the compound detail page."""
     compound_name = SessionState.get('selected_compound')
     entry_id = SessionState.get('selected_compound_entry_id')
+    storage_path = SessionState.get('selected_compound_storage_path')
 
     if not compound_name:
         st.error("No compound selected")
@@ -59,8 +62,12 @@ def render_compound_detail_page() -> None:
         _show_delete_confirmation(compound_name, entry_id)
         return
 
-    # Load data using entry_id if available (UUID-based storage), otherwise compound_name
-    data = _load_compound_data(entry_id or compound_name)
+    # Load data using storage_path (most reliable), fallback to entry_id, then compound_name
+    data = _load_compound_data(
+        compound_name=compound_name,
+        entry_id=entry_id,
+        storage_path=storage_path
+    )
     if data is None:
         st.error(f"Could not load data for '{compound_name}'")
         return
@@ -124,6 +131,8 @@ def _render_overview_tab(data: Dict[str, Any]) -> None:
     df = data.get('results')
     summary = data.get('summary', {})
     compound_name = data.get('compound_name', '')
+    entry_id = data.get('entry_id')
+    storage_path = data.get('storage_path')
 
     # Sub-tabs for overview sections
     sub_tabs = st.tabs([
@@ -157,7 +166,7 @@ def _render_overview_tab(data: Dict[str, Any]) -> None:
 
     # PDB Evidence
     with sub_tabs[4]:
-        _render_pdb_evidence(compound_name, df)
+        _render_pdb_evidence(compound_name, df, entry_id=entry_id, storage_path=storage_path)
 
     # PAINS/Assay Interference (separated)
     with sub_tabs[5]:
@@ -206,7 +215,9 @@ def _render_compound_info(data: Dict[str, Any], df: pd.DataFrame, summary: Dict)
 
         with info_cols[0]:
             st.markdown("**Query SMILES**")
-            st.code(data.get('smiles', 'N/A')[:60] + "..." if len(data.get('smiles', '')) > 60 else data.get('smiles', 'N/A'), language=None)
+            # Show full SMILES (scrollable code block) - don't truncate for copy-ability
+            smiles_value = data.get('smiles', '')
+            st.code(smiles_value if smiles_value else 'N/A', language=None)
 
             # Calculate and display InChI and InChIKey from SMILES
             smiles = data.get('smiles', '')
@@ -1830,7 +1841,12 @@ def _render_molecule_viewer(df: pd.DataFrame) -> None:
                 st.error(f"Error: {e}")
 
 
-def _render_pdb_evidence(compound_name: str, df: pd.DataFrame) -> None:
+def _render_pdb_evidence(
+    compound_name: str,
+    df: pd.DataFrame,
+    entry_id: str = None,
+    storage_path: str = None
+) -> None:
     """PDB structural evidence from DataFrame columns."""
     if df is None:
         st.info("No data available")
@@ -1909,9 +1925,13 @@ def _render_pdb_evidence(compound_name: str, df: pd.DataFrame) -> None:
     pdb_summary_df = None
     try:
         safe_name = sanitize_compound_name(compound_name)
-        # Try different possible filenames for PDB summary
+        # Try different possible filenames for PDB summary using smart loader
         for filename in ["pdb_summary.csv", f"{safe_name}_pdb_summary.csv", f"{safe_name}_pdb_details.csv"]:
-            pdb_summary_df = load_result_dataframe(compound_name, filename)
+            pdb_summary_df = smart_load_dataframe(
+                filename,
+                entry_id=entry_id,
+                storage_path=storage_path
+            )
             if pdb_summary_df is not None and not pdb_summary_df.empty:
                 break
     except Exception:
@@ -2374,42 +2394,61 @@ def _render_drug_indications(data: Dict[str, Any]) -> None:
         st.plotly_chart(fig, width='stretch')
 
 
-def _load_compound_data(identifier: str) -> Optional[Dict[str, Any]]:
+def _load_compound_data(
+    compound_name: str = None,
+    entry_id: str = None,
+    storage_path: str = None
+) -> Optional[Dict[str, Any]]:
     """Load compound data from storage.
 
+    Uses smart loaders that prioritize storage_path (from database), then entry_id.
+    Only UUID-based storage paths are supported.
+
     Args:
-        identifier: Either entry_id (UUID) for new storage or compound_name for legacy
+        compound_name: Display name of the compound (for logging only)
+        entry_id: UUID entry_id for storage lookup
+        storage_path: Full Azure storage path from database (most reliable)
     """
     try:
-        summary = get_cached_result(identifier)
+        # Use smart loader with storage_path from database (UUID-based)
+        summary = smart_load_summary(
+            entry_id=entry_id,
+            storage_path=storage_path
+        )
         if summary is None:
+            logger.warning(f"Could not load summary for {compound_name} (entry_id={entry_id}, storage_path={storage_path})")
             return None
 
-        # Load results DataFrame
-        df = load_result_dataframe(identifier, "similar_compounds.csv")
+        # Load results DataFrame using smart loader
+        df = smart_load_dataframe(
+            "similar_compounds.csv",
+            entry_id=entry_id,
+            storage_path=storage_path
+        )
 
         if df is None:
-            # Try legacy filename format
-            safe_name = sanitize_compound_name(identifier)
-            df = load_result_dataframe(identifier, f"{safe_name}_complete_results.csv")
-
-        if df is None:
-            files = get_result_files(identifier)
-            for f in files:
-                if f.endswith('.csv') and 'pdb' not in f.lower() and 'indication' not in f.lower():
-                    df = load_result_dataframe(identifier, f)
-                    if df is not None:
-                        break
+            # Try alternate filename format
+            safe_name = sanitize_compound_name(compound_name or entry_id or "unknown")
+            df = smart_load_dataframe(
+                f"{safe_name}_complete_results.csv",
+                entry_id=entry_id,
+                storage_path=storage_path
+            )
 
         # Load drug indications (separate file)
-        indications_df = load_result_dataframe(identifier, "drug_indications.csv")
+        indications_df = smart_load_dataframe(
+            "drug_indications.csv",
+            entry_id=entry_id,
+            storage_path=storage_path
+        )
 
         # Get display name from summary (compound_name is in summary.json)
-        display_name = summary.get('compound_name', identifier)
+        display_name = summary.get('compound_name', compound_name or entry_id)
 
         return {
             'compound_name': display_name,
-            'entry_id': summary.get('entry_id', identifier),
+            'entry_id': summary.get('entry_id', entry_id),
+            'storage_path': storage_path,
             'smiles': summary.get('smiles', summary.get('query_smiles', '')),
             'similar_count': summary.get('similar_count', summary.get('total_compounds', 0)),
             'has_imp_warning': summary.get('has_imp_candidates', False),
@@ -2451,8 +2490,7 @@ def _show_delete_confirmation(compound_name: str, entry_id: Optional[str] = None
                 result = api_client.delete_compound(entry_id)
 
                 if result.success:
-                    # Also clear frontend caches
-                    delete_from_cache(compound_name)
+                    # Also clear frontend cache (uses entry_id UUID)
                     if entry_id:
                         delete_from_cache(entry_id)
 

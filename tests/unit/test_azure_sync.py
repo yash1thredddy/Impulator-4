@@ -37,12 +37,13 @@ class TestAzureSync:
         assert isinstance(result, bool)
 
     def test_upload_result_graceful(self):
-        """Test upload_result_to_azure works gracefully."""
-        from backend.core.azure_sync import upload_result_to_azure
+        """Test upload_result_to_azure_by_entry_id works gracefully."""
+        from backend.core.azure_sync import upload_result_to_azure_by_entry_id
         from backend.core.azure_sync import is_azure_configured
 
-        # Should not raise
-        result = upload_result_to_azure("/nonexistent/path.zip", "TestCompound")
+        # Should not raise - test with a fake UUID
+        test_entry_id = "12345678-1234-1234-1234-123456789012"
+        result = upload_result_to_azure_by_entry_id("/nonexistent/path.zip", test_entry_id)
         # Returns True if Azure not configured, False if Azure configured but file doesn't exist
         if is_azure_configured():
             assert result is False  # File doesn't exist

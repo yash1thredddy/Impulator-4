@@ -59,15 +59,14 @@ def __getattr__(name):
 from backend.core.azure_sync import (
     download_db_from_azure,
     sync_db_to_azure,
-    upload_result_to_azure,
+    # UUID-based storage functions (only storage method supported)
     upload_result_to_azure_by_entry_id,
     download_result_from_azure_by_entry_id,
     delete_result_from_azure_by_entry_id,
     check_result_exists_in_azure_by_entry_id,
-    is_azure_configured,
-    check_result_exists_in_azure,
-    sync_compound_table_from_azure,
     get_storage_path_from_entry_id,
+    list_results_in_azure,
+    is_azure_configured,
 )
 
 
@@ -142,19 +141,17 @@ __all__ = [
     "job_scheduler",
     "JobScheduler",
     "get_job_scheduler",
-    # Azure (name-based - legacy)
+    # Azure (database sync)
     "download_db_from_azure",
     "sync_db_to_azure",
-    "upload_result_to_azure",
     "is_azure_configured",
-    "check_result_exists_in_azure",
-    "sync_compound_table_from_azure",
-    # Azure (UUID-based - new)
+    # Azure (UUID-based storage - only storage method supported)
     "upload_result_to_azure_by_entry_id",
     "download_result_from_azure_by_entry_id",
     "delete_result_from_azure_by_entry_id",
     "check_result_exists_in_azure_by_entry_id",
     "get_storage_path_from_entry_id",
+    "list_results_in_azure",
     # Utilities
     "sanitize_compound_name",
 ]

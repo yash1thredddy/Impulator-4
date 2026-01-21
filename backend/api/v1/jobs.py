@@ -24,7 +24,6 @@ from sqlalchemy.exc import IntegrityError
 from backend.core.database import get_db
 from backend.core.executor import job_executor
 from backend.core.scheduler import job_scheduler
-from backend.core import sanitize_compound_name
 from backend.core.auth import validate_session_id, truncate_session_id
 from backend.models.database import JobStatus, JobType
 from backend.models.schemas import (
@@ -49,7 +48,7 @@ from backend.models.schemas import (
 )
 from backend.services.job_service import job_service, generate_inchikey, generate_canonical_smiles
 from backend.models.database import Compound, DeletedCompound
-from backend.core.azure_sync import delete_result_from_azure, delete_result_from_azure_by_entry_id
+from backend.core.azure_sync import delete_result_from_azure_by_entry_id
 from backend.core.audit import (
     log_rate_limit_exceeded,
     log_job_cancelled,
@@ -173,10 +172,11 @@ def _job_to_response(job) -> JobResponse:
     if job.input_params:
         try:
             params = json.loads(job.input_params)
-            data["compound_name"] = params.get("compound_name")
-            data["smiles"] = params.get("smiles")
+            data["compound_name"] = params.get("compound_name", "Unknown")
+            data["smiles"] = params.get("smiles", "")
         except (json.JSONDecodeError, TypeError):
-            pass
+            data["compound_name"] = "Unknown"
+            data["smiles"] = ""
 
     return JobResponse(**data)
 
@@ -383,21 +383,20 @@ async def resolve_duplicate(
                 old_name = existing.compound_name
                 old_entry_id = existing.entry_id
 
-                # Delete from Azure - try both UUID-based and name-based paths
-                # (compound may be stored with either depending on when it was processed)
+                # Delete from Azure (UUID-based storage only)
                 if old_entry_id:
                     delete_result_from_azure_by_entry_id(old_entry_id)
-                delete_result_from_azure(old_name)
 
-                # Delete local ZIP if exists (check both UUID-based and name-based paths)
-                safe_name = sanitize_compound_name(old_name)
-                local_zip = settings.RESULTS_DIR / f"{safe_name}.zip"
-                if local_zip.exists():
-                    try:
-                        local_zip.unlink()
-                        logger.info(f"Deleted local result for replacement: {local_zip}")
-                    except Exception as e:
-                        logger.warning(f"Failed to delete local result: {e}")
+                # Delete local ZIP if exists (UUID-based path)
+                if old_entry_id:
+                    prefix = old_entry_id[:2].lower()
+                    local_zip = settings.RESULTS_DIR / prefix / f"{old_entry_id}.zip"
+                    if local_zip.exists():
+                        try:
+                            local_zip.unlink()
+                            logger.info(f"Deleted local result for replacement: {local_zip}")
+                        except Exception as e:
+                            logger.warning(f"Failed to delete local result: {e}")
 
                 # Delete from database
                 db.delete(existing)
@@ -661,20 +660,19 @@ async def create_batch_job(
             if existing:
                 old_entry_id = existing.entry_id
 
-                # Delete from Azure - try both UUID-based and name-based paths
+                # Delete from Azure (UUID-based storage only)
                 if old_entry_id:
                     delete_result_from_azure_by_entry_id(old_entry_id)
-                delete_result_from_azure(compound_name)
 
-                # Delete local ZIP if exists
-                safe_name = sanitize_compound_name(compound_name)
-                local_zip = settings.RESULTS_DIR / f"{safe_name}.zip"
-                if local_zip.exists():
-                    try:
-                        local_zip.unlink()
-                        logger.debug(f"Deleted local result for batch replace: {local_zip}")
-                    except Exception as e:
-                        logger.warning(f"Failed to delete local result: {e}")
+                    # Delete local ZIP if exists (UUID-based path)
+                    prefix = old_entry_id[:2].lower()
+                    local_zip = settings.RESULTS_DIR / prefix / f"{old_entry_id}.zip"
+                    if local_zip.exists():
+                        try:
+                            local_zip.unlink()
+                            logger.debug(f"Deleted local result for batch replace: {local_zip}")
+                        except Exception as e:
+                            logger.warning(f"Failed to delete local result: {e}")
 
                 # Delete from database
                 db.delete(existing)
@@ -978,9 +976,6 @@ async def delete_job(
 
     # Clean up result files
     if compound_name:
-        # Sanitize name (consistent with compound_service)
-        safe_name = sanitize_compound_name(compound_name)
-
         # Try to find the compound entry - check job's result_summary for entry_id first
         entry_id = None
         if job.result_summary:
@@ -1000,30 +995,18 @@ async def delete_job(
             if compound_entry:
                 entry_id = compound_entry.entry_id
 
-        # Delete from Azure - try both UUID-based and name-based paths
+        # Delete from Azure (UUID-based storage only)
         if entry_id:
             azure_deleted = delete_result_from_azure_by_entry_id(entry_id)
             if azure_deleted:
-                logger.info(f"Deleted UUID-based result from Azure: {entry_id}")
+                logger.info(f"Deleted result from Azure: {entry_id}")
             else:
-                logger.warning(f"Failed to delete UUID-based result from Azure: {entry_id}")
-        name_deleted = delete_result_from_azure(compound_name)
-        if name_deleted:
-            logger.debug(f"Deleted name-based result from Azure: {compound_name}")
+                logger.warning(f"Failed to delete result from Azure: {entry_id}")
 
-        # Delete local ZIP if exists - try both UUID-based and name-based filenames
-        # New format: {prefix}/{entry_id}.zip, Legacy format: {safe_name}.zip
-        local_files_to_delete = []
+        # Delete local ZIP if exists (UUID-based path only)
         if entry_id:
-            # UUID-based path: results/{prefix}/{entry_id}.zip
             prefix = entry_id[:2].lower()
-            local_files_to_delete.append(settings.RESULTS_DIR / prefix / f"{entry_id}.zip")
-            # Also check root for older files that might not have been moved
-            local_files_to_delete.append(settings.RESULTS_DIR / f"{entry_id}.zip")
-        # Legacy name-based path
-        local_files_to_delete.append(settings.RESULTS_DIR / f"{safe_name}.zip")
-
-        for local_zip in local_files_to_delete:
+            local_zip = settings.RESULTS_DIR / prefix / f"{entry_id}.zip"
             if local_zip.exists():
                 try:
                     local_zip.unlink()

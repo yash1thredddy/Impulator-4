@@ -183,6 +183,7 @@ def render_job_card(job: Dict[str, Any]) -> None:
     job_id = job.get('id', 'unknown')
     compound_name = job.get('compound_name', 'Unknown')
     entry_id = job.get('entry_id')  # UUID for storage lookup
+    storage_path = job.get('storage_path')  # Full Azure storage path
     status = job.get('status', 'pending')
     progress = job.get('progress', 0.0)
     current_step = job.get('current_step', '')
@@ -215,7 +216,7 @@ def render_job_card(job: Dict[str, Any]) -> None:
             # View button - marks job as viewed so it disappears from sidebar
             if st.button("View Results", key=f"view_{job_id}", type="primary", width='stretch'):
                 _mark_job_viewed(job_id)
-                SessionState.navigate_to_compound(compound_name, entry_id=entry_id)
+                SessionState.navigate_to_compound(compound_name, entry_id=entry_id, storage_path=storage_path)
                 st.rerun()
         elif status == 'failed':
             st.button(
@@ -223,7 +224,7 @@ def render_job_card(job: Dict[str, Any]) -> None:
                 key=f"delete_{job_id}",
                 width='stretch',
                 on_click=_on_delete_job,
-                args=(job_id, compound_name)
+                args=(job_id, entry_id)
             )
 
 
@@ -261,19 +262,23 @@ def _on_cancel_job(job_id: str) -> None:
         st.toast(f"Error: {e}", icon="")
 
 
-def _on_delete_job(job_id: str, compound_name: str = None) -> None:
+def _on_delete_job(job_id: str, entry_id: str = None) -> None:
     """Callback for delete button - runs within fragment context.
 
     Deletes job from backend (which cleans up Azure) and also
     clears the local frontend cache.
+
+    Args:
+        job_id: Job ID to delete
+        entry_id: UUID entry_id for local cache cleanup
     """
     client = get_api_client()
     try:
         response = client.delete_job(job_id)
         if response.success:
-            # Also clear from local frontend cache
-            if compound_name:
-                delete_from_cache(compound_name)
+            # Also clear from local frontend cache (uses entry_id UUID)
+            if entry_id:
+                delete_from_cache(entry_id)
             st.toast("Job and results deleted")
         else:
             st.toast(f"Failed: {response.error}", icon="")
