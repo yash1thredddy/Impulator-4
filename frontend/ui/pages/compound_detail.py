@@ -2216,8 +2216,17 @@ def _render_data_tab(data: Dict[str, Any]) -> None:
     st.markdown("---")
 
     if view == "Core Analysis":
-        cols = ['ChEMBL_ID', 'Molecule_Name', 'Activity_Type', 'Activity_nM', 'pActivity',
-                'Target_Name', 'SEI', 'BEI', 'NSEI', 'NBEI', 'QED']
+        # Include SMILES for structure data in CSV downloads
+        # Columns: Identifiers, Activity, Target, Efficiency Metrics, Properties
+        cols = [
+            'ChEMBL_ID', 'Molecule_Name', 'SMILES',
+            'Activity_Type', 'Activity_nM', 'pActivity',
+            'Target_ChEMBL_ID', 'Target_Name',
+            'SEI', 'BEI', 'NSEI', 'NBEI',
+            'Molecular_Weight', 'LogP', 'TPSA', 'QED',
+            'HBA', 'HBD', 'Heavy_Atoms',
+            'PSAoMW', '10xPSA_MW', 'NPOLoNHA'
+        ]
         cols = [c for c in cols if c in df.columns]
         display_df = df[cols]
         st.dataframe(display_df, width='stretch', height=450, hide_index=True)
@@ -2231,7 +2240,8 @@ def _render_data_tab(data: Dict[str, Any]) -> None:
         )
 
     elif view == "Interpretation":
-        cols = ['ChEMBL_ID', 'Molecule_Name', 'OQPLA_Final_Score', 'OQPLA_Classification',
+        # Include SMILES for structure data in CSV downloads
+        cols = ['ChEMBL_ID', 'Molecule_Name', 'SMILES', 'OQPLA_Final_Score', 'OQPLA_Classification',
                 'Is_IMP_Candidate', 'IMP_Confidence', 'PDB_Score', 'Efficiency_Score']
         cols = [c for c in cols if c in df.columns]
 
