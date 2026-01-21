@@ -909,7 +909,7 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
                 x=color_by,
                 y=metric_choice,
                 color=color_by,
-                points='outliers',
+                points='all',  # Show all points for structure viewer clicks
                 hover_data=['ChEMBL_ID', 'Molecule_Name'] if all(c in plot_df.columns for c in ['ChEMBL_ID', 'Molecule_Name']) else None,
                 custom_data=customdata_cols
             )
@@ -1401,7 +1401,7 @@ def _plot_activity_distribution(df: pd.DataFrame) -> None:
 
     fig = px.box(
         plot_df, x='Activity_Type', y='pActivity',
-        color='Activity_Type', points='outliers',
+        color='Activity_Type', points='all',  # Show all points for structure viewer clicks
         hover_data=['ChEMBL_ID', 'Molecule_Name'] if all(c in plot_df.columns for c in ['ChEMBL_ID', 'Molecule_Name']) else None,
         custom_data=customdata_cols if customdata_cols else None
     )
@@ -1779,7 +1779,7 @@ def _plot_custom(df: pd.DataFrame) -> None:
             fig = px.box(
                 plot_df, x=x_axis, y=y_axis,
                 color=color_by if color_by != "None" else None,
-                points="outliers",
+                points="all",  # Show all points for structure viewer clicks
                 custom_data=box_customdata
             )
 
@@ -1796,7 +1796,7 @@ def _plot_custom(df: pd.DataFrame) -> None:
             fig = px.violin(
                 plot_df, x=x_axis, y=y_axis,
                 color=color_by if color_by != "None" else None,
-                box=True, points="outliers",
+                box=True, points="all",  # Show all points for structure viewer clicks
                 custom_data=violin_customdata
             )
 

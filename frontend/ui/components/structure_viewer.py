@@ -402,21 +402,152 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                 }}
             }});
 
-            // Find Plotly chart
+            // Find Plotly chart by key or fallback to closest chart
             function findPlotlyChart() {{
-                const selectors = [
-                    '.js-plotly-plot',
-                    '.plotly-graph-div.js-plotly-plot',
-                    '[data-testid="stPlotlyChart"] .js-plotly-plot'
-                ];
-                
-                for (const selector of selectors) {{
-                    const elements = parentDoc.querySelectorAll(selector);
-                    if (elements.length > 0) {{
-                        return elements[elements.length - 1];
+                const chartKey = '{chart_id}';
+
+                // Strategy 1: Find the iframe that contains this script
+                // The viewer is embedded via components.html which creates an iframe
+                // We need to find the iframe in the parent document first
+                let ourIframe = null;
+                const iframes = parentDoc.querySelectorAll('iframe');
+                for (const iframe of iframes) {{
+                    try {{
+                        if (iframe.contentWindow === window) {{
+                            ourIframe = iframe;
+                            break;
+                        }}
+                    }} catch (e) {{
+                        // Cross-origin iframe, skip
                     }}
                 }}
-                
+
+                if (ourIframe) {{
+                    console.log('[Structure Viewer {chart_id}] Found our iframe');
+
+                    // Find all Plotly charts on the page
+                    const allCharts = Array.from(parentDoc.querySelectorAll('.js-plotly-plot'));
+                    if (allCharts.length === 0) {{
+                        console.log('[Structure Viewer {chart_id}] No Plotly charts found on page');
+                        return null;
+                    }}
+
+                    // Get the iframe's position in the document
+                    const iframeRect = ourIframe.getBoundingClientRect();
+
+                    // Find the chart that is closest ABOVE our iframe (by Y position)
+                    // This ensures we get the chart that was rendered just before this viewer
+                    let closestChart = null;
+                    let closestDistance = Infinity;
+
+                    for (const chart of allCharts) {{
+                        const chartRect = chart.getBoundingClientRect();
+                        // Check if this chart is above our iframe
+                        if (chartRect.bottom <= iframeRect.top + 50) {{  // 50px tolerance for margin/padding
+                            const distance = iframeRect.top - chartRect.bottom;
+                            if (distance < closestDistance) {{
+                                closestDistance = distance;
+                                closestChart = chart;
+                            }}
+                        }}
+                    }}
+
+                    if (closestChart) {{
+                        // Verify this chart has customdata (set up for structure viewing)
+                        const hasCustomData = closestChart._fullData &&
+                            closestChart._fullData[0] &&
+                            closestChart._fullData[0].customdata &&
+                            closestChart._fullData[0].customdata.length > 0;
+
+                        if (hasCustomData) {{
+                            console.log('[Structure Viewer {chart_id}] Found chart via position (distance: ' + closestDistance + 'px) with customdata');
+                            return closestChart;
+                        }} else {{
+                            console.log('[Structure Viewer {chart_id}] Chart found by position has no customdata, checking others...');
+                        }}
+                    }}
+
+                    // Fallback: Find via DOM tree walk
+                    let el = ourIframe.closest('.stHtml, [data-testid="stHtml"], .element-container, div');
+                    if (el) {{
+                        let sibling = el.previousElementSibling;
+                        while (sibling) {{
+                            const plotlyDiv = sibling.querySelector('.js-plotly-plot');
+                            if (plotlyDiv) {{
+                                console.log('[Structure Viewer {chart_id}] Found chart via sibling walk');
+                                return plotlyDiv;
+                            }}
+                            sibling = sibling.previousElementSibling;
+                        }}
+
+                        let parent = el.parentElement;
+                        while (parent && parent !== parentDoc.body) {{
+                            sibling = parent.previousElementSibling;
+                            while (sibling) {{
+                                const plotlyDiv = sibling.querySelector('.js-plotly-plot');
+                                if (plotlyDiv) {{
+                                    console.log('[Structure Viewer {chart_id}] Found chart via parent sibling walk');
+                                    return plotlyDiv;
+                                }}
+                                sibling = sibling.previousElementSibling;
+                            }}
+                            parent = parent.parentElement;
+                        }}
+                    }}
+                }}
+
+                // Strategy 2: Find by Streamlit widget key using data-testid
+                const chartContainers = parentDoc.querySelectorAll('[data-testid="stPlotlyChart"]');
+
+                for (const container of chartContainers) {{
+                    let el = container;
+                    let found = false;
+
+                    while (el && el !== parentDoc.body) {{
+                        const keyAttr = el.getAttribute('key');
+                        const dataKey = el.getAttribute('data-key');
+                        const id = el.getAttribute('id');
+
+                        if ((keyAttr && keyAttr.includes(chartKey)) ||
+                            (dataKey && dataKey.includes(chartKey)) ||
+                            (id && id.includes(chartKey))) {{
+                            found = true;
+                            break;
+                        }}
+                        el = el.parentElement;
+                    }}
+
+                    if (found) {{
+                        const plotlyDiv = container.querySelector('.js-plotly-plot');
+                        if (plotlyDiv) {{
+                            console.log('[Structure Viewer {chart_id}] Found chart by key:', chartKey);
+                            return plotlyDiv;
+                        }}
+                    }}
+                }}
+
+                // Strategy 3: Find charts without any viewer attached yet
+                const allPlotlyDivs = parentDoc.querySelectorAll('.js-plotly-plot');
+                for (const div of allPlotlyDivs) {{
+                    // Check if this chart doesn't have ANY structure viewer attached
+                    const hasAnyViewer = Object.keys(div).some(key => key.startsWith('_structureViewerAttached_'));
+                    if (!hasAnyViewer) {{
+                        // Check if it has customdata (indicating it was set up for structure viewing)
+                        if (div._fullData && div._fullData[0] && div._fullData[0].customdata) {{
+                            console.log('[Structure Viewer {chart_id}] Found unattached chart with customdata');
+                            return div;
+                        }}
+                    }}
+                }}
+
+                // Strategy 4: Last resort - use the last chart without our specific viewer
+                for (let i = allPlotlyDivs.length - 1; i >= 0; i--) {{
+                    if (!allPlotlyDivs[i]._structureViewerAttached_{chart_id}) {{
+                        console.warn('[Structure Viewer {chart_id}] Using last unattached chart as fallback');
+                        return allPlotlyDivs[i];
+                    }}
+                }}
+
                 // Fallback: find by _fullLayout property
                 const allDivs = parentDoc.querySelectorAll('div');
                 for (let div of allDivs) {{
@@ -424,7 +555,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                         return div;
                     }}
                 }}
-                
+
                 return null;
             }}
             
