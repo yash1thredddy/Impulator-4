@@ -1,8 +1,8 @@
-FROM python:3.10-slim
+FROM python:3.13-slim
 
 WORKDIR /app
 
-# Install system dependencies for RDKit, visualization libraries, and curl for healthcheck
+# Install system dependencies for RDKit, scipy/statsmodels, visualization libraries, and curl for healthcheck
 RUN apt-get update && apt-get install -y \
     build-essential \
     libxrender1 \
@@ -11,6 +11,9 @@ RUN apt-get update && apt-get install -y \
     libfreetype6-dev \
     libpng-dev \
     curl \
+    libopenblas-dev \
+    liblapack-dev \
+    gfortran \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching

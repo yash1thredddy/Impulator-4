@@ -641,7 +641,8 @@ class CompoundService:
             'Heavy_Atoms', 'NPOL', 'QED', 'TPSA',
             'Aromatic_Rings', 'Rotatable_Bonds',
             'HBD', 'HBA', 'LogP',
-            'RO5_Violations', 'NP_Likeness_Score'
+            'RO5_Violations', 'NP_Likeness_Score',
+            'PSAoMW', '10xPSA_MW', 'NPOLoNHA'  # Derived ratios for efficiency analysis
         ]
         for col in descriptor_cols:
             if col not in df.columns:
@@ -688,6 +689,16 @@ class CompoundService:
                 if result['HBA'] > 10:
                     violations += 1
                 result['RO5_Violations'] = violations
+
+                # Calculate derived ratios for efficiency analysis
+                # PSAoMW = PSA / MW (polarity relative to size)
+                if mw > 0 and result['TPSA'] is not np.nan:
+                    result['PSAoMW'] = result['TPSA'] / mw
+                    result['10xPSA_MW'] = 10 * result['PSAoMW']  # Scaled version
+
+                # NPOLoNHA = NPOL / Heavy_Atoms (polar atom fraction)
+                if result['Heavy_Atoms'] and result['Heavy_Atoms'] > 0:
+                    result['NPOLoNHA'] = result['NPOL'] / result['Heavy_Atoms']
 
                 # NP Likeness Score
                 if np_scorer is not None:

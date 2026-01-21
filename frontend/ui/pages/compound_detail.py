@@ -30,6 +30,9 @@ import streamlit.components.v1 as components
 
 logger = logging.getLogger(__name__)
 
+# Import scipy for regression statistics
+from scipy import stats as scipy_stats
+
 
 def render_compound_detail_page() -> None:
     """Render the compound detail page."""
@@ -621,15 +624,61 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
                 st.plotly_chart(fig, width='stretch')
 
         with viz_col4:
-            # QED distribution
-            if has_qed:
-                qed_vals = unique_df['QED'].dropna()
-                fig = px.histogram(qed_vals, nbins=20, title='QED Score Distribution',
-                                   color_discrete_sequence=['#636EFA'])
-                fig.add_vline(x=0.5, line_dash="dash", line_color="green", annotation_text="Good (≥0.5)")
-                fig.add_vline(x=0.3, line_dash="dash", line_color="orange", annotation_text="Moderate (≥0.3)")
-                fig.update_layout(height=300, margin=dict(t=40, b=30, l=30, r=30))
-                st.plotly_chart(fig, width='stretch')
+            # 10xPSA_MW vs NPOLoNHA scatter plot (replaces QED distribution)
+            has_psa_mw = '10xPSA_MW' in unique_df.columns and unique_df['10xPSA_MW'].notna().any()
+            has_npol_nha = 'NPOLoNHA' in unique_df.columns and unique_df['NPOLoNHA'].notna().any()
+
+            if has_psa_mw and has_npol_nha:
+                plot_df = unique_df.dropna(subset=['10xPSA_MW', 'NPOLoNHA'])
+                if len(plot_df) >= 2:
+                    # Calculate R² statistics
+                    x_vals = plot_df['10xPSA_MW'].values
+                    y_vals = plot_df['NPOLoNHA'].values
+                    slope, intercept, r_value, p_value, std_err = scipy_stats.linregress(x_vals, y_vals)
+                    r_squared = r_value ** 2
+
+                    # Build customdata for structure viewer
+                    customdata_cols = None
+                    if 'SMILES' in plot_df.columns:
+                        customdata_cols = ['SMILES']
+                        if 'Molecule_Name' in plot_df.columns:
+                            customdata_cols.append('Molecule_Name')
+                        if 'ChEMBL_ID' in plot_df.columns:
+                            customdata_cols.append('ChEMBL_ID')
+
+                    fig = px.scatter(
+                        plot_df,
+                        x='10xPSA_MW',
+                        y='NPOLoNHA',
+                        color='QED' if 'QED' in plot_df.columns and plot_df['QED'].notna().any() else None,
+                        hover_data=['ChEMBL_ID', 'Molecule_Name'] if all(c in plot_df.columns for c in ['ChEMBL_ID', 'Molecule_Name']) else None,
+                        title=f'10×PSA/MW vs NPOL/NHA (R²={r_squared:.3f})',
+                        trendline="ols",
+                        color_continuous_scale='Viridis',
+                        custom_data=customdata_cols
+                    )
+                    fig.update_layout(
+                        height=300,
+                        margin=dict(t=40, b=30, l=30, r=30),
+                        xaxis_title="10 × PSA/MW",
+                        yaxis_title="NPOL/NHA"
+                    )
+                    st.plotly_chart(fig, width='stretch', key="psa_npol_scatter_chart")
+                    st.caption(f"R²={r_squared:.4f}, slope={slope:.4f}, p={p_value:.2e}")
+
+                    # Embed structure viewer for click-to-view molecules
+                    if 'SMILES' in plot_df.columns:
+                        render_structure_viewer_hint()
+                        embed_structure_viewer(
+                            chart_id="psa_npol_scatter_chart",
+                            x_col='10xPSA_MW',
+                            y_col='NPOLoNHA',
+                            name_col='Molecule_Name' if 'Molecule_Name' in plot_df.columns else None
+                        )
+                else:
+                    st.caption("Need ≥2 data points for 10×PSA/MW vs NPOL/NHA plot")
+            else:
+                st.caption("10×PSA/MW vs NPOL/NHA requires reprocessing compounds")
 
     else:
         # Individual compounds view - PubChem-style table
@@ -639,7 +688,8 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
         # Define key properties to show (PubChem-like order)
         key_props = ['Molecular_Weight', 'MolLogP', 'LogP', 'TPSA', 'HBD', 'HBA',
                      'Heavy_Atoms', 'Rotatable_Bonds', 'Aromatic_Rings', 'NPOL',
-                     'QED', 'RO5_Violations', 'NP_Likeness_Score']
+                     'QED', 'RO5_Violations', 'NP_Likeness_Score',
+                     'PSAoMW', '10xPSA_MW', 'NPOLoNHA']
 
         # Filter to only available properties
         available_key_props = [p for p in key_props if p in unique_df.columns]
@@ -823,8 +873,17 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
         st.warning(f"No data available for {metric_choice}")
         return
 
-    # Two-column layout for chart and outliers
-    col1, col2 = st.columns([3, 1])
+    # Build customdata for structure viewer (box plots support click events)
+    customdata_cols = None
+    if 'SMILES' in plot_df.columns:
+        customdata_cols = ['SMILES']
+        if 'Molecule_Name' in plot_df.columns:
+            customdata_cols.append('Molecule_Name')
+        if 'ChEMBL_ID' in plot_df.columns:
+            customdata_cols.append('ChEMBL_ID')
+
+    # Layout: Chart takes most space, compact sidebar for outliers/groups
+    col1, col2 = st.columns([5, 1])
 
     with col1:
         # Box plot with optional coloring
@@ -835,48 +894,66 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
                 y=metric_choice,
                 color=color_by,
                 points='outliers',
-                hover_data=['ChEMBL_ID', 'Molecule_Name'] if all(c in plot_df.columns for c in ['ChEMBL_ID', 'Molecule_Name']) else None
+                hover_data=['ChEMBL_ID', 'Molecule_Name'] if all(c in plot_df.columns for c in ['ChEMBL_ID', 'Molecule_Name']) else None,
+                custom_data=customdata_cols
             )
             fig.update_layout(
-                height=400,
-                margin=dict(t=30, b=80),
+                height=450,
+                margin=dict(t=40, b=80, r=10),
                 xaxis_tickangle=-45,
+                # Vertical legend on right side, inside chart area
                 legend=dict(
-                    orientation="h",
-                    yanchor="bottom",
-                    y=1.02,
-                    xanchor="right",
-                    x=1,
-                    title_text=""
+                    orientation="v",
+                    yanchor="top",
+                    y=0.98,
+                    xanchor="left",
+                    x=1.02,
+                    title_text="",
+                    bgcolor="rgba(255,255,255,0.8)",
+                    bordercolor="rgba(0,0,0,0.1)",
+                    borderwidth=1
                 )
             )
-            st.plotly_chart(fig, width='stretch')
-            st.caption("💡 **Click legend items** to show/hide groups. Double-click to isolate one group.")
+            st.plotly_chart(fig, width='stretch', key="eff_box_chart")
+            st.caption("💡 **Click legend items** to show/hide groups. Double-click to isolate.")
         else:
             # Simple histogram without grouping
             fig = px.histogram(plot_df, x=metric_choice, nbins=30)
-            fig.update_layout(height=350, margin=dict(t=30, b=30))
-            st.plotly_chart(fig, width='stretch')
+            fig.update_layout(height=400, margin=dict(t=30, b=30))
+            st.plotly_chart(fig, width='stretch', key="eff_hist_chart")
+
+        # Embed structure viewer for click-to-view molecules (box plots)
+        if color_by != "None" and 'SMILES' in plot_df.columns:
+            render_structure_viewer_hint()
+            embed_structure_viewer(
+                chart_id="eff_box_chart",
+                x_col=color_by,
+                y_col=metric_choice,
+                name_col='Molecule_Name' if 'Molecule_Name' in plot_df.columns else None
+            )
 
     with col2:
-        # Outlier summary
-        st.markdown("**Outliers Detected**")
+        # Compact outlier summary - smaller text, tighter spacing
+        st.markdown("<p style='font-size: 13px; font-weight: 600; margin-bottom: 4px;'>Outliers</p>", unsafe_allow_html=True)
         for m in avail:
             outlier_col = f'Is_{m}_Outlier'
             if outlier_col in df.columns:
-                count = df[outlier_col].sum()
-                if count > 0:
-                    st.warning(f"{m}: {int(count)}")
-                else:
-                    st.success(f"{m}: 0")
+                count = int(df[outlier_col].sum())
+                color = "#ff6b6b" if count > 0 else "#51cf66"
+                st.markdown(
+                    f"<div style='background: {color}; color: white; padding: 2px 6px; "
+                    f"border-radius: 4px; font-size: 11px; margin: 2px 0; text-align: center;'>"
+                    f"{m}: {count}</div>",
+                    unsafe_allow_html=True
+                )
 
-        # Show count when colored
+        # Show group counts when colored - compact
         if color_by != "None":
-            st.markdown("---")
-            st.markdown(f"**Groups ({color_by})**")
+            st.markdown("<hr style='margin: 8px 0;'>", unsafe_allow_html=True)
+            st.markdown(f"<p style='font-size: 11px; font-weight: 600; margin-bottom: 2px;'>Groups</p>", unsafe_allow_html=True)
             group_counts = plot_df[color_by].value_counts()
             for grp, cnt in group_counts.head(6).items():
-                st.caption(f"{grp[:15]}: {cnt}")
+                st.markdown(f"<p style='font-size: 10px; margin: 0; color: #666;'>{str(grp)[:12]}: {cnt}</p>", unsafe_allow_html=True)
 
     # Efficiency Metrics by Target table (after visualization)
     st.markdown("---")
@@ -1315,12 +1392,15 @@ def _plot_activity_distribution(df: pd.DataFrame) -> None:
         height=500,
         showlegend=True,
         legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
-            title_text=""
+            orientation="v",
+            yanchor="top",
+            y=0.98,
+            xanchor="left",
+            x=1.02,
+            title_text="",
+            bgcolor="rgba(255,255,255,0.8)",
+            bordercolor="rgba(0,0,0,0.1)",
+            borderwidth=1
         )
     )
     st.plotly_chart(fig, width='stretch', height=400, key="activity_dist_chart")
@@ -1410,7 +1490,6 @@ def _plot_efficiency_scatter(df: pd.DataFrame) -> None:
     # Show R² and regression statistics at TOP (before chart) if trendline is enabled
     if show_trendline:
         try:
-            from scipy import stats as scipy_stats
             x_vals = plot_df[x_col].values
             y_vals = plot_df[y_col].values
             slope, intercept, r_value, p_value, std_err = scipy_stats.linregress(x_vals, y_vals)
@@ -1485,12 +1564,15 @@ def _plot_efficiency_scatter(df: pd.DataFrame) -> None:
         height=520,
         showlegend=color_by != "None" and not is_numeric_color,
         legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
-            title_text=""
+            orientation="v",
+            yanchor="top",
+            y=0.98,
+            xanchor="left",
+            x=1.02,
+            title_text="",
+            bgcolor="rgba(255,255,255,0.8)",
+            bordercolor="rgba(0,0,0,0.1)",
+            borderwidth=1
         )
     )
 
@@ -1622,7 +1704,6 @@ def _plot_custom(df: pd.DataFrame) -> None:
     # Show R² at TOP (before chart) if trendline is enabled for scatter
     if plot_type == "Scatter" and show_trendline and y_axis:
         try:
-            from scipy import stats as scipy_stats
             x_vals = plot_df[x_axis].values
             y_vals = plot_df[y_axis].values
             slope, intercept, r_value, p_value, std_err = scipy_stats.linregress(x_vals, y_vals)
@@ -1714,11 +1795,15 @@ def _plot_custom(df: pd.DataFrame) -> None:
             height=550,
             showlegend=color_by != "None",
             legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="right",
-                x=1
+                orientation="v",
+                yanchor="top",
+                y=0.98,
+                xanchor="left",
+                x=1.02,
+                title_text="",
+                bgcolor="rgba(255,255,255,0.8)",
+                bordercolor="rgba(0,0,0,0.1)",
+                borderwidth=1
             )
         )
 
