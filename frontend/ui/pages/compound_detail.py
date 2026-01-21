@@ -630,13 +630,28 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
 
             if has_psa_mw and has_npol_nha:
                 plot_df = unique_df.dropna(subset=['10xPSA_MW', 'NPOLoNHA'])
-                if len(plot_df) >= 2:
+                # Need >=2 points AND variance in x values for regression
+                x_vals = plot_df['10xPSA_MW'].values if len(plot_df) >= 2 else np.array([])
+                y_vals = plot_df['NPOLoNHA'].values if len(plot_df) >= 2 else np.array([])
+                can_regress = len(plot_df) >= 2 and len(np.unique(x_vals)) > 1
+
+                if can_regress:
                     # Calculate R² statistics
-                    x_vals = plot_df['10xPSA_MW'].values
-                    y_vals = plot_df['NPOLoNHA'].values
                     slope, intercept, r_value, p_value, std_err = scipy_stats.linregress(x_vals, y_vals)
                     r_squared = r_value ** 2
+                    title = f'10×PSA/MW vs NPOL/NHA (R²={r_squared:.3f})'
+                    show_trendline = True
+                    stats_caption = f"R²={r_squared:.4f}, slope={slope:.4f}, p={p_value:.2e}"
+                elif len(plot_df) >= 1:
+                    # Can show scatter but not trendline (all x values identical or only 1 point)
+                    title = '10×PSA/MW vs NPOL/NHA'
+                    show_trendline = False
+                    stats_caption = "Insufficient variance for regression" if len(plot_df) >= 2 else ""
+                else:
+                    show_trendline = False
+                    title = None
 
+                if len(plot_df) >= 1:
                     # Build customdata for structure viewer
                     customdata_cols = None
                     if 'SMILES' in plot_df.columns:
@@ -652,8 +667,8 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
                         y='NPOLoNHA',
                         color='QED' if 'QED' in plot_df.columns and plot_df['QED'].notna().any() else None,
                         hover_data=['ChEMBL_ID', 'Molecule_Name'] if all(c in plot_df.columns for c in ['ChEMBL_ID', 'Molecule_Name']) else None,
-                        title=f'10×PSA/MW vs NPOL/NHA (R²={r_squared:.3f})',
-                        trendline="ols",
+                        title=title,
+                        trendline="ols" if show_trendline else None,
                         color_continuous_scale='Viridis',
                         custom_data=customdata_cols
                     )
@@ -664,7 +679,8 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
                         yaxis_title="NPOL/NHA"
                     )
                     st.plotly_chart(fig, width='stretch', key="psa_npol_scatter_chart")
-                    st.caption(f"R²={r_squared:.4f}, slope={slope:.4f}, p={p_value:.2e}")
+                    if stats_caption:
+                        st.caption(stats_caption)
 
                     # Embed structure viewer for click-to-view molecules
                     if 'SMILES' in plot_df.columns:
@@ -676,7 +692,7 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
                             name_col='Molecule_Name' if 'Molecule_Name' in plot_df.columns else None
                         )
                 else:
-                    st.caption("Need ≥2 data points for 10×PSA/MW vs NPOL/NHA plot")
+                    st.caption("No data points for 10×PSA/MW vs NPOL/NHA plot")
             else:
                 st.caption("10×PSA/MW vs NPOL/NHA requires reprocessing compounds")
 
@@ -995,10 +1011,10 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
         st.markdown("""
 **This table shows efficiency metrics calculated for each target in the dataset.**
 
-- **SEI (Surface Efficiency Index)**: Measures activity relative to polar surface area. Formula: pActivity / PSA × 100
-- **BEI (Binding Efficiency Index)**: Measures activity relative to molecular weight. Formula: pActivity / MW × 1000
-- **NSEI (Normalized Surface Efficiency Index)**: SEI normalized by the number of polar atoms (N + O atoms)
-- **nBEI (Normalized Binding Efficiency Index)**: BEI normalized considering heavy atoms
+- **SEI (Surface Efficiency Index)**: Measures activity relative to polar surface area. Formula: `SEI = pActivity / (PSA / 100)`
+- **BEI (Binding Efficiency Index)**: Measures activity relative to molecular weight. Formula: `BEI = pActivity / (MW / 1000)`
+- **NSEI (Normalized Surface Efficiency Index)**: Measures activity relative to polar atom count. Formula: `NSEI = pActivity / NPOL` (where NPOL = N + O atom count)
+- **NBEI (Normalized Binding Efficiency Index)**: Measures activity relative to heavy atom count. Formula: `NBEI = pActivity / NHA` (where NHA = heavy atom count)
 
 **Interpretation:** Higher values indicate more efficient compounds for that target. Compounds with high efficiency metrics achieve strong binding without excessive molecular size or polarity.
         """)
@@ -1129,17 +1145,19 @@ def _render_oqpla_analysis(df: pd.DataFrame, compound_name: str) -> None:
 4. **PDB Structural Evidence (15%)** - Does experimental crystallography data support the binding? High-resolution structures (< 2.0 Å) provide strongest evidence.
 5. **QED Multiplier** - Drug-likeness adjustment based on Quantitative Estimate of Drug-likeness.
 
-**Score Interpretation:**
-- **0.0 - 0.3**: Low quality - likely noise or artifacts
-- **0.3 - 0.5**: Moderate quality - needs further validation
-- **0.5 - 0.7**: Good quality - promising candidates
-- **0.7 - 1.0**: Excellent quality - strong candidates with structural support
+**Score Interpretation (Higher = More Likely IMP):**
+- **0.0 - 0.3**: Not IMP - normal behavior, likely genuine activity
+- **0.3 - 0.5**: Weak IMP - some outlier characteristics, low confidence
+- **0.5 - 0.7**: Moderate IMP - potential lead, needs more validation
+- **0.7 - 0.9**: Strong IMP - high confidence outlier, priority for validation
+- **0.9 - 1.0**: Exceptional IMP - highest confidence, immediate validation needed
 
 **IMP Classification:**
-- **Not IMP**: Compounds showing normal behavior within expected ranges
-- **Weak IMP**: Compounds with some outlier characteristics (requires attention)
-- **Moderate IMP**: Compounds with multiple outlier flags (high suspicion)
-- **Strong IMP**: Compounds with extreme outlier behavior (likely false positives)
+- **Not IMP**: Compounds showing normal behavior within expected ranges (likely genuine)
+- **Weak IMP**: Some outlier characteristics but lacking validation (deprioritize)
+- **Moderate IMP**: Potential lead with some validation evidence (monitor and gather data)
+- **Strong IMP**: High confidence - most validation criteria met (validate within 1 month)
+- **Exceptional IMP**: Highest confidence - multiple validation streams confirm (priority 1)
         """)
 
     # OQPLA Scoring

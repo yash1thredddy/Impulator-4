@@ -692,13 +692,17 @@ class CompoundService:
 
                 # Calculate derived ratios for efficiency analysis
                 # PSAoMW = PSA / MW (polarity relative to size)
-                if mw > 0 and result['TPSA'] is not np.nan:
-                    result['PSAoMW'] = result['TPSA'] / mw
+                tpsa_val = result['TPSA']
+                if mw > 0 and tpsa_val is not None and not np.isnan(tpsa_val):
+                    result['PSAoMW'] = tpsa_val / mw
                     result['10xPSA_MW'] = 10 * result['PSAoMW']  # Scaled version
 
                 # NPOLoNHA = NPOL / Heavy_Atoms (polar atom fraction)
-                if result['Heavy_Atoms'] and result['Heavy_Atoms'] > 0:
-                    result['NPOLoNHA'] = result['NPOL'] / result['Heavy_Atoms']
+                heavy_atoms = result['Heavy_Atoms']
+                npol = result['NPOL']
+                if heavy_atoms is not None and not np.isnan(heavy_atoms) and heavy_atoms > 0:
+                    if npol is not None and not np.isnan(npol):
+                        result['NPOLoNHA'] = npol / heavy_atoms
 
                 # NP Likeness Score
                 if np_scorer is not None:
