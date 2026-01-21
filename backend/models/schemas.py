@@ -293,26 +293,61 @@ class ActiveJobResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class CheckDuplicatesRequest(BaseModel):
-    """Request schema for checking duplicate compounds."""
+class CompoundStructure(BaseModel):
+    """Structure data for a compound in batch duplicate check."""
 
-    compound_names: List[str] = Field(..., min_length=1, max_length=100)
+    compound_name: str = Field(..., min_length=1, max_length=100)
+    smiles: Optional[str] = Field(None, description="SMILES string for the compound")
+    inchi: Optional[str] = Field(None, description="InChI string for the compound (converted to SMILES if smiles not provided)")
+
+
+class CheckDuplicatesRequest(BaseModel):
+    """Request schema for checking duplicate compounds.
+
+    Supports two modes:
+    1. Name-only check (legacy): Just provide compound_names
+    2. Structure-based check (recommended): Provide compounds with SMILES/InChI for InChIKey-based detection
+    """
+
+    # Legacy: name-only list (for backward compatibility)
+    compound_names: Optional[List[str]] = Field(None, max_length=1000)
+    # New: compounds with structure data for InChIKey-based duplicate detection
+    compounds: Optional[List[CompoundStructure]] = Field(None, max_length=1000)
 
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "compound_names": ["Aspirin", "Ibuprofen", "Quercetin"]
+                "compounds": [
+                    {"compound_name": "Aspirin", "smiles": "CC(=O)OC1=CC=CC=C1C(=O)O"},
+                    {"compound_name": "Quercetin", "smiles": "O=C1C(O)=C(O)C(=O)C2=C1C=C(O)C(O)=C2O"},
+                    {"compound_name": "Unknown", "inchi": "InChI=1S/C9H8O4/c1-6(10)13-8-5-3-2-4-7(8)9(11)12/h2-5H,1H3,(H,11,12)"}
+                ]
             }
         }
     )
 
 
+class DuplicateMatch(BaseModel):
+    """Information about a duplicate match found by InChIKey."""
+
+    compound_name: str = Field(..., description="Name of compound in the request")
+    inchikey: Optional[str] = Field(None, description="Generated InChIKey")
+    existing_compound_name: str = Field(..., description="Name of existing compound with same structure")
+    existing_entry_id: Optional[str] = Field(None, description="Entry ID of existing compound")
+    match_type: str = Field(..., description="'exact' (same name+structure), 'structure_only' (different name, same structure)")
+
+
 class CheckDuplicatesResponse(BaseModel):
     """Response schema for duplicate check."""
 
-    existing: List[str] = Field(default_factory=list, description="Compounds that already have results")
+    existing: List[str] = Field(default_factory=list, description="Compounds that already have results (by name)")
     processing: List[str] = Field(default_factory=list, description="Compounds currently being processed")
     new: List[str] = Field(default_factory=list, description="Compounds that are new")
+    # InChIKey-based duplicate matches (more accurate than name-based)
+    structure_matches: List[DuplicateMatch] = Field(
+        default_factory=list,
+        description="Compounds that match existing compounds by InChIKey (structure)"
+    )
 
 
 class DuplicateAction(str, Enum):

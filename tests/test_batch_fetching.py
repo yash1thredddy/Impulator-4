@@ -90,14 +90,6 @@ class TestMoleculeDataBenchmark:
 
         assert len(results) > 0, "Should fetch at least some molecule data"
 
-        # Return benchmark data
-        return {
-            'method': 'individual',
-            'total_time': total_time,
-            'count': len(results),
-            'avg_per_item': avg_call_time,
-        }
-
     def test_benchmark_simulated_batch_molecule_fetch(self):
         """
         Benchmark: Simulate batch molecule fetch using ChEMBL's filter API.
@@ -151,13 +143,6 @@ class TestMoleculeDataBenchmark:
 
         assert len(results) > 0, "Should fetch at least some molecule data"
 
-        return {
-            'method': 'batch',
-            'total_time': total_time,
-            'count': len(results),
-            'avg_per_item': total_time / len(SAMPLE_CHEMBL_IDS),
-        }
-
 
 class TestTargetNameBenchmark:
     """Benchmark target name fetching: individual vs batch."""
@@ -200,13 +185,6 @@ class TestTargetNameBenchmark:
         logger.info(f"Average per target: {avg_call_time:.3f}s")
 
         assert len(results) > 0, "Should fetch at least some target names"
-
-        return {
-            'method': 'individual',
-            'total_time': total_time,
-            'count': len(results),
-            'avg_per_item': avg_call_time,
-        }
 
     def test_benchmark_simulated_batch_target_fetch(self):
         """
@@ -256,13 +234,6 @@ class TestTargetNameBenchmark:
         logger.info(f"Average per target: {total_time/len(SAMPLE_TARGET_IDS):.3f}s")
 
         assert len(results) > 0, "Should fetch at least some target names"
-
-        return {
-            'method': 'batch',
-            'total_time': total_time,
-            'count': len(results),
-            'avg_per_item': total_time / len(SAMPLE_TARGET_IDS),
-        }
 
 
 class TestComprehensiveBenchmark:

@@ -192,16 +192,40 @@ class ImpulatorAPIClient:
         except requests.exceptions.RequestException as e:
             return JobResponse(success=False, error=str(e))
 
-    def check_duplicates(self, compound_names: List[str]) -> Dict[str, Any]:
+    def check_duplicates(
+        self,
+        compound_names: List[str] = None,
+        compounds: List[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """Check which compounds already exist or are being processed.
 
+        Supports two modes:
+        1. Name-only (legacy): Just pass compound_names list
+        2. Structure-based (recommended): Pass compounds list with SMILES/InChI
+           This uses InChIKey for 100% accurate duplicate detection by structure.
+
         Args:
-            compound_names: List of compound names to check
+            compound_names: List of compound names to check (legacy mode)
+            compounds: List of dicts with compound_name, smiles, and/or inchi (new mode)
+                      Example: [{"compound_name": "Aspirin", "smiles": "CC(=O)OC1=CC=CC=C1C(=O)O"}]
 
         Returns:
-            Dict with 'existing', 'processing', and 'new' lists
+            Dict with:
+            - 'existing': Compounds that already have results (by name)
+            - 'processing': Compounds currently being processed
+            - 'new': Compounds that are new
+            - 'structure_matches': List of compounds that match by InChIKey (structure)
+              Each match has: compound_name, inchikey, existing_compound_name,
+              existing_entry_id, match_type ('exact' or 'structure_only')
         """
-        payload = {"compound_names": compound_names}
+        if compounds:
+            # New mode: structure-based checking with InChIKey
+            payload = {"compounds": compounds}
+        elif compound_names:
+            # Legacy mode: name-only checking
+            payload = {"compound_names": compound_names}
+        else:
+            return {"success": False, "error": "Must provide compound_names or compounds"}
 
         try:
             response = self._request('POST', '/api/v1/jobs/check-duplicates', json=payload)

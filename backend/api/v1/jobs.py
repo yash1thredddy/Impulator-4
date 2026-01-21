@@ -45,6 +45,7 @@ from backend.models.schemas import (
     BatchResponse,
     DeleteResponse,
     CancelResponse,
+    DuplicateMatch,
 )
 from backend.services.job_service import job_service, generate_inchikey, generate_canonical_smiles
 from backend.models.database import Compound, DeletedCompound
@@ -452,6 +453,19 @@ async def resolve_duplicate(
     raise HTTPException(status_code=422, detail=f"Invalid action: {request.action}")
 
 
+def _inchi_to_smiles(inchi: str) -> Optional[str]:
+    """Convert InChI to SMILES using RDKit."""
+    try:
+        from rdkit import Chem
+        mol = Chem.MolFromInchi(inchi)
+        if mol:
+            return Chem.MolToSmiles(mol)
+        return None
+    except Exception as e:
+        logger.debug(f"InChI to SMILES conversion failed: {e}")
+        return None
+
+
 @router.post(
     "/check-duplicates",
     response_model=CheckDuplicatesResponse,
@@ -464,17 +478,67 @@ async def check_duplicates(
     """
     Check which compounds already exist or are being processed.
 
-    Use this before batch submission to show users which compounds
-    will be skipped, allowing them to confirm before proceeding.
+    Supports two modes:
+    1. **Name-only check (legacy)**: Provide `compound_names` list - checks by name only
+    2. **Structure-based check (recommended)**: Provide `compounds` list with SMILES/InChI
+       - Generates InChIKey for each compound
+       - Checks for existing compounds with same InChIKey (100% accurate structure match)
+       - Returns `structure_matches` with details about which compounds match by structure
 
     Returns:
-        - existing: Compounds that already have results in Azure/local storage
+        - existing: Compounds that already have results (by name)
         - processing: Compounds currently being processed
-        - new: Compounds that will be processed
+        - new: Compounds that are new
+        - structure_matches: Compounds that match existing compounds by InChIKey (structure)
     """
-    compound_names = request.compound_names
+    structure_matches: List[DuplicateMatch] = []
 
-    # Check for already processed compounds
+    # Determine which mode we're in
+    if request.compounds:
+        # New mode: structure-based checking with InChIKey
+        compound_names = [c.compound_name for c in request.compounds]
+
+        # Generate InChIKeys and check for structure matches
+        for compound in request.compounds:
+            smiles = compound.smiles
+            # Convert InChI to SMILES if needed
+            if not smiles and compound.inchi:
+                smiles = _inchi_to_smiles(compound.inchi)
+
+            if smiles:
+                inchikey = generate_inchikey(smiles)
+                if inchikey:
+                    # Check if any existing compound has this InChIKey
+                    existing_compound = db.query(Compound).filter(
+                        Compound.inchikey == inchikey
+                    ).first()
+
+                    if existing_compound:
+                        # Determine match type
+                        name_matches = existing_compound.compound_name.lower().strip() == compound.compound_name.lower().strip()
+                        match_type = "exact" if name_matches else "structure_only"
+
+                        structure_matches.append(DuplicateMatch(
+                            compound_name=compound.compound_name,
+                            inchikey=inchikey,
+                            existing_compound_name=existing_compound.compound_name,
+                            existing_entry_id=existing_compound.entry_id,
+                            match_type=match_type,
+                        ))
+                        logger.debug(
+                            f"InChIKey match: {compound.compound_name} matches "
+                            f"{existing_compound.compound_name} ({match_type})"
+                        )
+    elif request.compound_names:
+        # Legacy mode: name-only checking
+        compound_names = request.compound_names
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail="Must provide either 'compound_names' or 'compounds' list"
+        )
+
+    # Check for already processed compounds (by name)
     existing_map = job_service.check_existing_compounds(db, compound_names)
     existing = [name for name, exists in existing_map.items() if exists]
 
@@ -482,16 +546,24 @@ async def check_duplicates(
     pending_map = job_service.check_pending_compounds(db, compound_names)
     processing = list(pending_map.keys())
 
-    # Calculate new compounds
+    # Calculate new compounds (by name)
     skip_set = set(existing) | set(processing)
     new = [name for name in compound_names if name not in skip_set]
 
-    logger.info(f"Duplicate check: {len(existing)} existing, {len(processing)} processing, {len(new)} new")
+    # Also mark compounds with structure matches as not truly new
+    structure_match_names = {m.compound_name for m in structure_matches}
+    new = [name for name in new if name not in structure_match_names]
+
+    logger.info(
+        f"Duplicate check: {len(existing)} existing (name), {len(processing)} processing, "
+        f"{len(structure_matches)} structure matches, {len(new)} new"
+    )
 
     return CheckDuplicatesResponse(
         existing=existing,
         processing=processing,
         new=new,
+        structure_matches=structure_matches,
     )
 
 

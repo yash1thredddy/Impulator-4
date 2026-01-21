@@ -580,25 +580,48 @@ def render_csv_upload_form() -> Optional[str]:
     if not duplicate_check_done:
         # Step 1: Check for duplicates first
         if st.button("Check & Submit Batch", type="primary", width='stretch'):
-            compound_names = [
-                _sanitize_and_limit_name(str(row.get('compound_name', '')).strip())
-                for _, row in df_mapped.iterrows()
-                if str(row.get('compound_name', '')).strip()
-            ]
+            # Build compounds list with structures for InChIKey-based duplicate detection
+            df_has_smiles = 'smiles' in df_mapped.columns
+            df_has_inchi = 'inchi' in df_mapped.columns
 
-            if not compound_names:
+            compounds_for_check = []
+            for _, row in df_mapped.iterrows():
+                compound_name = str(row.get('compound_name', '')).strip()
+                if not compound_name:
+                    continue
+
+                safe_name = _sanitize_and_limit_name(compound_name)
+                compound_data = {"compound_name": safe_name}
+
+                # Add structure data for InChIKey generation
+                if df_has_smiles:
+                    smiles_val = str(row.get('smiles', '')).strip()
+                    if smiles_val and smiles_val.lower() not in ('nan', 'none', ''):
+                        compound_data["smiles"] = smiles_val
+
+                if df_has_inchi:
+                    inchi_val = str(row.get('inchi', '')).strip()
+                    if inchi_val and inchi_val.lower() not in ('nan', 'none', ''):
+                        compound_data["inchi"] = inchi_val
+
+                compounds_for_check.append(compound_data)
+
+            if not compounds_for_check:
                 st.error("No valid compound names found in file")
                 return None
 
-            with st.spinner("Checking for existing compounds..."):
+            with st.spinner("Checking for existing compounds (by structure)..."):
                 api_client = get_api_client()
-                result = api_client.check_duplicates(compound_names)
+                # Use new structure-based checking for InChIKey duplicate detection
+                result = api_client.check_duplicates(compounds=compounds_for_check)
 
                 if result.get("success"):
                     st.session_state['batch_duplicate_check_done'] = True
                     st.session_state['batch_existing'] = result.get('existing', [])
                     st.session_state['batch_processing'] = result.get('processing', [])
                     st.session_state['batch_new'] = result.get('new', [])
+                    # Store structure matches for enhanced duplicate handling
+                    st.session_state['batch_structure_matches'] = result.get('structure_matches', [])
                     st.rerun()
                 else:
                     st.error(f"Failed to check duplicates: {result.get('error', 'Unknown error')}")
@@ -609,18 +632,37 @@ def render_csv_upload_form() -> Optional[str]:
         existing = st.session_state.get('batch_existing', [])
         processing = st.session_state.get('batch_processing', [])
         new_compounds = st.session_state.get('batch_new', [])
+        structure_matches = st.session_state.get('batch_structure_matches', [])
 
         # Show summary with colored boxes
         st.divider()
         st.markdown("### Duplicate Check Results")
 
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("New Compounds", len(new_compounds))
         with col2:
             st.metric("Already Processed", len(existing))
         with col3:
             st.metric("Currently Processing", len(processing))
+        with col4:
+            st.metric("Structure Matches", len(structure_matches))
+
+        # Show structure matches (InChIKey-based, more accurate)
+        if structure_matches:
+            with st.expander(f"🔬 Structure Matches - same molecule, different name ({len(structure_matches)})", expanded=True):
+                st.caption("These compounds have the **same chemical structure** (InChIKey) as existing compounds:")
+                for match in structure_matches[:20]:
+                    match_type = match.get('match_type', 'structure_only')
+                    your_name = html.escape(match.get('compound_name', ''))
+                    existing_name = html.escape(match.get('existing_compound_name', ''))
+
+                    if match_type == 'exact':
+                        st.markdown(f"- `{your_name}` matches exactly")
+                    else:
+                        st.markdown(f"- `{your_name}` → same structure as **{existing_name}**")
+                if len(structure_matches) > 20:
+                    st.caption(f"...and {len(structure_matches) - 20} more")
 
         # Show currently processing (these are always skipped)
         if processing:
@@ -631,10 +673,15 @@ def render_csv_upload_form() -> Optional[str]:
                     st.caption(f"...and {len(processing) - 20} more")
 
         # Per-compound duplicate handling for already processed compounds
+        # Combine name-based existing and structure matches
         duplicate_decisions = {}  # compound_name -> action ('skip', 'replace', 'duplicate')
         duplicate_new_names = {}  # compound_name -> new_name (for 'duplicate' action)
 
-        if existing:
+        # Get compound names from structure matches that aren't in existing list
+        structure_match_names = [m.get('compound_name') for m in structure_matches]
+        all_existing = list(set(existing) | set(structure_match_names))
+
+        if all_existing:
             st.markdown("#### Handle Existing Compounds")
             st.caption("Choose what to do with each compound that already has results:")
 
@@ -652,10 +699,10 @@ def render_csv_upload_form() -> Optional[str]:
             )
 
             # Show individual compound controls in an expander
-            with st.expander(f"📦 Customize per compound ({len(existing)} compounds)", expanded=len(existing) <= 10):
+            with st.expander(f"📦 Customize per compound ({len(all_existing)} compounds)", expanded=len(all_existing) <= 10):
                 # For smaller lists, show individual selects with name input for duplicates
-                if len(existing) <= 20:
-                    for i, compound_name in enumerate(existing):
+                if len(all_existing) <= 20:
+                    for i, compound_name in enumerate(all_existing):
                         safe_name = html.escape(compound_name)
                         st.markdown(f"**{safe_name}**")
                         col1, col2 = st.columns([2, 3])
@@ -693,13 +740,13 @@ def render_csv_upload_form() -> Optional[str]:
                         st.divider()
                 else:
                     # For larger lists, show summary with option to expand
-                    st.info(f"All {len(existing)} compounds will use the default action: **{default_action}**")
+                    st.info(f"All {len(all_existing)} compounds will use the default action: **{default_action}**")
                     if default_action == "duplicate":
                         st.warning("⚠️ Duplicates will be auto-named with '_v2' suffix. For custom names, process in smaller batches.")
                     st.caption("For individual control with large batches, consider processing in smaller groups.")
 
             # Apply default action to compounds not individually configured
-            for compound_name in existing:
+            for compound_name in all_existing:
                 if compound_name not in duplicate_decisions:
                     duplicate_decisions[compound_name] = default_action
                 # Auto-generate new name for duplicates without custom names
@@ -792,6 +839,7 @@ def _clear_duplicate_check_state():
         'batch_existing',
         'batch_processing',
         'batch_new',
+        'batch_structure_matches',  # InChIKey-based structure matches
         'batch_duplicate_decisions',
         'batch_duplicate_new_names',
         'batch_default_duplicate_action',
@@ -846,17 +894,19 @@ def _submit_batch(
         st.error("No compounds to submit")
         return None
 
-    # Determine structure column
-    structure_col = 'smiles' if has_smiles else 'inchi'
+    # Check which columns are available
+    df_has_smiles = 'smiles' in df.columns
+    df_has_inchi = 'inchi' in df.columns
 
     # Build compounds list for batch submission
     # Include the per-compound duplicate action and new names
     compounds = []
+    skipped_no_structure = []
+
     for _, row in df.iterrows():
         compound_name = str(row.get('compound_name', '')).strip()
-        structure = str(row.get(structure_col, '')).strip()
 
-        if not compound_name or not structure:
+        if not compound_name:
             continue
 
         # Sanitize compound name
@@ -869,15 +919,30 @@ def _submit_batch(
         if compound_action == 'skip':
             continue
 
-        # Convert InChI to SMILES if needed
-        smiles = structure
-        if not has_smiles:
-            converted = _inchi_to_smiles(structure)
-            if converted:
-                smiles = converted
-            else:
-                logger.warning(f"Could not convert InChI for {compound_name}, skipping")
-                continue
+        # Try to get SMILES - with fallback from SMILES -> InChI conversion
+        smiles = None
+
+        # First try SMILES column if available
+        if df_has_smiles:
+            smiles_val = str(row.get('smiles', '')).strip()
+            if smiles_val and smiles_val.lower() not in ('nan', 'none', ''):
+                smiles = smiles_val
+
+        # If no SMILES, try InChI column and convert
+        if not smiles and df_has_inchi:
+            inchi_val = str(row.get('inchi', '')).strip()
+            if inchi_val and inchi_val.lower() not in ('nan', 'none', ''):
+                converted = _inchi_to_smiles(inchi_val)
+                if converted:
+                    smiles = converted
+                else:
+                    logger.warning(f"Could not convert InChI for {compound_name}")
+
+        # Skip if no valid structure found
+        if not smiles:
+            skipped_no_structure.append(safe_name)
+            logger.warning(f"No valid SMILES or InChI for {compound_name}, skipping")
+            continue
 
         # For duplicates, use the new name if provided
         final_name = safe_name
@@ -899,6 +964,10 @@ def _submit_batch(
                 compound_data["original_compound_name"] = safe_name
 
         compounds.append(compound_data)
+
+    # Warn user about skipped compounds
+    if skipped_no_structure:
+        st.warning(f"Skipped {len(skipped_no_structure)} compounds with no valid SMILES or InChI: {', '.join(skipped_no_structure[:5])}{'...' if len(skipped_no_structure) > 5 else ''}")
 
     if not compounds:
         st.error("No valid compounds found in file (all may have been skipped)")

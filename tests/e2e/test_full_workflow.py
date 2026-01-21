@@ -241,8 +241,11 @@ class TestJobCancellationWorkflow:
         assert response.status_code == 201
         batch_id = response.json()["batch_id"]
 
-        # Cancel batch
-        cancel_response = client_with_db.post(f"/api/v1/jobs/batch/{batch_id}/cancel")
+        # Cancel batch (must use same session ID that created it)
+        cancel_response = client_with_db.post(
+            f"/api/v1/jobs/batch/{batch_id}/cancel",
+            headers={"X-Session-ID": "52345678-1234-4123-8123-123456789012"}
+        )
         assert cancel_response.status_code == 200
 
 
