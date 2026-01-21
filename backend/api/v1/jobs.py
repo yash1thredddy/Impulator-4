@@ -58,6 +58,62 @@ from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def get_next_version_name(db: Session, base_name: str) -> str:
+    """
+    Calculate the next available version name for a compound.
+
+    Given a base name like 'Quercetin', checks existing compounds for:
+    - 'Quercetin' (original)
+    - 'Quercetin_v2', 'Quercetin_v3', etc. (versions)
+
+    Returns the next available version name (e.g., 'Quercetin_v3' if v2 exists).
+
+    Args:
+        db: Database session
+        base_name: The base compound name (without version suffix)
+
+    Returns:
+        Next available version name (e.g., 'Quercetin_v2' or 'Quercetin_v4')
+    """
+    import re
+
+    # Strip any existing version suffix from base_name to get true base
+    version_pattern = re.compile(r'^(.+?)(_v(\d+))?$')
+    match = version_pattern.match(base_name)
+    if match:
+        true_base = match.group(1)
+    else:
+        true_base = base_name
+
+    # Query all compound names that start with the base name
+    existing_names = db.query(Compound.compound_name).filter(
+        Compound.compound_name.like(f"{true_base}%")
+    ).all()
+
+    existing_names = [name[0] for name in existing_names]
+
+    # Find highest existing version number
+    max_version = 1  # Start at 1 (original has no suffix, v2 is first duplicate)
+
+    version_suffix_pattern = re.compile(rf'^{re.escape(true_base)}(_v(\d+))?$')
+
+    for name in existing_names:
+        match = version_suffix_pattern.match(name)
+        if match:
+            if match.group(2):
+                # Has version suffix like _v2, _v3
+                version = int(match.group(2))
+                max_version = max(max_version, version)
+            else:
+                # Original name (no suffix) counts as version 1
+                max_version = max(max_version, 1)
+
+    # Return next version
+    next_version = max_version + 1
+    return f"{true_base}_v{next_version}"
+
+
 # Rate limiting configuration
 RATE_LIMIT_WINDOW_SECONDS = 60  # 1 minute window
 RATE_LIMIT_MAX_JOBS = 10  # Max 10 single jobs per minute per session
@@ -272,7 +328,11 @@ async def create_job(
         name_matches = existing_compound.compound_name.lower().strip() == request.compound_name.lower().strip()
         duplicate_type = "exact" if name_matches else "structure_only"
 
-        logger.info(f"Duplicate found: {request.compound_name} matches {existing_compound.compound_name} (InChIKey: {inchikey[:14]}...)")
+        # Calculate the next available version name for duplicates
+        # e.g., if 'Quercetin' and 'Quercetin_v2' exist, suggest 'Quercetin_v3'
+        suggested_name = get_next_version_name(db, existing_compound.compound_name)
+
+        logger.info(f"Duplicate found: {request.compound_name} matches {existing_compound.compound_name} (InChIKey: {inchikey[:14]}...), suggested: {suggested_name}")
 
         return DuplicateFoundResponse(
             status="duplicate_found",
@@ -287,7 +347,8 @@ async def create_job(
                 "compound_name": request.compound_name,
                 "inchikey": inchikey,
                 "smiles": request.smiles,
-            }
+            },
+            suggested_name=suggested_name,
         )
 
     # Atomic check-and-create with retry for race condition handling

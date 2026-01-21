@@ -374,6 +374,7 @@ class DuplicateFoundResponse(BaseModel):
     duplicate_type: str = Field(..., description="'exact' if both structure and name match, 'structure_only' if only structure matches")
     existing_compound: ExistingCompoundInfo
     submitted: dict = Field(..., description="Info about the submitted compound")
+    suggested_name: Optional[str] = Field(None, description="Suggested unique name for duplicate (e.g., 'Quercetin_v3')")
 
 
 class ResolveDuplicateRequest(BaseModel):

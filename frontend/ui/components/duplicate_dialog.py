@@ -34,6 +34,8 @@ def render_duplicate_dialog(duplicate_info: dict) -> Tuple[Optional[str], Option
     existing_name = existing.get("compound_name", "Unknown")
     submitted_name = submitted.get("compound_name", "Unknown")
     processed_at = existing.get("processed_at", "Unknown")
+    # Get suggested name from backend (calculates next available version, e.g., _v3 if _v2 exists)
+    suggested_name = duplicate_info.get("suggested_name", f"{existing_name}_v2")
 
     # Container for the dialog
     with st.container(border=True):
@@ -76,7 +78,7 @@ def render_duplicate_dialog(duplicate_info: dict) -> Tuple[Optional[str], Option
             if action == "change_name":
                 new_name = st.text_input(
                     "New compound name:",
-                    value=f"{existing_name}_v2",
+                    value=suggested_name,
                     key="duplicate_new_name",
                     help="Enter a unique name for this compound"
                 )
