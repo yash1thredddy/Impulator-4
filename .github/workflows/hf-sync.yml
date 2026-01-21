@@ -1,0 +1,42 @@
+name: Sync to Hugging Face Space
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install huggingface_hub
+        run: pip install "huggingface_hub>=0.23.0"
+
+      - name: Upload to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - << 'EOF'
+          import os
+          from huggingface_hub import HfApi
+
+          token = os.environ["HF_TOKEN"]
+          api = HfApi(token=token)
+          api.upload_folder(
+              folder_path=".",
+              repo_id="yash1th26/Impulator",
+              repo_type="space",
+              revision="main",
+              create_pr=False,
+              commit_message="Auto-sync from GitHub (master)",
+          )
+          EOF

@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  impulator:
+    build: .
+    container_name: impulator-app
+    ports:
+      - "7860:7860"  # HF Spaces standard port
+      - "8000:8000"  # Backend API (for development/debugging)
+    volumes:
+      - ./data:/app/data  # Persist database and results
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - FRONTEND_PORT=7860
+      # Azure credentials - uncomment and set for cloud storage
+      # - AZURE_CONNECTION_STRING=${AZURE_CONNECTION_STRING}
+      # - AZURE_CONTAINER=impulator
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
