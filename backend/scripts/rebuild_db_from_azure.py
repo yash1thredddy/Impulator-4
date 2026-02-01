@@ -19,17 +19,16 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.config import settings
-from backend.core.database import SessionLocal, init_db
-from backend.core.azure_sync import (
+from backend.core.database import SessionLocal, init_db  # noqa: E402
+from backend.core.azure_sync import (  # noqa: E402
     is_azure_configured,
     _get_container_client,
     _is_uuid_path,
     _extract_entry_id_from_blob,
     sync_db_to_azure,
 )
-from backend.models.database import Compound
-from backend.services.job_service import generate_inchikey, generate_canonical_smiles
+from backend.models.database import Compound  # noqa: E402
+from backend.services.job_service import generate_inchikey, generate_canonical_smiles  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,

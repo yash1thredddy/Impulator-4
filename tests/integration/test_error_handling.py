@@ -9,7 +9,7 @@ Tests error handling throughout the application including:
 - Concurrent request handling
 """
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -338,7 +338,6 @@ class TestExternalServiceFailures:
     def test_chembl_api_failure_handled(self):
         """Test that ChEMBL API failure is handled gracefully."""
         from backend.modules.api_client import get_chembl_ids
-        import requests
 
         with patch('backend.modules.api_client._get_chembl_client', side_effect=Exception("ChEMBL unavailable")):
             # Should not raise, return empty result

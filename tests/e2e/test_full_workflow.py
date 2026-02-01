@@ -7,7 +7,6 @@ They may take longer to run and should be run after unit/integration tests.
 Run with: pytest tests/e2e/ -v -s
 """
 import pytest
-import time
 import uuid
 from unittest.mock import patch
 

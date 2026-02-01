@@ -20,7 +20,7 @@ import requests
 from typing import Dict, List, Optional, Tuple
 from functools import lru_cache
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor
 
 # Try relative import first, then absolute
 try:
@@ -30,6 +30,12 @@ except ImportError:
         from config import PDB_API_DELAY
     except ImportError:
         PDB_API_DELAY = 0.2  # Default value
+
+# Try to import rcsbapi for official API (disabled but kept for future use)
+try:
+    from rcsbapi.data import DataQuery
+except ImportError:
+    DataQuery = None  # rcsb-api library not available/broken
 
 logger = logging.getLogger(__name__)
 
@@ -351,7 +357,7 @@ def get_batch_structure_resolutions_graphql(pdb_ids: List[str]) -> Dict[str, Opt
 
 def _fetch_resolutions_parallel_rest(pdb_ids: List[str]) -> Dict[str, Optional[float]]:
     """Fetch resolutions via parallel REST calls with rate limiting."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import as_completed
 
     results = {}
     with ThreadPoolExecutor(max_workers=5) as executor:

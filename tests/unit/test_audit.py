@@ -8,8 +8,7 @@ Tests security event logging including:
 - Validation failure logging
 - Security threat logging
 """
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import json
 
 

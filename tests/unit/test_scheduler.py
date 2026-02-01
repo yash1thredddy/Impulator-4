@@ -3,8 +3,7 @@ Unit tests for the JobScheduler (SQLite-based job queue).
 """
 import pytest
 import time
-import json
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone
 
 
@@ -205,7 +204,7 @@ class TestRecoverStalledJobs:
 
     def test_recover_stalled_jobs_with_stalled(self, mock_db_session, mock_scheduler):
         """Test recovery of stalled PROCESSING jobs."""
-        from backend.models.database import Job, JobStatus
+        from backend.models.database import JobStatus
         from unittest.mock import MagicMock
 
         # Create mock stalled job

@@ -1,8 +1,6 @@
 """
 SQLAlchemy ORM models for Jobs and Compounds.
 """
-from datetime import datetime
-from typing import Optional
 
 from sqlalchemy import Column, String, Integer, Float, Text, DateTime, Enum, Boolean
 from sqlalchemy.sql import func

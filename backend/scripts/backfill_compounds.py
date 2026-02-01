@@ -23,10 +23,10 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from backend.config import settings
-from backend.core.database import SessionLocal
-from backend.core.azure_sync import download_result_from_azure_by_entry_id, is_azure_configured
-from backend.models.database import Compound
+from backend.config import settings  # noqa: E402
+from backend.core.database import SessionLocal  # noqa: E402
+from backend.core.azure_sync import download_result_from_azure_by_entry_id, is_azure_configured  # noqa: E402
+from backend.models.database import Compound  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -129,7 +129,7 @@ def backfill_compound(db, compound: Compound) -> bool:
     if 'tmp' in str(local_path):
         try:
             os.unlink(local_path)
-        except:
+        except OSError:
             pass
 
     if updated:

@@ -10,7 +10,6 @@ Tests the five core interference mechanisms:
 
 Also tests the main interface functions and scoring.
 """
-import pytest
 from rdkit import Chem
 
 
@@ -25,7 +24,7 @@ class TestPAINSDetection:
         mol = Chem.MolFromSmiles('c1ccc(O)c(O)c1')
         has_pains, names = check_pains_violations(mol)
 
-        assert has_pains == True
+        assert has_pains
         assert len(names) > 0
 
     def test_pains_clean_molecule(self):
@@ -36,7 +35,7 @@ class TestPAINSDetection:
         mol = Chem.MolFromSmiles('CCO')
         has_pains, names = check_pains_violations(mol)
 
-        assert has_pains == False
+        assert not has_pains
         assert len(names) == 0
 
     def test_pains_none_molecule(self):
@@ -45,7 +44,7 @@ class TestPAINSDetection:
 
         has_pains, names = check_pains_violations(None)
 
-        assert has_pains == False
+        assert not has_pains
         assert names == []
 
     def test_pains_rhodanine_detected(self):
@@ -56,7 +55,7 @@ class TestPAINSDetection:
         mol = Chem.MolFromSmiles('O=C1NC(=S)SC1')
         has_pains, names = check_pains_violations(mol)
 
-        assert has_pains == True
+        assert has_pains
 
 
 class TestAggregatorRiskDetection:
@@ -83,7 +82,7 @@ class TestAggregatorRiskDetection:
         mol = Chem.MolFromSmiles('NCC(=O)O')
         is_risk, reason = check_aggregator_risk(mol)
 
-        assert is_risk == False
+        assert not is_risk
 
     def test_aggregator_none_molecule(self):
         """Test handling of None molecule."""
@@ -91,7 +90,7 @@ class TestAggregatorRiskDetection:
 
         is_risk, reason = check_aggregator_risk(None)
 
-        assert is_risk == False
+        assert not is_risk
         assert reason == ""
 
 
@@ -106,7 +105,7 @@ class TestRedoxReactivityDetection:
         mol = Chem.MolFromSmiles('Oc1ccccc1O')
         is_redox, groups = check_redox_reactive(mol)
 
-        assert is_redox == True
+        assert is_redox
         assert 'catechol' in groups
 
     def test_redox_hydroquinone_detected(self):
@@ -117,7 +116,7 @@ class TestRedoxReactivityDetection:
         mol = Chem.MolFromSmiles('Oc1ccc(O)cc1')
         is_redox, groups = check_redox_reactive(mol)
 
-        assert is_redox == True
+        assert is_redox
         assert 'hydroquinone' in groups
 
     def test_redox_disulfide_detected(self):
@@ -128,7 +127,7 @@ class TestRedoxReactivityDetection:
         mol = Chem.MolFromSmiles('CSSC')
         is_redox, groups = check_redox_reactive(mol)
 
-        assert is_redox == True
+        assert is_redox
         assert 'disulfide' in groups
 
     def test_redox_thiol_detected(self):
@@ -139,7 +138,7 @@ class TestRedoxReactivityDetection:
         mol = Chem.MolFromSmiles('CS')
         is_redox, groups = check_redox_reactive(mol)
 
-        assert is_redox == True
+        assert is_redox
         assert 'thiol' in groups
 
     def test_redox_clean_molecule(self):
@@ -150,7 +149,7 @@ class TestRedoxReactivityDetection:
         mol = Chem.MolFromSmiles('CCCCCC')
         is_redox, groups = check_redox_reactive(mol)
 
-        assert is_redox == False
+        assert not is_redox
         assert len(groups) == 0
 
     def test_redox_none_molecule(self):
@@ -159,7 +158,7 @@ class TestRedoxReactivityDetection:
 
         is_redox, groups = check_redox_reactive(None)
 
-        assert is_redox == False
+        assert not is_redox
         assert groups == []
 
 
@@ -173,7 +172,7 @@ class TestFluorescenceInterferenceDetection:
         mol = Chem.MolFromSmiles('c1ccc2ccccc2c1')
         is_fluor, scaffolds = check_fluorescence_interference(mol)
 
-        assert is_fluor == True
+        assert is_fluor
         assert 'naphthalene' in scaffolds
 
     def test_fluorescence_anthracene_detected(self):
@@ -183,7 +182,7 @@ class TestFluorescenceInterferenceDetection:
         mol = Chem.MolFromSmiles('c1ccc2cc3ccccc3cc2c1')
         is_fluor, scaffolds = check_fluorescence_interference(mol)
 
-        assert is_fluor == True
+        assert is_fluor
         assert 'anthracene' in scaffolds
 
     def test_fluorescence_extended_conjugation(self):
@@ -194,7 +193,7 @@ class TestFluorescenceInterferenceDetection:
         mol = Chem.MolFromSmiles('c1ccc2c(c1)ccc1ccccc12')
         is_fluor, scaffolds = check_fluorescence_interference(mol)
 
-        assert is_fluor == True
+        assert is_fluor
         assert 'extended_conjugation' in scaffolds
 
     def test_fluorescence_clean_molecule(self):
@@ -205,7 +204,7 @@ class TestFluorescenceInterferenceDetection:
         mol = Chem.MolFromSmiles('CCO')
         is_fluor, scaffolds = check_fluorescence_interference(mol)
 
-        assert is_fluor == False
+        assert not is_fluor
 
     def test_fluorescence_none_molecule(self):
         """Test handling of None molecule."""
@@ -213,7 +212,7 @@ class TestFluorescenceInterferenceDetection:
 
         is_fluor, scaffolds = check_fluorescence_interference(None)
 
-        assert is_fluor == False
+        assert not is_fluor
         assert scaffolds == []
 
 
@@ -227,7 +226,7 @@ class TestThiolReactivityDetection:
         mol = Chem.MolFromSmiles('C=CC(=O)N')
         is_reactive, groups = check_thiol_reactive(mol)
 
-        assert is_reactive == True
+        assert is_reactive
         assert 'acrylamide' in groups
 
     def test_thiol_epoxide_detected(self):
@@ -237,7 +236,7 @@ class TestThiolReactivityDetection:
         mol = Chem.MolFromSmiles('C1OC1')
         is_reactive, groups = check_thiol_reactive(mol)
 
-        assert is_reactive == True
+        assert is_reactive
         assert 'epoxide' in groups
 
     def test_thiol_isothiocyanate_detected(self):
@@ -247,7 +246,7 @@ class TestThiolReactivityDetection:
         mol = Chem.MolFromSmiles('CN=C=S')
         is_reactive, groups = check_thiol_reactive(mol)
 
-        assert is_reactive == True
+        assert is_reactive
         assert 'isothiocyanate' in groups
 
     def test_thiol_aldehyde_detected(self):
@@ -258,7 +257,7 @@ class TestThiolReactivityDetection:
         mol = Chem.MolFromSmiles('CC=O')
         is_reactive, groups = check_thiol_reactive(mol)
 
-        assert is_reactive == True
+        assert is_reactive
         assert 'aldehyde' in groups
 
     def test_thiol_clean_molecule(self):
@@ -269,7 +268,7 @@ class TestThiolReactivityDetection:
         mol = Chem.MolFromSmiles('CC(=O)OC')
         is_reactive, groups = check_thiol_reactive(mol)
 
-        assert is_reactive == False
+        assert not is_reactive
 
     def test_thiol_none_molecule(self):
         """Test handling of None molecule."""
@@ -277,7 +276,7 @@ class TestThiolReactivityDetection:
 
         is_reactive, groups = check_thiol_reactive(None)
 
-        assert is_reactive == False
+        assert not is_reactive
         assert groups == []
 
 
@@ -290,11 +289,11 @@ class TestGetAllInterferenceFlags:
 
         flags = get_all_interference_flags('CCO')  # Ethanol
 
-        assert flags['PAINS'] == False
-        assert flags['Aggregator'] == False
-        assert flags['Redox'] == False
-        assert flags['Fluorescence'] == False
-        assert flags['Thiol_Reactive'] == False
+        assert not flags['PAINS']
+        assert not flags['Aggregator']
+        assert not flags['Redox']
+        assert not flags['Fluorescence']
+        assert not flags['Thiol_Reactive']
 
     def test_all_flags_quercetin(self):
         """Test flags for quercetin (known problematic compound)."""
@@ -306,8 +305,8 @@ class TestGetAllInterferenceFlags:
 
         # Quercetin should trigger multiple flags
         # PAINS (catechol), Redox (catechol), Fluorescence (flavonoid)
-        assert flags['PAINS'] == True or flags['Redox'] == True
-        assert flags['Fluorescence'] == True
+        assert flags['PAINS'] or flags['Redox']
+        assert flags['Fluorescence']
 
     def test_all_flags_invalid_smiles(self):
         """Test handling of invalid SMILES."""
@@ -316,7 +315,7 @@ class TestGetAllInterferenceFlags:
         flags = get_all_interference_flags('invalid_smiles')
 
         # Should return all False for invalid SMILES
-        assert all(v == False for v in flags.values())
+        assert all(not v for v in flags.values())
 
     def test_all_flags_empty_smiles(self):
         """Test handling of empty SMILES."""
@@ -324,7 +323,7 @@ class TestGetAllInterferenceFlags:
 
         flags = get_all_interference_flags('')
 
-        assert all(v == False for v in flags.values())
+        assert all(not v for v in flags.values())
 
     def test_all_flags_na_smiles(self):
         """Test handling of 'N/A' SMILES."""
@@ -332,7 +331,7 @@ class TestGetAllInterferenceFlags:
 
         flags = get_all_interference_flags('N/A')
 
-        assert all(v == False for v in flags.values())
+        assert all(not v for v in flags.values())
 
 
 class TestCalculateAssayQualityScore:
@@ -410,8 +409,8 @@ class TestGetDetailedInterferenceReport:
 
         assert report['num_flags'] == 0
         assert report['assay_quality_score'] == 1.0
-        assert report['pains']['flag'] == False
-        assert report['redox']['flag'] == False
+        assert not report['pains']['flag']
+        assert not report['redox']['flag']
 
     def test_detailed_report_catechol(self):
         """Test detailed report for catechol."""
@@ -419,7 +418,7 @@ class TestGetDetailedInterferenceReport:
 
         report = get_detailed_interference_report('Oc1ccccc1O')
 
-        assert report['redox']['flag'] == True
+        assert report['redox']['flag']
         assert 'catechol' in report['redox']['detected_groups']
         assert report['num_flags'] > 0
         assert report['assay_quality_score'] < 1.0
@@ -494,4 +493,4 @@ class TestEdgeCases:
 
         assert isinstance(flags, dict)
         # Should detect fluorescence due to extended conjugation
-        assert flags['Fluorescence'] == True
+        assert flags['Fluorescence']

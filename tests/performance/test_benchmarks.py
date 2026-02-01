@@ -137,6 +137,8 @@ class TestDataFrameOperationsPerformance:
 
         assert elapsed < 0.5, f"DataFrame filtering too slow: {elapsed:.2f}s"
         assert len(active) + len(df[df['Status'] == 'inactive']) == n_rows
+        assert len(high_activity) > 0  # Verify filtering worked
+        assert len(low_nm) > 0  # Verify filtering worked
 
     @pytest.mark.benchmark
     def test_groupby_aggregation_performance(self):

@@ -46,8 +46,8 @@ from backend.models.schemas import (
     CancelResponse,
     DuplicateMatch,
 )
-from backend.services.job_service import job_service, generate_inchikey, generate_canonical_smiles
-from backend.models.database import Compound, DeletedCompound
+from backend.services.job_service import job_service, generate_inchikey
+from backend.models.database import Compound, DeletedCompound, Job
 from backend.core.azure_sync import delete_result_from_azure_by_entry_id
 from backend.core.audit import (
     log_rate_limit_exceeded,
@@ -237,7 +237,7 @@ def _job_to_response(job) -> JobResponse:
     return JobResponse(**data)
 
 
-def _verify_job_ownership(db: Session, job_id: str, session_id: str) -> "Job":
+def _verify_job_ownership(db: Session, job_id: str, session_id: str) -> Job:
     """Verify the session owns this job.
 
     Args:
@@ -251,8 +251,6 @@ def _verify_job_ownership(db: Session, job_id: str, session_id: str) -> "Job":
     Raises:
         HTTPException: 404 if job not found, 403 if unauthorized
     """
-    from backend.models.database import Job
-
     job = db.query(Job).filter(Job.id == job_id).first()
 
     if not job:
@@ -1015,7 +1013,6 @@ async def delete_job(
     Only completed, failed, or cancelled jobs can be deleted.
     """
     import json
-    from pathlib import Path
 
     # Verify ownership
     job = _verify_job_ownership(db, job_id, session_id)

@@ -8,7 +8,6 @@ Tests ClassyFire and NPClassifier integration including:
 - Compound type inference
 - Error handling
 """
-import pytest
 from unittest.mock import patch, MagicMock
 
 
@@ -96,7 +95,7 @@ class TestGetNPClassifierClassification:
         assert result['NP_Pathway'] == 'Shikimates and Phenylpropanoids'
         assert result['NP_Superclass'] == 'Flavonoids'
         assert result['NP_Class'] == 'Flavones'
-        assert result['NP_isglycoside'] == False
+        assert not result['NP_isglycoside']
 
     def test_glycoside_detection(self):
         """Test NPClassifier detects glycosides."""
@@ -115,7 +114,7 @@ class TestGetNPClassifierClassification:
             result = get_npclassifier_classification('glycoside_smiles')
 
         assert result is not None
-        assert result['NP_isglycoside'] == True
+        assert result['NP_isglycoside']
 
     def test_empty_results(self):
         """Test NPClassifier handles empty results."""
@@ -439,7 +438,7 @@ class TestLegacyGetClassification:
 
     def test_legacy_function(self):
         """Test legacy function returns same as classyfire function."""
-        from backend.modules.chemical_classifier import get_classification, get_classyfire_classification
+        from backend.modules.chemical_classifier import get_classification
 
         mock_response = MagicMock()
         mock_response.status_code = 200

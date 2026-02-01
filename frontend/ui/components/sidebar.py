@@ -9,15 +9,13 @@ Smart Polling:
 - Polling resumes when new jobs are submitted
 """
 
-import time
 import logging
-from pathlib import Path
-from typing import List, Dict, Any
+from typing import Dict, Any
 
 import streamlit as st
 
 from frontend.services import get_api_client, delete_from_cache
-from frontend.utils import SessionState, VIEW_HOME, VIEW_ANALYZE
+from frontend.utils import SessionState
 from frontend.config.settings import config
 
 logger = logging.getLogger(__name__)

@@ -14,7 +14,7 @@ import re
 import html
 import logging
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional
+from typing import List
 from pathlib import Path
 
 import pandas as pd

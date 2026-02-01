@@ -2,9 +2,8 @@
 Unit tests for CompoundService.
 """
 import pytest
-from unittest.mock import MagicMock, patch, Mock
+from unittest.mock import MagicMock, patch
 import pandas as pd
-import numpy as np
 
 
 class TestCompoundService:

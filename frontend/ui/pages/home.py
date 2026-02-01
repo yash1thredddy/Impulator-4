@@ -12,7 +12,7 @@ from typing import Optional, List, Dict, Any
 
 import streamlit as st
 
-from frontend.services import list_results, is_azure_configured, get_api_client
+from frontend.services import get_api_client
 from frontend.utils import SessionState
 from frontend.ui.components import render_compound_grid, render_compound_list
 

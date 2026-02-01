@@ -12,20 +12,20 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-import streamlit as st
+import streamlit as st  # noqa: E402
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from frontend.config.settings import config
-from frontend.utils import SessionState, VIEW_HOME, VIEW_ANALYZE, VIEW_COMPOUND_DETAILS
-from frontend.ui.components import render_sidebar
-from frontend.ui.pages import (
+from frontend.config.settings import config  # noqa: E402
+from frontend.utils import SessionState, VIEW_HOME, VIEW_ANALYZE, VIEW_COMPOUND_DETAILS  # noqa: E402
+from frontend.ui.components import render_sidebar  # noqa: E402
+from frontend.ui.pages import (  # noqa: E402
     render_home_page,
     render_analyze_page,
     render_compound_detail_page,
 )
-from frontend.services import set_session_id
+from frontend.services import set_session_id  # noqa: E402
 
 # Configure logging
 logging.basicConfig(

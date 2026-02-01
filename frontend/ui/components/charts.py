@@ -9,7 +9,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any
 
 from frontend.ui.components.molecule_viewer import (
     embed_structure_viewer,

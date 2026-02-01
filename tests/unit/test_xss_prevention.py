@@ -1,7 +1,6 @@
 """
 Unit tests for XSS prevention in frontend components.
 """
-import pytest
 import html
 
 

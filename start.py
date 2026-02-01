@@ -10,7 +10,6 @@ import sys
 import time
 import signal
 import subprocess
-import threading
 from pathlib import Path
 
 # Configuration
@@ -114,7 +113,7 @@ def main():
     print("=" * 50)
 
     # Start backend first
-    backend = start_backend()
+    start_backend()
 
     # Wait for backend to be ready
     if not wait_for_backend():
@@ -123,7 +122,7 @@ def main():
         return
 
     # Start frontend
-    frontend = start_frontend()
+    start_frontend()
 
     print("=" * 50)
     print(f"Backend:  http://{BACKEND_HOST}:{BACKEND_PORT}/docs")

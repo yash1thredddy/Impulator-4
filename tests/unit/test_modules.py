@@ -1,7 +1,6 @@
 """
 Unit tests for decoupled chemistry modules.
 """
-import pytest
 import pandas as pd
 import numpy as np
 

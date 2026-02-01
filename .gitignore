@@ -35,6 +35,10 @@ build/
 htmlcov/
 /test_*.py
 
+# Linting
+.ruff_cache/
+lint_report*.txt
+
 # OS
 .DS_Store
 Thumbs.db
@@ -50,3 +54,8 @@ uploads/
 
 # Claude Code internal files
 .claude/
+.agent/
+
+# Documentation - exclude all markdown except README
+*.md
+!README.md

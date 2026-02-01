@@ -11,7 +11,6 @@ Tests cover:
 import pytest
 import os
 import tempfile
-import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -51,7 +50,6 @@ class TestNullPoolConfiguration:
 
     def test_nullpool_no_connection_persistence(self):
         """Test that NullPool doesn't persist connections."""
-        from sqlalchemy.pool import NullPool
 
         # Create a test engine with NullPool
         engine = create_engine(

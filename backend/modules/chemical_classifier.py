@@ -301,7 +301,7 @@ def get_complete_classification(smiles: str, inchikey: str) -> Dict[str, str]:
         classification.update(np_data)
         logger.info(f"NPClassifier classification obtained: {np_data.get('NP_Pathway', 'Unknown')}")
     else:
-        logger.warning(f"No NPClassifier data for SMILES")
+        logger.warning("No NPClassifier data for SMILES")
 
     return classification
 

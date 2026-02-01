@@ -23,9 +23,9 @@ from datetime import datetime
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.config import settings
-from backend.core.database import engine, _apply_migrations, Base
-from backend.models.database import Job, Compound  # noqa: F401
+from backend.config import settings  # noqa: E402
+from backend.core.database import engine, _apply_migrations, Base  # noqa: E402
+from backend.models.database import Job, Compound  # noqa: F401, E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,7 +67,7 @@ def create_backup(db_path: Path) -> Path:
 
 def verify_schema():
     """Verify the current database schema."""
-    from sqlalchemy import text, inspect
+    from sqlalchemy import text
 
     logger.info("Verifying database schema...")
 
@@ -145,7 +145,7 @@ def main():
     db_path = get_db_path()
 
     # Verify current schema
-    schema_info = verify_schema()
+    verify_schema()
 
     if args.verify_only:
         logger.info("Verification complete (--verify-only mode)")

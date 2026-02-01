@@ -9,7 +9,6 @@ Tests the PDB integration for structural evidence scoring including:
 - PDB evidence scoring
 - Error handling and edge cases
 """
-import pytest
 from unittest.mock import patch, MagicMock
 import json
 

@@ -11,8 +11,6 @@ Run with: pytest tests/test_batch_fetching.py -v -s
 import time
 import pytest
 import logging
-from typing import Dict, List, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configure logging for test visibility
 logging.basicConfig(level=logging.INFO)
@@ -78,7 +76,7 @@ class TestMoleculeDataBenchmark:
         # Calculate statistics
         avg_call_time = sum(api_call_times) / len(api_call_times) if api_call_times else 0
 
-        logger.info(f"\n--- Results ---")
+        logger.info("\n--- Results ---")
         logger.info(f"Total molecules fetched: {len(results)}/{len(SAMPLE_CHEMBL_IDS)}")
         logger.info(f"Total time: {total_time:.3f}s")
         logger.info(f"Average per molecule: {avg_call_time:.3f}s")
@@ -135,7 +133,7 @@ class TestMoleculeDataBenchmark:
 
         total_time = time.time() - total_start
 
-        logger.info(f"\n--- Results ---")
+        logger.info("\n--- Results ---")
         logger.info(f"Total molecules fetched: {len(results)}/{len(SAMPLE_CHEMBL_IDS)}")
         logger.info(f"Total time: {total_time:.3f}s")
         logger.info(f"Query execution time: {fetch_time:.3f}s")
@@ -179,7 +177,7 @@ class TestTargetNameBenchmark:
         total_time = time.time() - total_start
         avg_call_time = sum(api_call_times) / len(api_call_times) if api_call_times else 0
 
-        logger.info(f"\n--- Results ---")
+        logger.info("\n--- Results ---")
         logger.info(f"Total targets fetched: {len(results)}/{len(SAMPLE_TARGET_IDS)}")
         logger.info(f"Total time: {total_time:.3f}s")
         logger.info(f"Average per target: {avg_call_time:.3f}s")
@@ -227,7 +225,7 @@ class TestTargetNameBenchmark:
 
         total_time = time.time() - total_start
 
-        logger.info(f"\n--- Results ---")
+        logger.info("\n--- Results ---")
         logger.info(f"Total targets fetched: {len(results)}/{len(SAMPLE_TARGET_IDS)}")
         logger.info(f"Total time: {total_time:.3f}s")
         logger.info(f"Query execution time: {fetch_time:.3f}s")
@@ -363,7 +361,7 @@ class TestComprehensiveBenchmark:
             print(f"  - Target batch fetching: MARGINAL ({target_speedup:.1f}x speedup)")
 
         # Data integrity check
-        print(f"\nData Integrity Check:")
+        print("\nData Integrity Check:")
         mol_match = set(individual_mol_results.keys()) == set(batch_mol_results.keys())
         target_match = set(individual_target_results.keys()) == set(batch_target_results.keys())
         print(f"  - Molecule IDs match: {mol_match}")

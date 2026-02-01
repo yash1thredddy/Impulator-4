@@ -10,7 +10,6 @@ Tests the following fixes:
 import time
 import pytest
 import threading
-from unittest.mock import MagicMock, patch
 
 # Import the modules we're testing
 import sys
@@ -204,7 +203,6 @@ class TestRateLimiter:
                     call_times.append(time.time())
 
         threads = [threading.Thread(target=worker) for _ in range(3)]
-        start = time.time()
 
         for t in threads:
             t.start()

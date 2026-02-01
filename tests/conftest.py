@@ -16,7 +16,7 @@ os.environ["TESTING"] = "true"
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 
 # Now import and clear settings cache to pick up .env values
-from backend.config import get_settings
+from backend.config import get_settings  # noqa: E402
 get_settings.cache_clear()
 
 

@@ -6,32 +6,27 @@ Displays full analysis results with improved UX and organization.
 import html
 import logging
 import re
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 from urllib.parse import quote_plus
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
 
 from frontend.services import (
     get_api_client,
     delete_from_cache,
-    load_result_dataframe,
-    get_cached_result,
-    get_result_files,
     smart_load_summary,
     smart_load_dataframe,
 )
 from frontend.utils import SessionState, sanitize_compound_name
 from frontend.ui.components import render_2d_structure, embed_structure_viewer, render_structure_viewer_hint
-import streamlit.components.v1 as components
 
 logger = logging.getLogger(__name__)
 
 # Import scipy for regression statistics
-from scipy import stats as scipy_stats
+from scipy import stats as scipy_stats  # noqa: E402
 
 
 def render_compound_detail_page() -> None:
@@ -966,7 +961,7 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
         # Show group counts when colored - compact
         if color_by != "None":
             st.markdown("<hr style='margin: 8px 0;'>", unsafe_allow_html=True)
-            st.markdown(f"<p style='font-size: 11px; font-weight: 600; margin-bottom: 2px;'>Groups</p>", unsafe_allow_html=True)
+            st.markdown("<p style='font-size: 11px; font-weight: 600; margin-bottom: 2px;'>Groups</p>", unsafe_allow_html=True)
             group_counts = plot_df[color_by].value_counts()
             for grp, cnt in group_counts.head(6).items():
                 st.markdown(f"<p style='font-size: 10px; margin: 0; color: #666;'>{str(grp)[:12]}: {cnt}</p>", unsafe_allow_html=True)
@@ -1082,7 +1077,7 @@ def _render_pains_analysis(df: pd.DataFrame) -> None:
             flagged_compounds = []
             for name, (col, _, _) in flags.items():
                 if col in unique_df.columns:
-                    flagged = unique_df[unique_df[col] == True]
+                    flagged = unique_df[unique_df[col]]
                     for _, row in flagged.iterrows():
                         mol_name = row.get('Molecule_Name', '')
                         # Handle NaN/float values
@@ -1216,7 +1211,7 @@ def _render_oqpla_analysis(df: pd.DataFrame, compound_name: str) -> None:
         st.caption("Invalid Metabolic Panaceas (IMPs) are compounds that appear exceptionally active but may be assay artifacts")
 
         # Get IMP candidate records and unique compounds
-        imp_df = df[df['Is_IMP_Candidate'] == True]
+        imp_df = df[df['Is_IMP_Candidate']]
         unique_imp_compounds = imp_df.drop_duplicates('ChEMBL_ID') if 'ChEMBL_ID' in imp_df.columns else imp_df
         total_unique = df.drop_duplicates('ChEMBL_ID')['ChEMBL_ID'].nunique() if 'ChEMBL_ID' in df.columns else len(df)
 
@@ -1526,7 +1521,7 @@ def _plot_efficiency_scatter(df: pd.DataFrame) -> None:
             with stats_cols[4]:
                 # Show equation inline
                 sign = "+" if intercept >= 0 else ""
-                st.markdown(f"**Equation:**")
+                st.markdown("**Equation:**")
                 st.caption(f"{y_col} = {slope:.4f} × {x_col} {sign} {intercept:.4f}")
         except Exception as e:
             st.caption(f"Could not calculate regression stats: {e}")
@@ -1739,7 +1734,7 @@ def _plot_custom(df: pd.DataFrame) -> None:
                 st.metric("p-value", f"{p_value:.2e}")
             with stats_cols[4]:
                 sign = "+" if intercept >= 0 else ""
-                st.markdown(f"**Equation:**")
+                st.markdown("**Equation:**")
                 st.caption(f"{y_axis} = {slope:.4f} × {x_axis} {sign} {intercept:.4f}")
         except Exception as e:
             st.caption(f"Could not calculate regression stats: {e}")
@@ -2074,7 +2069,7 @@ def _render_pdb_evidence(
             # Parse resolution for sorting
             try:
                 res_val = float(resolution) if resolution and resolution != 'N/A' and str(resolution) != 'nan' else 999.0
-            except:
+            except (ValueError, TypeError):
                 res_val = 999.0
 
             display_data.append({
@@ -2383,7 +2378,6 @@ def _render_drug_indications(data: Dict[str, Any]) -> None:
         mesh_id = str(row.get('MESH_ID', '')) if pd.notna(row.get('MESH_ID')) else ''
         mesh_heading = str(row.get('MESH_Heading', '')) if pd.notna(row.get('MESH_Heading')) else ''
         efo_id = str(row.get('EFO_ID', '')) if pd.notna(row.get('EFO_ID')) else ''
-        efo_term = str(row.get('EFO_Term', '')) if pd.notna(row.get('EFO_Term')) else ''
         max_phase_val = row.get('Max_Phase', 0)
         if pd.isna(max_phase_val):
             max_phase_val = 0

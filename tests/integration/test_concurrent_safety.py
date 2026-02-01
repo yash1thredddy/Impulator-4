@@ -5,8 +5,7 @@ Tests that SQLite concurrency fixes work correctly under load.
 """
 import pytest
 import threading
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from sqlalchemy import create_engine
@@ -316,7 +315,6 @@ class TestDatabaseConcurrencySafety:
     def test_nullpool_creates_separate_connections(self, test_engine):
         """Test that NullPool behavior creates separate connections."""
         from backend.core.database import engine as real_engine
-        from sqlalchemy.pool import NullPool
 
         # The real engine should use NullPool
         assert real_engine.pool.__class__.__name__ == 'NullPool' or \

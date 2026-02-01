@@ -12,7 +12,6 @@ from typing import Dict, Any, Optional
 
 import streamlit as st
 
-from frontend.utils import SessionState
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +47,7 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "") -> bool
     compound_name = compound.get('compound_name', 'Unknown')
     entry_id = compound.get('entry_id', '')  # Unique identifier for key generation
     smiles = compound.get('smiles', '')
-    has_imp_warning = compound.get('has_imp_warning', False)
     is_duplicate = compound.get('is_duplicate', False)
-    duplicate_of = compound.get('duplicate_of', '')
 
     # Optional fields from metadata
     chembl_id = compound.get('chembl_id', '')

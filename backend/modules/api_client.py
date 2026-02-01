@@ -2,6 +2,7 @@
 ChEMBL API client with optimized batch processing and caching.
 Decoupled from Streamlit for backend use.
 """
+import atexit
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
@@ -637,7 +638,6 @@ def fetch_batch_molecule_data(
         return {}
 
     # Try batch fetch with retries
-    last_error = None
     for attempt in range(max_retries):
         try:
             if progress_callback:
@@ -670,7 +670,6 @@ def fetch_batch_molecule_data(
             return result
 
         except Exception as e:
-            last_error = e
             error_str = str(e)
             is_corruption_error = "empty attribute" in error_str or "doesn't allow a default" in error_str
 
@@ -746,7 +745,6 @@ def fetch_batch_target_names(
         return {}
 
     # Try batch fetch with retries
-    last_error = None
     for attempt in range(max_retries):
         try:
             if progress_callback:
@@ -777,7 +775,6 @@ def fetch_batch_target_names(
             return result
 
         except Exception as e:
-            last_error = e
             error_str = str(e)
             is_corruption_error = "empty attribute" in error_str or "doesn't allow a default" in error_str
 
@@ -860,7 +857,6 @@ def fetch_all_activities_single_batch(
         return []
 
     # Try single batch with retries (ChEMBL API can have intermittent issues with corrupted records)
-    last_error = None
     for attempt in range(max_retries):
         try:
             # Single query for ALL activities - auto-paginates
@@ -896,7 +892,6 @@ def fetch_all_activities_single_batch(
             return filtered
 
         except Exception as e:
-            last_error = e
             error_str = str(e)
             # Check if this is a ChEMBL data corruption error (empty attribute)
             is_corruption_error = "empty attribute" in error_str or "doesn't allow a default" in error_str
@@ -1082,5 +1077,4 @@ def shutdown_api_client():
 
 
 # Register shutdown handler
-import atexit
 atexit.register(shutdown_api_client)

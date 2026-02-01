@@ -17,7 +17,7 @@ import logging
 import shutil
 import zipfile
 from datetime import datetime
-from typing import Callable, Dict, List, Optional, Any
+from typing import Callable, Dict, List, Optional
 
 import pandas as pd
 import numpy as np
@@ -27,35 +27,32 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from backend.config import settings
-from backend.core.database import SessionLocal, get_db_session
-from backend.core.azure_sync import (
+from backend.config import settings  # noqa: E402
+from backend.core.database import get_db_session  # noqa: E402
+from backend.core.azure_sync import (  # noqa: E402
     sync_db_to_azure,
     upload_result_to_azure_by_entry_id,
     get_storage_path_from_entry_id,
 )
-from backend.core import sanitize_compound_name
-from backend.models.database import JobStatus, JobType
+from backend.core import sanitize_compound_name  # noqa: E402
+from backend.models.database import JobStatus  # noqa: E402
 
 # Import chemistry modules (clean absolute imports)
-from backend.modules.api_client import (
+from backend.modules.api_client import (  # noqa: E402
     get_chembl_ids,
-    get_molecule_data,
-    batch_fetch_activities,
-    get_target_name,
     get_drug_indications,
 )
-from backend.modules.efficiency_metrics import calculate_all_efficiency_metrics
-from backend.modules.efficiency_planes import calculate_all_plane_metrics
-from backend.modules.outlier_detection import detect_efficiency_outliers
-from backend.modules.oqpla_scoring import (
+from backend.modules.efficiency_metrics import calculate_all_efficiency_metrics  # noqa: E402
+from backend.modules.efficiency_planes import calculate_all_plane_metrics  # noqa: E402
+from backend.modules.outlier_detection import detect_efficiency_outliers  # noqa: E402
+from backend.modules.oqpla_scoring import (  # noqa: E402
     calculate_oqpla_phase2,
     add_oqpla_interpretation,
     create_detailed_pdb_summary,
 )
-from backend.modules.imp_classifier import classify_imp_candidates
-from backend.modules.assay_interference_filter import get_all_interference_flags
-from backend.modules.chemical_classifier import get_complete_classification
+from backend.modules.imp_classifier import classify_imp_candidates  # noqa: E402
+from backend.modules.assay_interference_filter import get_all_interference_flags  # noqa: E402
+from backend.modules.chemical_classifier import get_complete_classification  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +96,6 @@ class CompoundService:
             similarity_threshold: Similarity threshold (50-100)
             activity_types: List of activity types to fetch
         """
-        from backend.services.job_service import job_service
         import uuid
 
         # Generate unique entry_id for this compound result (used for UUID-based storage)
@@ -622,7 +618,10 @@ class CompoundService:
             from rdkit.Contrib.NP_Score import npscorer
             fscore_data = os.path.join(RDConfig.RDContribDir, 'NP_Score', 'publicnp.model.gz')
             np_scorer_obj = npscorer.readNPModel(fscore_data)
-            np_scorer = lambda mol: npscorer.scoreMol(mol, np_scorer_obj)
+
+            def np_scorer(mol):
+                return npscorer.scoreMol(mol, np_scorer_obj)
+
             logger.info("NP Likeness scorer loaded from Contrib")
         except Exception as e1:
             try:

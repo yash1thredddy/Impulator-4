@@ -5,9 +5,9 @@ Provides access to processed compound data from the database.
 Includes CRUD operations for compound management.
 """
 import logging
-from typing import List, Optional
+from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, HTTPException, Header
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 

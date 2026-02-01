@@ -13,7 +13,7 @@ Metrics calculated:
 
 import numpy as np
 import pandas as pd
-from typing import Dict, Union
+from typing import Dict
 import logging
 
 logger = logging.getLogger(__name__)

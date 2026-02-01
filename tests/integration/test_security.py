@@ -6,7 +6,7 @@ Tests ownership checks, session validation, and other security measures.
 import os
 import time
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 # Skip all tests if fastapi not installed
 pytest.importorskip("fastapi")

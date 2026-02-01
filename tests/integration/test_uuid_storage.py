@@ -4,7 +4,6 @@ Integration tests for UUID-based storage functionality.
 import pytest
 import uuid
 from unittest.mock import patch, MagicMock
-from pathlib import Path
 
 
 class TestStoragePathGeneration:

@@ -11,11 +11,10 @@ Tests verify actual functionality:
 """
 import pytest
 import threading
-import time
 import sys
 from unittest.mock import patch, MagicMock
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -242,7 +241,8 @@ class TestBatchSummaryAggregation:
             {"compound_name": "Test1", "smiles": "CCO"},
             batch_id=batch_id
         )
-        job2 = job_service.create_job(
+        # job2 stays PENDING (created but not stored)
+        job_service.create_job(
             db_session, JobType.SINGLE,
             {"compound_name": "Test2", "smiles": "CCCO"},
             batch_id=batch_id
@@ -257,7 +257,6 @@ class TestBatchSummaryAggregation:
         job_service.update_progress(
             db_session, job1.id, 50.0, "Processing", JobStatus.PROCESSING
         )
-        # job2 stays PENDING
         with patch('backend.services.job_service.sync_db_to_azure'):
             job_service.complete_job(
                 db_session, job3.id, "/path/result.zip",

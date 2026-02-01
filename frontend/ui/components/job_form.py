@@ -5,7 +5,7 @@ Provides the input form for submitting new compound analysis jobs.
 
 import html
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import streamlit as st
 
@@ -93,7 +93,6 @@ def render_job_form() -> Optional[str]:
         selected_activities = render_activity_checkboxes()
 
     # Validation feedback
-    validation_passed = True
     if compound_name and structure_input:
         if input_type == "SMILES":
             result = InputValidator.validate_smiles(structure_input)
@@ -102,7 +101,6 @@ def render_job_form() -> Optional[str]:
 
         if not result.is_valid:
             st.error(f"Invalid {input_type}: {result.errors[0]}")
-            validation_passed = False
 
     # Submit button
     st.divider()
@@ -553,7 +551,6 @@ def render_csv_upload_form() -> Optional[str]:
     # Store mapped dataframe for submission
     st.session_state['csv_mapped'] = df_mapped
     has_smiles = 'smiles' in df_mapped.columns
-    has_inchi = 'inchi' in df_mapped.columns
 
     # Preview mapped data
     st.write("Preview (mapped):")
@@ -575,7 +572,6 @@ def render_csv_upload_form() -> Optional[str]:
 
     # Check for duplicates before showing submit
     duplicate_check_done = st.session_state.get('batch_duplicate_check_done', False)
-    user_confirmed = st.session_state.get('batch_user_confirmed', False)
 
     if not duplicate_check_done:
         # Step 1: Check for duplicates first
@@ -774,7 +770,6 @@ def render_csv_upload_form() -> Optional[str]:
                 st.info(f"Existing compounds: {' | '.join(action_summary)}")
 
         # Determine compounds to process based on decisions
-        compounds_to_skip = [name for name, action in duplicate_decisions.items() if action == 'skip']
         compounds_to_replace = [name for name, action in duplicate_decisions.items() if action == 'replace']
         compounds_as_duplicates = [name for name, action in duplicate_decisions.items() if action == 'duplicate']
 

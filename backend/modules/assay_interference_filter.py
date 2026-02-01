@@ -23,7 +23,7 @@ References:
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 from rdkit import Chem
 from rdkit.Chem import FilterCatalog, rdMolDescriptors, Descriptors
 

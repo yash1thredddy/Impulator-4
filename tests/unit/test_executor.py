@@ -3,7 +3,6 @@ Unit tests for the JobExecutor (ThreadPoolExecutor wrapper).
 """
 import pytest
 import time
-from unittest.mock import MagicMock, patch
 
 
 class TestJobExecutor:

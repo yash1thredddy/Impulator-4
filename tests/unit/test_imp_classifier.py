@@ -28,9 +28,9 @@ class TestClassifyIMPCandidates:
 
         result = classify_imp_candidates(df)
 
-        assert result.loc[0, 'Is_IMP_Candidate'] == True
+        assert result.loc[0, 'Is_IMP_Candidate']
         assert result.loc[0, 'IMP_Confidence'] == 'High'
-        assert result.loc[1, 'Is_IMP_Candidate'] == False
+        assert not result.loc[1, 'Is_IMP_Candidate']
         assert result.loc[1, 'IMP_Confidence'] == 'Not IMP'
 
     def test_classify_with_oqpla_medium_confidence(self):
@@ -44,7 +44,7 @@ class TestClassifyIMPCandidates:
 
         result = classify_imp_candidates(df)
 
-        assert result.loc[0, 'Is_IMP_Candidate'] == True
+        assert result.loc[0, 'Is_IMP_Candidate']
         assert result.loc[0, 'IMP_Confidence'] == 'Medium'
 
     def test_classify_with_oqpla_low_confidence(self):
@@ -58,7 +58,7 @@ class TestClassifyIMPCandidates:
 
         result = classify_imp_candidates(df)
 
-        assert result.loc[0, 'Is_IMP_Candidate'] == True
+        assert result.loc[0, 'Is_IMP_Candidate']
         assert result.loc[0, 'IMP_Confidence'] == 'Low'
 
     def test_classify_without_oqpla_simple_confidence(self):
@@ -87,9 +87,9 @@ class TestClassifyIMPCandidates:
 
         result = classify_imp_candidates(df, min_outlier_count=3)
 
-        assert result.loc[0, 'Is_IMP_Candidate'] == True
-        assert result.loc[1, 'Is_IMP_Candidate'] == False
-        assert result.loc[2, 'Is_IMP_Candidate'] == False
+        assert result.loc[0, 'Is_IMP_Candidate']
+        assert not result.loc[1, 'Is_IMP_Candidate']
+        assert not result.loc[2, 'Is_IMP_Candidate']
 
     def test_classify_missing_outlier_count_raises(self):
         """Test that missing Outlier_Count column raises ValueError."""
@@ -114,7 +114,7 @@ class TestClassifyIMPCandidates:
 
         result = classify_imp_candidates(df)
 
-        assert result.loc[0, 'Is_IMP_Candidate'] == True
+        assert result.loc[0, 'Is_IMP_Candidate']
         assert result.loc[0, 'IMP_Confidence'] == 'Unknown'
 
     def test_classify_empty_dataframe(self):

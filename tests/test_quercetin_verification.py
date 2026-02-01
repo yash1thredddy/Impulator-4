@@ -115,7 +115,7 @@ class QuercetinExpectedData:
         print(f"  Activity counts: {dict(self.activity_counts)}")
         print(f"  PDB structures: {len(self.pdb_ids)}")
         print(f"  Drug indications: {len(self.drug_indications)}")
-        print(f"  ==========================================")
+        print("  ==========================================")
 
 
 # Global instance for loading data once
@@ -140,12 +140,12 @@ class TestQuercetinChEMBLVerification:
 
         self.expected.print_summary()
 
-        print(f"\n  ========================================")
-        print(f"  ChEMBL SIMILARITY SEARCH")
+        print("\n  ========================================")
+        print("  ChEMBL SIMILARITY SEARCH")
         print(f"  SMILES: {self.expected.smiles[:50]}...")
         print(f"  Similarity: {self.expected.similarity_threshold}%")
         print(f"  Expected ChEMBL IDs: {sorted(self.expected.chembl_ids)}")
-        print(f"  ========================================")
+        print("  ========================================")
 
         start = time.time()
         similar = new_client.similarity.filter(
@@ -158,7 +158,7 @@ class TestQuercetinChEMBLVerification:
         # Extract ChEMBL IDs
         found_ids = {mol.get('molecule_chembl_id') for mol in similar_list if mol.get('molecule_chembl_id')}
 
-        print(f"\n  Results:")
+        print("\n  Results:")
         print(f"  Time: {elapsed:.2f}s")
         print(f"  Found {len(similar_list)} similar compounds")
         print(f"  ChEMBL IDs: {sorted(found_ids)}")
@@ -167,7 +167,7 @@ class TestQuercetinChEMBLVerification:
         missing = self.expected.chembl_ids - found_ids
         extra = found_ids - self.expected.chembl_ids
 
-        print(f"\n  Comparison:")
+        print("\n  Comparison:")
         print(f"  Expected: {sorted(self.expected.chembl_ids)}")
         print(f"  Found:    {sorted(found_ids)}")
         if missing:
@@ -179,7 +179,7 @@ class TestQuercetinChEMBLVerification:
         assert self.expected.chembl_ids.issubset(found_ids), \
             f"Missing expected ChEMBL IDs: {missing}"
 
-        print(f"\n  All expected ChEMBL IDs found!")
+        print("\n  All expected ChEMBL IDs found!")
 
     def test_activity_fetch_returns_expected_count(self):
         """
@@ -188,12 +188,12 @@ class TestQuercetinChEMBLVerification:
         """
         from chembl_webresource_client.new_client import new_client
 
-        print(f"\n  ========================================")
-        print(f"  ACTIVITY FETCH VERIFICATION (Single Batch)")
+        print("\n  ========================================")
+        print("  ACTIVITY FETCH VERIFICATION (Single Batch)")
         print(f"  ChEMBL IDs: {sorted(self.expected.chembl_ids)}")
         print(f"  Activity types: {self.expected.activity_types}")
         print(f"  Expected total: {len(self.expected.activities)}")
-        print(f"  ========================================")
+        print("  ========================================")
 
         start = time.time()
         chembl_ids = list(self.expected.chembl_ids)
@@ -223,7 +223,7 @@ class TestQuercetinChEMBLVerification:
         elapsed = time.time() - start
 
         # Show counts by type
-        print(f"\n  By type:")
+        print("\n  By type:")
         for act_type in self.expected.activity_types:
             count = sum(1 for a in all_activities if a.get('standard_type') == act_type)
             expected = self.expected.activity_counts.get(act_type, 0)
@@ -232,12 +232,12 @@ class TestQuercetinChEMBLVerification:
         # Count by type
         found_counts = Counter(a.get('standard_type') for a in all_activities)
 
-        print(f"\n  Results:")
+        print("\n  Results:")
         print(f"  Time: {elapsed:.2f}s")
         print(f"  Total activities: {len(all_activities)}")
         print(f"  Expected total: {len(self.expected.activities)}")
 
-        print(f"\n  By type comparison:")
+        print("\n  By type comparison:")
         for act_type in self.expected.activity_types:
             expected = self.expected.activity_counts.get(act_type, 0)
             found = found_counts.get(act_type, 0)
@@ -253,7 +253,7 @@ class TestQuercetinChEMBLVerification:
             if len(all_activities) > expected_count:
                 print(f"\n  Activity count BETTER than expected! (found {len(all_activities)} vs expected {expected_count})")
             else:
-                print(f"\n  Activity count within expected range!")
+                print("\n  Activity count within expected range!")
         else:
             pytest.fail(f"Activity count {len(all_activities)} below minimum {min_expected} (85% of {expected_count})")
 
@@ -264,11 +264,11 @@ class TestQuercetinChEMBLVerification:
         """
         from chembl_webresource_client.new_client import new_client
 
-        print(f"\n  ========================================")
-        print(f"  DRUG INDICATIONS VERIFICATION (Single Batch)")
+        print("\n  ========================================")
+        print("  DRUG INDICATIONS VERIFICATION (Single Batch)")
         print(f"  ChEMBL IDs: {sorted(self.expected.chembl_ids)}")
         print(f"  Expected: {len(self.expected.drug_indications)} indications")
-        print(f"  ========================================")
+        print("  ========================================")
 
         start = time.time()
 
@@ -290,14 +290,14 @@ class TestQuercetinChEMBLVerification:
 
         elapsed = time.time() - start
 
-        print(f"\n  Results:")
+        print("\n  Results:")
         print(f"  Time: {elapsed:.2f}s")
         print(f"  Total indications: {len(all_indications)}")
         print(f"  Expected: {len(self.expected.drug_indications)}")
 
         # Show sample
         if all_indications:
-            print(f"\n  Sample indications:")
+            print("\n  Sample indications:")
             for ind in all_indications[:3]:
                 mesh = ind.get('mesh_heading', 'N/A')
                 phase = ind.get('max_phase_for_ind', 'N/A')
@@ -311,7 +311,7 @@ class TestQuercetinChEMBLVerification:
             if len(all_indications) > expected_count:
                 print(f"\n  Drug indications BETTER than expected! (found {len(all_indications)} vs expected {expected_count})")
             else:
-                print(f"\n  Drug indications count within expected range!")
+                print("\n  Drug indications count within expected range!")
         else:
             pytest.fail(f"Indication count {len(all_indications)} below minimum {min_expected} (80% of {expected_count})")
 
@@ -328,11 +328,11 @@ class TestQuercetinPDBVerification:
         """
         Test that PDB search returns structures matching Quercetin.zip.
         """
-        print(f"\n  ========================================")
-        print(f"  PDB SEARCH VERIFICATION")
+        print("\n  ========================================")
+        print("  PDB SEARCH VERIFICATION")
         print(f"  SMILES: {self.expected.smiles[:50]}...")
         print(f"  Expected PDB count: {len(self.expected.pdb_ids)}")
-        print(f"  ========================================")
+        print("  ========================================")
 
         search_url = "https://search.rcsb.org/rcsbsearch/v2/query"
         search_payload = {
@@ -359,7 +359,7 @@ class TestQuercetinPDBVerification:
                 result = resp.json()
                 found_pdb_ids = set(entry['identifier'] for entry in result.get('result_set', []))
 
-                print(f"\n  Results:")
+                print("\n  Results:")
                 print(f"  Time: {elapsed:.2f}s")
                 print(f"  Found: {len(found_pdb_ids)} unique PDB IDs")
                 print(f"  Expected: {len(self.expected.pdb_ids)} PDB IDs")
@@ -369,7 +369,7 @@ class TestQuercetinPDBVerification:
                 missing = self.expected.pdb_ids - found_pdb_ids
                 extra = found_pdb_ids - self.expected.pdb_ids
 
-                print(f"\n  Comparison:")
+                print("\n  Comparison:")
                 print(f"  In both:  {len(in_both)}")
                 if missing:
                     print(f"  Missing:  {len(missing)} - {sorted(missing)[:10]}...")
@@ -383,7 +383,7 @@ class TestQuercetinPDBVerification:
                 # Allow some variance (PDB data updates)
                 assert match_pct >= 80, f"Only {match_pct:.1f}% of expected PDB IDs found"
 
-                print(f"\n  PDB search verification PASSED!")
+                print("\n  PDB search verification PASSED!")
 
             elif resp.status_code == 204:
                 pytest.fail("No PDB structures found")
@@ -397,10 +397,10 @@ class TestQuercetinPDBVerification:
         """
         Test fetching resolutions via GraphQL for expected PDB IDs.
         """
-        print(f"\n  ========================================")
-        print(f"  PDB GraphQL RESOLUTION FETCH")
+        print("\n  ========================================")
+        print("  PDB GraphQL RESOLUTION FETCH")
         print(f"  PDB IDs to fetch: {len(self.expected.pdb_ids)}")
-        print(f"  ========================================")
+        print("  ========================================")
 
         pdb_ids = list(self.expected.pdb_ids)
 
@@ -431,13 +431,13 @@ class TestQuercetinPDBVerification:
                 data = response.json()
                 entries = data.get("data", {}).get("entries", [])
 
-                print(f"\n  Results:")
+                print("\n  Results:")
                 print(f"  Time: {elapsed:.2f}s (single GraphQL query)")
                 print(f"  Entries returned: {len(entries)}")
                 print(f"  Expected: {len(self.expected.pdb_ids)}")
 
                 # Show sample
-                print(f"\n  Sample structures:")
+                print("\n  Sample structures:")
                 for entry in entries[:5]:
                     pdb_id = entry.get("rcsb_id")
                     res_list = entry.get("rcsb_entry_info", {}).get("resolution_combined", [])
@@ -449,7 +449,7 @@ class TestQuercetinPDBVerification:
                 assert len(entries) >= len(self.expected.pdb_ids) * 0.9, \
                     f"Only {len(entries)}/{len(self.expected.pdb_ids)} entries returned"
 
-                print(f"\n  GraphQL fetch verification PASSED!")
+                print("\n  GraphQL fetch verification PASSED!")
 
             else:
                 pytest.fail(f"GraphQL failed: {response.status_code}")
@@ -462,16 +462,16 @@ class TestQuercetinPDBVerification:
         Verify REST and GraphQL return identical resolution data.
         Uses sample of PDB IDs from expected data.
         """
-        print(f"\n  ========================================")
-        print(f"  REST vs GraphQL ACCURACY")
-        print(f"  ========================================")
+        print("\n  ========================================")
+        print("  REST vs GraphQL ACCURACY")
+        print("  ========================================")
 
         # Use first 5 PDB IDs from expected data
         test_ids = sorted(self.expected.pdb_ids)[:5]
         print(f"  Test IDs: {test_ids}")
 
         # REST fetch
-        print(f"\n  Fetching via REST API...")
+        print("\n  Fetching via REST API...")
         rest_data = {}
         for pdb_id in test_ids:
             try:
@@ -481,11 +481,11 @@ class TestQuercetinPDBVerification:
                     data = resp.json()
                     res_list = data.get('rcsb_entry_info', {}).get('resolution_combined', [])
                     rest_data[pdb_id] = round(res_list[0], 2) if res_list else None
-            except:
+            except (requests.RequestException, KeyError, IndexError, ValueError):
                 pass
 
         # GraphQL fetch
-        print(f"  Fetching via GraphQL API...")
+        print("  Fetching via GraphQL API...")
         graphql_query = """
         query($ids: [String!]!) {
             entries(entry_ids: $ids) {
@@ -507,11 +507,11 @@ class TestQuercetinPDBVerification:
                     pdb_id = entry.get("rcsb_id")
                     res_list = entry.get("rcsb_entry_info", {}).get("resolution_combined", [])
                     graphql_data[pdb_id] = round(res_list[0], 2) if res_list else None
-        except:
+        except (requests.RequestException, KeyError, ValueError):
             pass
 
         # Compare
-        print(f"\n  Resolution comparison:")
+        print("\n  Resolution comparison:")
         all_match = True
         for pdb_id in test_ids:
             rest_val = rest_data.get(pdb_id)
@@ -523,7 +523,7 @@ class TestQuercetinPDBVerification:
                 all_match = False
 
         assert all_match, "Resolution values don't match between REST and GraphQL"
-        print(f"\n  All values match!")
+        print("\n  All values match!")
 
 
 class TestQuercetinEndToEnd:
@@ -542,15 +542,15 @@ class TestQuercetinEndToEnd:
 
         self.expected.print_summary()
 
-        print(f"\n  ========================================")
-        print(f"  COMPLETE WORKFLOW vs ZIP FILE")
-        print(f"  ========================================")
+        print("\n  ========================================")
+        print("  COMPLETE WORKFLOW vs ZIP FILE")
+        print("  ========================================")
 
         total_start = time.time()
         results = {}
 
         # Step 1: ChEMBL Similarity Search
-        print(f"\n  Step 1: ChEMBL Similarity Search...")
+        print("\n  Step 1: ChEMBL Similarity Search...")
         start = time.time()
         similar = new_client.similarity.filter(
             smiles=self.expected.smiles,
@@ -561,7 +561,7 @@ class TestQuercetinEndToEnd:
         print(f"    Found: {len(found_chembl_ids)} | Expected: {len(self.expected.chembl_ids)} | Time: {time.time()-start:.2f}s")
 
         # Step 2: Activity Fetch (Single Batch - more efficient)
-        print(f"\n  Step 2: Single Batch Activity Fetch...")
+        print("\n  Step 2: Single Batch Activity Fetch...")
         start = time.time()
         activities_api_error = False
         try:
@@ -582,7 +582,7 @@ class TestQuercetinEndToEnd:
         print(f"    Found: {len(all_activities)} | Expected: {len(self.expected.activities)} | Time: {time.time()-start:.2f}s")
 
         # Step 3: Drug Indications (Single Batch)
-        print(f"\n  Step 3: Drug Indications (Single Batch)...")
+        print("\n  Step 3: Drug Indications (Single Batch)...")
         start = time.time()
         try:
             indications = new_client.drug_indication.filter(
@@ -596,7 +596,7 @@ class TestQuercetinEndToEnd:
         print(f"    Found: {len(all_indications)} | Expected: {len(self.expected.drug_indications)} | Time: {time.time()-start:.2f}s")
 
         # Step 4: PDB Search
-        print(f"\n  Step 4: PDB Chemical Search...")
+        print("\n  Step 4: PDB Chemical Search...")
         start = time.time()
         search_payload = {
             "query": {
@@ -620,7 +620,7 @@ class TestQuercetinEndToEnd:
         print(f"    Found: {len(found_pdb_ids)} | Expected: {len(self.expected.pdb_ids)} | Time: {time.time()-start:.2f}s")
 
         # Step 5: GraphQL Resolution Fetch
-        print(f"\n  Step 5: GraphQL Resolution Fetch...")
+        print("\n  Step 5: GraphQL Resolution Fetch...")
         start = time.time()
         resolutions = {}
         if found_pdb_ids:
@@ -649,9 +649,9 @@ class TestQuercetinEndToEnd:
         total_time = time.time() - total_start
 
         # Summary
-        print(f"\n  ========================================")
-        print(f"  VERIFICATION SUMMARY")
-        print(f"  ========================================")
+        print("\n  ========================================")
+        print("  VERIFICATION SUMMARY")
+        print("  ========================================")
 
         checks_passed = 0
         total_checks = 4
@@ -699,13 +699,13 @@ class TestQuercetinEndToEnd:
         if pdb_match:
             checks_passed += 1
 
-        print(f"  ----------------------------------------")
+        print("  ----------------------------------------")
         print(f"  TOTAL TIME:    {total_time:.2f}s")
         print(f"  CHECKS PASSED: {checks_passed}/{total_checks}")
-        print(f"  ========================================")
+        print("  ========================================")
 
         assert checks_passed == total_checks, f"Only {checks_passed}/{total_checks} checks passed"
-        print(f"\n  All verifications PASSED!")
+        print("\n  All verifications PASSED!")
 
 
 if __name__ == "__main__":

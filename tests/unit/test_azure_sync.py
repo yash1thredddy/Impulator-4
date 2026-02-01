@@ -57,7 +57,6 @@ class TestAzureConnection:
     def test_azure_connection_works(self):
         """Test that Azure connection is successful when configured."""
         from backend.core.azure_sync import is_azure_configured, _get_blob_service
-        from backend.config import settings
 
         if not is_azure_configured():
             pytest.skip("Azure not configured, skipping connection test")

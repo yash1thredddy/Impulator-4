@@ -10,7 +10,7 @@ from io import BytesIO
 
 import streamlit as st
 import streamlit.components.v1 as components
-from typing import Optional, Dict, Any
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -225,7 +225,6 @@ def prepare_chart_customdata(
     Returns:
         Tuple of (modified_df, customdata_columns)
     """
-    import pandas as pd
 
     # Add row index if not present
     if '_row_index' not in df.columns:

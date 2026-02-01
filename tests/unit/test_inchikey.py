@@ -1,8 +1,6 @@
 """
 Unit tests for InChIKey generation and duplicate detection utilities.
 """
-import pytest
-from unittest.mock import patch, MagicMock
 
 
 class TestInChIKeyGeneration:

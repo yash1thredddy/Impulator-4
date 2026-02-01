@@ -5,7 +5,7 @@ Manages concurrent job processing with configurable worker limit.
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, Future
-from typing import Callable, Dict, Optional, Any
+from typing import Callable, Dict, Optional
 
 from backend.config import settings
 

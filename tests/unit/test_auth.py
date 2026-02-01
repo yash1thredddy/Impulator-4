@@ -2,7 +2,6 @@
 Unit tests for authentication and session validation.
 """
 import pytest
-from unittest.mock import MagicMock
 
 # Skip all tests if fastapi not installed
 pytest.importorskip("fastapi")

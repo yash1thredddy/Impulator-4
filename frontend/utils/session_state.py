@@ -14,7 +14,7 @@ import hashlib
 import logging
 import uuid
 from typing import Any, Optional, Dict, List, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 

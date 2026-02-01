@@ -7,7 +7,6 @@ Tests settings loading and validation including:
 - CORS origins parsing
 - Path handling
 """
-import pytest
 from unittest.mock import patch
 import os
 
@@ -41,7 +40,7 @@ class TestSettingsDefaults:
         with patch.dict(os.environ, {}, clear=True):
             settings = Settings(_env_file=None)
 
-        assert settings.DEBUG == False
+        assert not settings.DEBUG
 
     def test_default_api_port(self):
         """Test default API port."""
@@ -99,7 +98,7 @@ class TestSettingsOverrides:
         with patch.dict(os.environ, {'DEBUG': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
-        assert settings.DEBUG == True
+        assert settings.DEBUG
 
     def test_override_api_port(self):
         """Test API_PORT can be overridden."""
@@ -303,7 +302,7 @@ class TestRateLimitSettings:
         with patch.dict(os.environ, {}, clear=True):
             settings = Settings(_env_file=None)
 
-        assert settings.RATE_LIMIT_ENABLED == True
+        assert settings.RATE_LIMIT_ENABLED
 
 
 class TestAzureSettings:
