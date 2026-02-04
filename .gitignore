@@ -56,6 +56,8 @@ uploads/
 .claude/
 .agent/
 
-# Documentation - exclude all markdown except README
+# Documentation - exclude all markdown except specific docs
 *.md
 !README.md
+!OQPLA_Score.md
+!OQPLA_SCORING_METHODOLOGY.md

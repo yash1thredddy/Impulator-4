@@ -138,6 +138,10 @@ async def lifespan(app: FastAPI):
         logger.info("Uploading current logs to Azure...")
         sync_logs_to_azure()
 
+    # Close Azure Blob client to release network connections
+    from backend.core.azure_sync import close_azure_client
+    close_azure_client()
+
     logger.info("Shutdown complete")
 
 

@@ -131,6 +131,19 @@ def _get_blob_service():
     return _blob_service_client
 
 
+def close_azure_client():
+    """Close the global Azure Blob client. Call on application shutdown."""
+    global _blob_service_client
+    if _blob_service_client is not None:
+        try:
+            _blob_service_client.close()
+            logger.info("Azure Blob client closed")
+        except Exception as e:
+            logger.warning(f"Error closing Azure client: {e}")
+        finally:
+            _blob_service_client = None
+
+
 def _get_container_client():
     """Get Azure container client."""
     service = _get_blob_service()
@@ -522,8 +535,17 @@ def download_result_from_azure_by_entry_id(entry_id: str, local_path: str) -> bo
             Path("/tmp").resolve() if not os.name == 'nt' else Path(os.environ.get('TEMP', 'C:\\Temp')).resolve(),
         ]
 
+        # Use Path.is_relative_to() for proper containment check (not string startswith)
+        # This prevents bypasses like /tmp-evil matching /tmp
+        def is_path_within(path: Path, parent: Path) -> bool:
+            try:
+                path.relative_to(parent)
+                return True
+            except ValueError:
+                return False
+
         path_is_safe = any(
-            str(resolved_path).startswith(str(allowed_dir))
+            is_path_within(resolved_path, allowed_dir)
             for allowed_dir in allowed_dirs
         )
 

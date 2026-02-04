@@ -261,18 +261,26 @@ class TestJobSubmissionWithScheduler:
     def test_job_status_is_pending_after_submission(self, client_with_mock_scheduler):
         """Test that job status is PENDING after submission (scheduler handles processing)."""
         client, mock_scheduler = client_with_mock_scheduler
+        session_id = "33345678-1234-4123-8123-123456789012"
 
         # Submit job
-        submit_response = client.post("/api/v1/jobs", json={
-            "compound_name": "StatusTest",
-            "smiles": "CCO",
-            "similarity_threshold": 90
-        })
+        submit_response = client.post(
+            "/api/v1/jobs",
+            json={
+                "compound_name": "StatusTest",
+                "smiles": "CCO",
+                "similarity_threshold": 90
+            },
+            headers={"X-Session-ID": session_id}
+        )
         assert submit_response.status_code == 201
         job_id = submit_response.json()["id"]
 
-        # Check job status
-        status_response = client.get(f"/api/v1/jobs/{job_id}")
+        # Check job status (must use same session ID)
+        status_response = client.get(
+            f"/api/v1/jobs/{job_id}",
+            headers={"X-Session-ID": session_id}
+        )
         assert status_response.status_code == 200
         assert status_response.json()["status"] == "pending"
 
@@ -334,18 +342,27 @@ class TestBatchJobOperations:
 
     def test_get_batch_summary(self, client):
         """Test getting batch summary."""
+        session_id = "44345678-1234-4123-8123-123456789012"
+
         # First create a batch
-        batch_response = client.post("/api/v1/jobs/batch", json={
-            "compounds": [
-                {"compound_name": "SummaryTest1", "smiles": "CCO"},
-                {"compound_name": "SummaryTest2", "smiles": "CCCO"}
-            ],
-            "similarity_threshold": 90
-        })
+        batch_response = client.post(
+            "/api/v1/jobs/batch",
+            json={
+                "compounds": [
+                    {"compound_name": "SummaryTest1", "smiles": "CCO"},
+                    {"compound_name": "SummaryTest2", "smiles": "CCCO"}
+                ],
+                "similarity_threshold": 90
+            },
+            headers={"X-Session-ID": session_id}
+        )
         batch_id = batch_response.json()["batch_id"]
 
-        # Get summary
-        summary_response = client.get(f"/api/v1/jobs/batch/{batch_id}")
+        # Get summary (must use same session ID)
+        summary_response = client.get(
+            f"/api/v1/jobs/batch/{batch_id}",
+            headers={"X-Session-ID": session_id}
+        )
         assert summary_response.status_code == 200
         data = summary_response.json()
         assert "batch_id" in data

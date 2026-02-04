@@ -15,13 +15,13 @@ urllib3>=2.0.0
 # Frontend
 streamlit>=1.52.0
 plotly>=6.0.0
+kaleido>=0.2.1  # For Plotly chart export to PNG (HTML reports)
 
 # Azure Blob Storage
 azure-storage-blob>=12.19.0
 
 # Chemistry
 rdkit>=2024.9.0
-chembl-webresource-client>=0.10.9
 pandas>=2.0.0
 numpy>=2.0.0
 

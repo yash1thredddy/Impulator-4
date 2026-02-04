@@ -499,6 +499,39 @@ def _inchi_to_smiles(inchi: str) -> Optional[str]:
         return None
 
 
+def _generate_next_version_name(compound_name: str, existing_names: List[str]) -> str:
+    """
+    Generate next version name for a duplicate compound.
+
+    Checks existing compounds for pattern {name}_v{n} and returns {name}_v{n+1}.
+
+    Examples:
+        - "Aspirin" with no existing versions -> "Aspirin_v2"
+        - "Aspirin" with "Aspirin_v2" existing -> "Aspirin_v3"
+        - "Aspirin" with "Aspirin_v2", "Aspirin_v3" existing -> "Aspirin_v4"
+
+    Args:
+        compound_name: Original compound name
+        existing_names: List of existing compound names to check against
+
+    Returns:
+        Next available version name (e.g., "Aspirin_v3")
+    """
+    import re
+
+    # Find all existing versions matching pattern {name}_v{number}
+    pattern = re.compile(rf'^{re.escape(compound_name)}_v(\d+)$', re.IGNORECASE)
+
+    max_version = 1  # Start at 1, so first duplicate becomes _v2
+    for name in existing_names:
+        match = pattern.match(name)
+        if match:
+            version = int(match.group(1))
+            max_version = max(max_version, version)
+
+    return f"{compound_name}_v{max_version + 1}"
+
+
 def render_csv_upload_form() -> Optional[str]:
     """Render the CSV batch upload form with duplicate confirmation.
 
@@ -532,6 +565,13 @@ def render_csv_upload_form() -> Optional[str]:
             _clear_column_mapping_state()
         except Exception as e:
             st.error(f"Failed to read CSV: {e}")
+            # Clear stale state to prevent showing old data on error
+            _clear_duplicate_check_state()
+            _clear_column_mapping_state()
+            if 'csv_preview' in st.session_state:
+                del st.session_state['csv_preview']
+            if 'csv_mapped' in st.session_state:
+                del st.session_state['csv_mapped']
             return None
 
     df = st.session_state.get('csv_preview')
@@ -747,7 +787,7 @@ def render_csv_upload_form() -> Optional[str]:
                     duplicate_decisions[compound_name] = default_action
                 # Auto-generate new name for duplicates without custom names
                 if duplicate_decisions.get(compound_name) == "duplicate" and compound_name not in duplicate_new_names:
-                    duplicate_new_names[compound_name] = f"{compound_name}_v2"
+                    duplicate_new_names[compound_name] = _generate_next_version_name(compound_name, existing)
 
             # Store decisions in session state
             st.session_state['batch_duplicate_decisions'] = duplicate_decisions

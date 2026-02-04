@@ -4,18 +4,28 @@ Decoupled from Streamlit for backend use.
 
 This module implements the O[Q/P/L]A multi-criteria scoring system for IMPs 2.0.
 
-**Phase 1 Components**:
-1. Efficiency Outlier Score (40%)
-2. Development Angle Score (10%)
-3. Distance to Best-in-Class Score (15%)
+**Phase 1 Components** (raw weights, normalized to 100%):
+1. Efficiency Outlier Score (40% raw -> 53.33% normalized)
+2. Development Angle Score (15% raw -> 20% normalized)
+3. Distance to Best-in-Class Score (20% raw -> 26.67% normalized)
 
-**Phase 2 Components (WITH PDB INTEGRATION)**:
-4. PDB Structural Evidence Score (15%)
+**Phase 2 Components** (raw weights, normalized to 100%):
+1. Efficiency Outlier Score (40% raw -> 50% normalized)
+2. Development Angle Score (15% raw -> 18.75% normalized)
+3. Distance to Best-in-Class Score (20% raw -> 25% normalized)
+4. PDB Structural Evidence Score (5% raw -> 6.25% normalized)
 5. Target Prediction Confidence Score (10%) - DEFERRED
 6. Analog Support Score (10%) - FUTURE
 
 When PDB is enabled, weights are renormalized.
-Final score includes QED multiplier for drug-likeness.
+Final score includes QED multiplier for drug-likeness: 0.75 + 0.25 * QED
+- QED=0 gives floor of 75% (was 50%)
+- QED=1 gives max of 100%
+- Max QED impact is 25% (was 50%)
+
+**Efficiency Score Calculation**:
+Uses only SEI and BEI (not NSEI/NBEI) to avoid redundancy since normalized
+metrics are derived from the same underlying data.
 """
 
 import numpy as np
@@ -28,13 +38,33 @@ logger = logging.getLogger(__name__)
 # Progress callback type
 ProgressCallback = Callable[[float, str], None]
 
+# =============================================================================
+# OQPLA Weight Constants (Raw Weights)
+# =============================================================================
+# These raw weights are normalized to 100% based on which components are active.
+
+# Phase 1 raw weights (sum = 75%)
+WEIGHT_EFFICIENCY_RAW = 0.40  # Efficiency Outlier Score
+WEIGHT_ANGLE_RAW = 0.15       # Development Angle Score (was 0.10)
+WEIGHT_DISTANCE_RAW = 0.20    # Distance to Best-in-Class Score (was 0.15)
+
+# Phase 2 additional raw weight
+WEIGHT_PDB_RAW = 0.05         # PDB Structural Evidence Score (was 0.15)
+
+# QED Multiplier constants
+QED_MULTIPLIER_FLOOR = 0.75   # Minimum multiplier when QED=0 (was 0.5)
+QED_MULTIPLIER_SCALE = 0.25   # Additional multiplier per QED unit (was 0.5)
+
+# Default efficiency metrics (use only SEI and BEI, not NSEI/NBEI)
+DEFAULT_EFFICIENCY_METRICS = ['SEI', 'BEI']
+
 
 def calculate_efficiency_outlier_score(
     df: pd.DataFrame,
     metrics: List[str] = None
 ) -> pd.Series:
     """
-    Component 1: Efficiency Outlier Score (40% weight).
+    Component 1: Efficiency Outlier Score (40% raw weight).
 
     Quantifies how exceptional the compound's efficiency metrics are compared
     to the cohort using Z-score normalization with sigmoid transformation.
@@ -42,15 +72,18 @@ def calculate_efficiency_outlier_score(
     Uses sigmoid function instead of hard clipping to preserve ranking
     information for exceptional compounds (z > 3).
 
+    Note: Default metrics are SEI and BEI only (not NSEI/NBEI) to avoid
+    redundancy since normalized metrics are derived from the same data.
+
     Args:
         df: DataFrame with efficiency metrics (SEI, BEI, NSEI, NBEI)
-        metrics: List of metrics to use (default: ['SEI', 'BEI', 'NSEI', 'NBEI'])
+        metrics: List of metrics to use (default: ['SEI', 'BEI'])
 
     Returns:
         pd.Series: Efficiency scores (0-1) for each compound
     """
     if metrics is None:
-        metrics = ['SEI', 'BEI', 'NSEI', 'NBEI']
+        metrics = DEFAULT_EFFICIENCY_METRICS  # ['SEI', 'BEI']
 
     missing_metrics = [m for m in metrics if m not in df.columns]
     if missing_metrics:
@@ -83,7 +116,7 @@ def calculate_efficiency_outlier_score(
 
 def calculate_angle_score(angles: pd.Series, optimal_angle: float = 45.0) -> pd.Series:
     """
-    Component 2: Development Angle Score (10% weight).
+    Component 2: Development Angle Score (15% raw weight).
 
     An angle of 45deg represents optimal balance between surface efficiency
     and binding efficiency.
@@ -105,7 +138,7 @@ def calculate_distance_to_best_score(
     modulus_column: str = 'Modulus_SEI_BEI'
 ) -> pd.Series:
     """
-    Component 3: Distance to Best-in-Class Score (15% weight).
+    Component 3: Distance to Best-in-Class Score (20% raw weight).
 
     Measures how close each compound is to the best-performing compound.
 
@@ -137,6 +170,15 @@ def calculate_oqpla_phase1(
     """
     Calculate O[Q/P/L]A score using Phase 1 components (1-3) only.
 
+    Phase 1 weights (raw -> normalized):
+    - Efficiency: 40% -> 53.33%
+    - Angle: 15% -> 20%
+    - Distance: 20% -> 26.67%
+
+    QED Multiplier: 0.75 + 0.25 * QED
+    - QED=0 gives 75% floor
+    - QED=1 gives 100% max
+
     Args:
         df: DataFrame with efficiency metrics and plane geometry
         use_normalized_weights: If True, normalize Phase 1 weights to 100%
@@ -156,12 +198,12 @@ def calculate_oqpla_phase1(
     df['Distance_Score'] = calculate_distance_to_best_score(df)
 
     if use_normalized_weights:
-        total_phase1_weight = 0.40 + 0.10 + 0.15
-        w1 = 0.40 / total_phase1_weight
-        w2 = 0.10 / total_phase1_weight
-        w3 = 0.15 / total_phase1_weight
+        total_phase1_weight = WEIGHT_EFFICIENCY_RAW + WEIGHT_ANGLE_RAW + WEIGHT_DISTANCE_RAW
+        w1 = WEIGHT_EFFICIENCY_RAW / total_phase1_weight
+        w2 = WEIGHT_ANGLE_RAW / total_phase1_weight
+        w3 = WEIGHT_DISTANCE_RAW / total_phase1_weight
     else:
-        w1, w2, w3 = 0.40, 0.10, 0.15
+        w1, w2, w3 = WEIGHT_EFFICIENCY_RAW, WEIGHT_ANGLE_RAW, WEIGHT_DISTANCE_RAW
 
     df['OQPLA_Base_Score'] = (
         w1 * df['Efficiency_Score'] +
@@ -169,7 +211,7 @@ def calculate_oqpla_phase1(
         w3 * df['Distance_Score']
     )
 
-    df['QED_Multiplier'] = 0.5 + 0.5 * df['QED']
+    df['QED_Multiplier'] = QED_MULTIPLIER_FLOOR + QED_MULTIPLIER_SCALE * df['QED']
     df['OQPLA_Final_Score'] = df['OQPLA_Base_Score'] * df['QED_Multiplier']
 
     return df
@@ -181,7 +223,7 @@ def calculate_pdb_evidence_score(
     progress_callback: Optional[ProgressCallback] = None
 ) -> pd.DataFrame:
     """
-    Component 4: PDB Structural Evidence Score (15% weight).
+    Component 4: PDB Structural Evidence Score (5% raw weight).
 
     Query RCSB PDB for experimental structures of the compound or close analogs.
 
@@ -338,6 +380,16 @@ def calculate_oqpla_phase2(
     """
     Calculate O[Q/P/L]A score using Phase 2 components (1-4).
 
+    Phase 2 weights (raw -> normalized):
+    - Efficiency: 40% -> 50%
+    - Angle: 15% -> 18.75%
+    - Distance: 20% -> 25%
+    - PDB: 5% -> 6.25%
+
+    QED Multiplier: 0.75 + 0.25 * QED
+    - QED=0 gives 75% floor
+    - QED=1 gives 100% max
+
     Args:
         df: DataFrame with efficiency metrics, plane geometry, and SMILES
         use_pdb: If True, query PDB for structural evidence
@@ -359,11 +411,11 @@ def calculate_oqpla_phase2(
 
     df = calculate_pdb_evidence_score(df, use_pdb=use_pdb, progress_callback=progress_callback)
 
-    total_phase2_weight = 0.40 + 0.10 + 0.15 + 0.15
-    w1 = 0.40 / total_phase2_weight
-    w2 = 0.10 / total_phase2_weight
-    w3 = 0.15 / total_phase2_weight
-    w4 = 0.15 / total_phase2_weight
+    total_phase2_weight = WEIGHT_EFFICIENCY_RAW + WEIGHT_ANGLE_RAW + WEIGHT_DISTANCE_RAW + WEIGHT_PDB_RAW
+    w1 = WEIGHT_EFFICIENCY_RAW / total_phase2_weight
+    w2 = WEIGHT_ANGLE_RAW / total_phase2_weight
+    w3 = WEIGHT_DISTANCE_RAW / total_phase2_weight
+    w4 = WEIGHT_PDB_RAW / total_phase2_weight
 
     df['OQPLA_Base_Score'] = (
         w1 * df['Efficiency_Score'] +
@@ -372,7 +424,7 @@ def calculate_oqpla_phase2(
         w4 * df['PDB_Score']
     )
 
-    df['QED_Multiplier'] = 0.5 + 0.5 * df['QED']
+    df['QED_Multiplier'] = QED_MULTIPLIER_FLOOR + QED_MULTIPLIER_SCALE * df['QED']
     df['OQPLA_Final_Score'] = df['OQPLA_Base_Score'] * df['QED_Multiplier']
 
     df['Efficiency_Contribution'] = w1 * df['Efficiency_Score'] * df['QED_Multiplier']
@@ -386,7 +438,18 @@ def calculate_oqpla_phase2(
 
 
 def interpret_oqpla_score(score: float) -> Dict[str, str]:
-    """Interpret O[Q/P/L]A score and provide classification + recommendation."""
+    """
+    Interpret O[Q/P/L]A score and provide classification + recommendation.
+
+    CRITICAL: IMP = Invalid Metabolic Panacea = FALSE POSITIVE indicator
+
+    Higher OQPLA scores indicate HIGHER probability of being an assay artifact.
+    Lower OQPLA scores indicate compounds more likely to be genuine leads.
+
+    Score Interpretation (INVERSE relationship):
+    - High Score (0.9+) = High false positive risk → EXCLUDE/DEPRIORITIZE
+    - Low Score (<0.3) = Low false positive risk → PROCEED with confidence
+    """
     if np.isnan(score):
         return {
             'classification': 'Invalid',
@@ -395,40 +458,41 @@ def interpret_oqpla_score(score: float) -> Dict[str, str]:
             'priority': None
         }
 
+    # CORRECTED INTERPRETATION: Higher score = Higher false positive risk
     if 0.9 <= score <= 1.0:
         return {
             'classification': 'Exceptional IMP',
-            'interpretation': 'Highest confidence - multiple validation streams confirm',
-            'action': 'Priority 1: Immediate experimental validation',
-            'priority': 1
+            'interpretation': '⚠️ VERY HIGH false positive risk - likely assay artifact',
+            'action': 'DEPRIORITIZE - Do not pursue unless validated with orthogonal assays',
+            'priority': 1  # Priority 1 = Highest concern (to exclude)
         }
     elif 0.7 <= score < 0.9:
         return {
             'classification': 'Strong IMP',
-            'interpretation': 'High confidence - most validation criteria met',
-            'action': 'Priority 2: Validate within 1 month',
-            'priority': 2
+            'interpretation': '⚠️ HIGH false positive risk - requires validation',
+            'action': 'VALIDATE with orthogonal assays (SPR, ITC) before advancing',
+            'priority': 2  # Priority 2 = High concern (validate before proceeding)
         }
     elif 0.5 <= score < 0.7:
         return {
             'classification': 'Moderate IMP',
-            'interpretation': 'Potential lead - some validation, needs more evidence',
-            'action': 'Priority 3: Monitor and gather more data',
-            'priority': 3
+            'interpretation': '⚠️ MODERATE false positive risk',
+            'action': 'Monitor carefully - gather additional evidence before investing resources',
+            'priority': 3  # Priority 3 = Moderate concern
         }
     elif 0.3 <= score < 0.5:
         return {
             'classification': 'Weak IMP',
-            'interpretation': 'Low confidence - outlier but lacking validation',
-            'action': 'Priority 4: Deprioritize unless novel scaffold',
-            'priority': 4
+            'interpretation': '✓ LOW false positive risk - more likely genuine',
+            'action': 'PROCEED with standard due diligence',
+            'priority': 4  # Priority 4 = Low concern (proceed normally)
         }
     else:
         return {
             'classification': 'Not IMP',
-            'interpretation': 'Likely artifact or not druggable',
-            'action': 'Exclude: Do not pursue',
-            'priority': None
+            'interpretation': '✓ LOWEST false positive risk - likely genuine activity',
+            'action': 'PROCEED with confidence - prioritize for development',
+            'priority': None  # No concern - best candidates
         }
 
 
@@ -513,6 +577,139 @@ def create_pdb_summary(df: pd.DataFrame) -> pd.DataFrame:
     logger.info(f"Created PDB summary for {len(summary_df)} unique compounds.")
 
     return summary_df
+
+
+# =============================================================================
+# OQPLA Score Breakdown Helper
+# =============================================================================
+
+# List of all OQPLA output columns
+OQPLA_OUTPUT_COLUMNS = [
+    # Raw efficiency metrics (all calculated, displayed)
+    'SEI', 'BEI', 'NSEI', 'NBEI',
+
+    # Plane geometry
+    'Modulus_SEI_BEI', 'Angle_SEI_BEI',
+
+    # Component scores (0-1)
+    'Efficiency_Score', 'Angle_Score', 'Distance_Score', 'PDB_Score',
+
+    # Weighted contributions
+    'Efficiency_Contribution', 'Angle_Contribution',
+    'Distance_Contribution', 'PDB_Contribution',
+
+    # Final calculations
+    'OQPLA_Base_Score', 'QED', 'QED_Multiplier', 'QED_Impact',
+    'OQPLA_Final_Score', 'OQPLA_Classification', 'OQPLA_Priority',
+
+    # PDB details (if available)
+    'PDB_Num_Structures', 'PDB_High_Quality', 'PDB_Medium_Quality', 'PDB_Poor_Quality'
+]
+
+
+def get_oqpla_score_breakdown(row: pd.Series) -> dict:
+    """
+    Get a complete breakdown of OQPLA score components for a single compound.
+
+    Returns dict with all individual scores and their interpretations,
+    organized by category for easy frontend display.
+
+    Args:
+        row: A pandas Series containing OQPLA score columns
+
+    Returns:
+        dict with sections: efficiency_metrics, plane_geometry, component_scores,
+                          final_calculation, pdb_details
+    """
+    return {
+        'efficiency_metrics': {
+            'SEI': {
+                'value': row.get('SEI'),
+                'description': 'Surface Efficiency Index (pActivity / PSA×100)',
+                'used_in_score': True
+            },
+            'BEI': {
+                'value': row.get('BEI'),
+                'description': 'Binding Efficiency Index (pActivity / MW×1000)',
+                'used_in_score': True
+            },
+            'NSEI': {
+                'value': row.get('NSEI'),
+                'description': 'Normalized SEI (pActivity / NPOL) - display only',
+                'used_in_score': False
+            },
+            'NBEI': {
+                'value': row.get('NBEI'),
+                'description': 'Normalized BEI (pActivity / NHA) - display only',
+                'used_in_score': False
+            },
+        },
+        'plane_geometry': {
+            'modulus': {
+                'value': row.get('Modulus_SEI_BEI'),
+                'description': (
+                    'The modulus measures the distance of the combined efficiency vector '
+                    '(SEI, BEI) from the origin on the efficiency plane. It represents the '
+                    'overall efficiency magnitude of a compound. While derived from SEI and BEI, '
+                    'the modulus is independent of the development angle—the angle only defines '
+                    "the vector's direction, not its magnitude."
+                )
+            },
+            'angle': {
+                'value': row.get('Angle_SEI_BEI'),
+                'optimal': 45.0,
+                'description': 'Development trajectory angle. 45° is optimal (balanced). <30° = too hydrophobic, >60° = too polar.'
+            },
+        },
+        'component_scores': {
+            'efficiency': {
+                'value': row.get('Efficiency_Score'),
+                'weight_raw': '40%',
+                'weight_normalized': '50%',
+                'contribution': row.get('Efficiency_Contribution'),
+                'description': 'Outlier score based on SEI and BEI z-scores'
+            },
+            'angle': {
+                'value': row.get('Angle_Score'),
+                'weight_raw': '15%',
+                'weight_normalized': '18.75%',
+                'contribution': row.get('Angle_Contribution'),
+                'description': 'Proximity to optimal 45° development angle'
+            },
+            'distance': {
+                'value': row.get('Distance_Score'),
+                'weight_raw': '20%',
+                'weight_normalized': '25%',
+                'contribution': row.get('Distance_Contribution'),
+                'description': 'Proximity to best-in-class compound (highest modulus)'
+            },
+            'pdb': {
+                'value': row.get('PDB_Score'),
+                'weight_raw': '5%',
+                'weight_normalized': '6.25%',
+                'contribution': row.get('PDB_Contribution'),
+                'description': 'Structural validation from RCSB PDB'
+            },
+        },
+        'final_calculation': {
+            'base_score': row.get('OQPLA_Base_Score'),
+            'qed': row.get('QED'),
+            'qed_multiplier': row.get('QED_Multiplier'),
+            'qed_formula': '0.75 + 0.25 × QED',
+            'qed_impact': row.get('QED_Impact'),
+            'final_score': row.get('OQPLA_Final_Score'),
+            'classification': row.get('OQPLA_Classification'),
+            'priority': row.get('OQPLA_Priority'),
+        },
+        'pdb_details': {
+            'num_structures': row.get('PDB_Num_Structures', 0),
+            'high_quality': row.get('PDB_High_Quality', 0),
+            'medium_quality': row.get('PDB_Medium_Quality', 0),
+            'poor_quality': row.get('PDB_Poor_Quality', 0),
+            'pdb_ids': row.get('PDB_IDs', ''),
+            'best_resolution': row.get('PDB_Best_Resolution'),
+        }
+    }
 
 
 def create_detailed_pdb_summary(df: pd.DataFrame, progress_callback: Optional[ProgressCallback] = None) -> pd.DataFrame:

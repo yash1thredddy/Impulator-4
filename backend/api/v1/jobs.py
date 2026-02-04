@@ -281,6 +281,7 @@ async def create_job(
     request: JobCreate,
     db: Session = Depends(get_db),
     session_id: str = Depends(validate_session_id),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
 ):
     """
     Submit a new compound processing job.
@@ -293,8 +294,14 @@ async def create_job(
     `duplicate_found` response instead of creating the job. Use
     `/jobs/resolve-duplicate` to handle the duplicate.
 
+    **Idempotency:**
+    Include an `Idempotency-Key` header (max 64 chars) to safely retry
+    failed requests. If a job with the same key exists for your session,
+    it will be returned instead of creating a new job.
+
     Headers:
         X-Session-ID: Session ID for user isolation (validated UUID)
+        Idempotency-Key: Optional key for safe retries (max 64 chars)
 
     Rate Limit:
         Max 10 jobs per minute per session
@@ -306,6 +313,18 @@ async def create_job(
     # Use session_id from validated header, fall back to request body if anonymous
     if session_id.startswith("anon-") and request.session_id:
         session_id = request.session_id
+
+    # Check idempotency key - return existing job if already created
+    if idempotency_key:
+        # Truncate to max 64 chars for safety
+        idempotency_key = idempotency_key[:64]
+        existing_job = db.query(Job).filter(
+            Job.session_id == session_id,
+            Job.idempotency_key == idempotency_key
+        ).first()
+        if existing_job:
+            logger.info(f"Idempotent request - returning existing job {existing_job.id}")
+            return _job_to_response(existing_job)
 
     # Check rate limit
     allowed, remaining = rate_limiter.check_rate_limit(session_id, RATE_LIMIT_MAX_JOBS)
@@ -366,6 +385,7 @@ async def create_job(
                 JobType.SINGLE,
                 request.model_dump(exclude={"session_id"}),
                 session_id=session_id,
+                idempotency_key=idempotency_key,
             )
 
             # Trigger scheduler to start processing (if not already running)
@@ -693,6 +713,7 @@ async def create_batch_job(
     skipped_existing = []  # Compounds skipped by user choice
     replaced = []  # Compounds replaced (existing deleted)
     marked_duplicate = []  # Compounds marked as duplicates
+    failed_compounds = []  # Compounds that failed during job creation
 
     # Create all jobs in SQLite (status: PENDING)
     # Scheduler will pick them up and process 2 at a time
@@ -704,71 +725,81 @@ async def create_batch_job(
         if compound_name in skipped_processing:
             continue
 
-        # Get per-compound duplicate action (from compound data or duplicate_decisions dict)
-        compound_action = getattr(compound, 'duplicate_action', None) or duplicate_decisions.get(compound_name)
+        try:
+            # Get per-compound duplicate action (from compound data or duplicate_decisions dict)
+            compound_action = getattr(compound, 'duplicate_action', None) or duplicate_decisions.get(compound_name)
 
-        # If action is 'skip', don't process
-        if compound_action == 'skip':
-            skipped_existing.append(compound_name)
-            continue
+            # If action is 'skip', don't process
+            if compound_action == 'skip':
+                skipped_existing.append(compound_name)
+                continue
 
-        # If action is 'replace', delete existing compound first
-        if compound_action == 'replace':
-            # Find and delete existing compound
-            existing = db.query(Compound).filter(Compound.compound_name == compound_name).first()
-            if existing:
-                old_entry_id = existing.entry_id
+            # If action is 'replace', delete existing compound first
+            if compound_action == 'replace':
+                # Find and delete existing compound
+                existing = db.query(Compound).filter(Compound.compound_name == compound_name).first()
+                if existing:
+                    old_entry_id = existing.entry_id
 
-                # Delete from Azure (UUID-based storage only)
-                if old_entry_id:
-                    delete_result_from_azure_by_entry_id(old_entry_id)
+                    # Delete from Azure (UUID-based storage only)
+                    if old_entry_id:
+                        delete_result_from_azure_by_entry_id(old_entry_id)
 
-                    # Delete local ZIP if exists (UUID-based path)
-                    prefix = old_entry_id[:2].lower()
-                    local_zip = settings.RESULTS_DIR / prefix / f"{old_entry_id}.zip"
-                    if local_zip.exists():
-                        try:
-                            local_zip.unlink()
-                            logger.debug(f"Deleted local result for batch replace: {local_zip}")
-                        except Exception as e:
-                            logger.warning(f"Failed to delete local result: {e}")
+                        # Delete local ZIP if exists (UUID-based path)
+                        prefix = old_entry_id[:2].lower()
+                        local_zip = settings.RESULTS_DIR / prefix / f"{old_entry_id}.zip"
+                        if local_zip.exists():
+                            try:
+                                local_zip.unlink()
+                                logger.debug(f"Deleted local result for batch replace: {local_zip}")
+                            except Exception as e:
+                                logger.warning(f"Failed to delete local result: {e}")
 
-                # Delete from database
-                db.delete(existing)
-                db.commit()
-                logger.info(f"Batch replace: deleted existing compound '{compound_name}' (entry_id={old_entry_id})")
-                replaced.append(compound_name)
+                    # Delete from database
+                    db.delete(existing)
+                    db.commit()
+                    logger.info(f"Batch replace: deleted existing compound '{compound_name}' (entry_id={old_entry_id})")
+                    replaced.append(compound_name)
 
-        # Build job params - include duplicate metadata if marking as duplicate
-        job_params = compound.model_dump(exclude={"session_id", "duplicate_action", "original_compound_name"})
-        if compound_action == 'duplicate':
-            # Find existing compound to reference - use original_compound_name if provided
-            # (frontend sends new name in compound_name, original in original_compound_name)
-            original_name = getattr(compound, 'original_compound_name', None) or compound_name
-            existing = db.query(Compound).filter(Compound.compound_name == original_name).first()
-            job_params["is_duplicate"] = True
-            job_params["duplicate_of"] = existing.entry_id if existing else None
-            marked_duplicate.append(compound_name)
+            # Build job params - include duplicate metadata if marking as duplicate
+            job_params = compound.model_dump(exclude={"session_id", "duplicate_action", "original_compound_name"})
+            if compound_action == 'duplicate':
+                # Find existing compound to reference - use original_compound_name if provided
+                # (frontend sends new name in compound_name, original in original_compound_name)
+                original_name = getattr(compound, 'original_compound_name', None) or compound_name
+                existing = db.query(Compound).filter(Compound.compound_name == original_name).first()
+                job_params["is_duplicate"] = True
+                job_params["duplicate_of"] = existing.entry_id if existing else None
+                marked_duplicate.append(compound_name)
 
-        job = job_service.create_job(
-            db,
-            JobType.BATCH,
-            job_params,
-            session_id=session_id,
-            batch_id=batch_id,
-        )
-        jobs.append(_job_to_response(job))
+            job = job_service.create_job(
+                db,
+                JobType.BATCH,
+                job_params,
+                session_id=session_id,
+                batch_id=batch_id,
+            )
+            jobs.append(_job_to_response(job))
+
+        except Exception as e:
+            # Track per-compound failures instead of failing entire batch
+            logger.error(f"Failed to create job for compound '{compound_name}': {e}")
+            db.rollback()  # Rollback any partial transaction
+            failed_compounds.append({"compound_name": compound_name, "error": str(e)})
 
     # Trigger scheduler to start processing (if not already running)
     if jobs:
         job_scheduler.trigger()
 
     total_skipped = len(skipped_existing) + len(skipped_processing)
+    total_failed = len(failed_compounds)
     logger.info(
         f"Batch {batch_id}: {len(jobs)} jobs queued, "
         f"{len(replaced)} replaced, {len(marked_duplicate)} as duplicates, "
-        f"{total_skipped} skipped (session={truncate_session_id(session_id)})"
+        f"{total_skipped} skipped, {total_failed} failed (session={truncate_session_id(session_id)})"
     )
+    if failed_compounds:
+        logger.warning(f"Batch {batch_id} had {total_failed} compound failures: {[f['compound_name'] for f in failed_compounds]}")
 
     return BatchResponse(
         batch_id=batch_id,
@@ -778,25 +809,31 @@ async def create_batch_job(
         replaced=replaced,
         total_submitted=len(jobs),
         total_skipped=total_skipped,
+        failed_compounds=failed_compounds,  # Include failed compounds in response
     )
 
 
 @router.get(
     "",
     response_model=JobListResponse,
-    summary="List all jobs",
+    summary="List jobs for current session",
 )
 async def list_jobs(
     status: Optional[JobStatus] = Query(None, description="Filter by status"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
+    session_id: str = Depends(validate_session_id),
 ):
     """
-    List all jobs with optional status filter and pagination.
+    List jobs for the current session with optional status filter and pagination.
+
+    Users only see their own jobs (filtered by X-Session-ID header).
     """
     statuses = [status] if status else None
-    result = job_service.list_jobs(db, statuses=statuses, page=page, page_size=page_size)
+    result = job_service.list_jobs(
+        db, statuses=statuses, page=page, page_size=page_size, session_id=session_id
+    )
 
     return JobListResponse(
         items=[_job_to_response(j) for j in result["items"]],
@@ -814,34 +851,53 @@ async def list_jobs(
 )
 async def get_active_jobs(
     db: Session = Depends(get_db),
-    x_session_id: Optional[str] = Header(None, alias="X-Session-ID"),
+    session_id: str = Depends(validate_session_id),
 ):
     """
     Get active (pending/processing) jobs for the current session.
 
     Used by the frontend sidebar to display job progress.
-    Users only see their own jobs when X-Session-ID is provided.
+    Users only see their own jobs (filtered by X-Session-ID header).
 
     Headers:
-        X-Session-ID: Session ID for filtering jobs (required for isolation)
+        X-Session-ID: Session ID for filtering jobs (required, validated UUID)
     """
-    return job_service.get_active_jobs(db, session_id=x_session_id)
+    return job_service.get_active_jobs(db, session_id=session_id)
 
 
 @router.get(
     "/batch/{batch_id}",
     response_model=BatchSummary,
+    responses={403: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
     summary="Get batch summary",
 )
 async def get_batch_summary(
     batch_id: str,
     db: Session = Depends(get_db),
+    session_id: str = Depends(validate_session_id),
 ):
     """
     Get summary statistics for a batch of jobs.
 
+    Requires ownership of the batch (same session that created it).
     Returns overall progress and status counts.
     """
+    # Verify ownership by checking first job in batch
+    first_job = db.query(Job).filter(Job.batch_id == batch_id).first()
+
+    if not first_job:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    if first_job.session_id and first_job.session_id != session_id:
+        logger.warning(
+            f"Unauthorized batch access attempt: session {truncate_session_id(session_id)} "
+            f"tried to access batch {batch_id}"
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="You don't have permission to access this batch"
+        )
+
     summary = job_service.get_batch_summary(db, batch_id)
     if not summary:
         raise HTTPException(status_code=404, detail="Batch not found")
@@ -902,37 +958,44 @@ async def cancel_batch(
 @router.get(
     "/{job_id}",
     response_model=JobResponse,
-    responses={404: {"model": ErrorResponse}},
+    responses={403: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
     summary="Get job status",
 )
 async def get_job(
     job_id: str,
     db: Session = Depends(get_db),
+    session_id: str = Depends(validate_session_id),
 ):
     """
     Get the current status of a job.
 
     Poll this endpoint (1s interval) to track progress.
+    Requires ownership of the job (same session that created it).
     """
-    job = job_service.get_job(db, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    # Verify ownership (returns job or raises 403/404)
+    job = _verify_job_ownership(db, job_id, session_id)
 
     return _job_to_response(job)
 
 
 @router.get(
     "/{job_id}/detail",
-    responses={404: {"model": ErrorResponse}},
+    responses={403: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
     summary="Get detailed job info",
 )
 async def get_job_detail(
     job_id: str,
     db: Session = Depends(get_db),
+    session_id: str = Depends(validate_session_id),
 ):
     """
     Get detailed job information including parsed input parameters.
+
+    Requires ownership of the job (same session that created it).
     """
+    # Verify ownership first
+    _verify_job_ownership(db, job_id, session_id)
+
     job = job_service.get_job_with_params(db, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")

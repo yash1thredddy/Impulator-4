@@ -174,16 +174,31 @@ class JobScheduler:
                 # Import here to avoid circular imports
                 from backend.services.compound_service import process_compound_job
 
-                job_executor.submit(
-                    job_id,
-                    process_compound_job,
-                    compound_name=compound_name,
-                    smiles=smiles,
-                    similarity_threshold=params.get('similarity_threshold', 90),
-                    activity_types=params.get('activity_types', []),
-                )
-                logger.info(f"Scheduler claimed and submitted job {job_id}")
-                work_done = True
+                try:
+                    job_executor.submit(
+                        job_id,
+                        process_compound_job,
+                        compound_name=compound_name,
+                        smiles=smiles,
+                        similarity_threshold=params.get('similarity_threshold', 90),
+                        activity_types=params.get('activity_types', []),
+                    )
+                    logger.info(f"Scheduler claimed and submitted job {job_id}")
+                    work_done = True
+                except Exception as submit_error:
+                    # Executor submission failed - revert job status to PENDING for retry
+                    logger.error(f"Failed to submit job {job_id} to executor: {submit_error}")
+                    try:
+                        with get_db_session() as db_retry:
+                            job_to_revert = db_retry.query(Job).filter(Job.id == job_id).first()
+                            if job_to_revert:
+                                job_to_revert.status = JobStatus.PENDING
+                                job_to_revert.started_at = None
+                                job_to_revert.current_step = "Queued (executor submission failed, will retry)"
+                                db_retry.commit()
+                                logger.info(f"Reverted job {job_id} to PENDING after submit failure")
+                    except Exception as revert_error:
+                        logger.error(f"Failed to revert job {job_id} status: {revert_error}")
 
             except OperationalError as e:
                 # Database locked or transient error - continue polling
