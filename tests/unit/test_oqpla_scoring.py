@@ -282,30 +282,40 @@ class TestOQPLAPhase2NewWeights:
 
         Total raw = 40 + 15 + 20 + 5 = 80%
         """
-        # Create test dataframe with known values to verify weight ratios
+        # Create test dataframe with VARIED values to avoid std=0 issue
+        # Different SEI/BEI values ensure Efficiency_Score is non-zero
         df = pd.DataFrame({
-            'SEI': [10.0, 10.0],
-            'BEI': [25.0, 25.0],
-            'NSEI': [2.0, 2.0],
-            'NBEI': [0.35, 0.35],
-            'Angle_SEI_BEI': [45.0, 45.0],  # Optimal angle -> score = 1.0
-            'Modulus_SEI_BEI': [30.0, 30.0],  # Same -> distance score = 1.0
-            'QED': [1.0, 1.0],  # Max QED so multiplier = 1.0
-            'SMILES': ['CCO', 'CCO']
+            'SEI': [5.0, 10.0, 15.0],  # Varied values -> std != 0
+            'BEI': [20.0, 25.0, 30.0],  # Varied values -> std != 0
+            'NSEI': [1.0, 2.0, 3.0],
+            'NBEI': [0.25, 0.35, 0.45],
+            'Angle_SEI_BEI': [45.0, 45.0, 45.0],  # Optimal angle -> score = 1.0
+            'Modulus_SEI_BEI': [20.0, 30.0, 40.0],  # Varied for distance scoring
+            'QED': [1.0, 1.0, 1.0],  # Max QED so multiplier = 1.0
+            'SMILES': ['CCO', 'CCCO', 'CCCCO']
         })
 
         # Calculate Phase 2 scores without PDB (use_pdb=False)
-        _ = calculate_oqpla_phase2(df, use_pdb=False)  # noqa: F841 - called to verify no errors
+        result = calculate_oqpla_phase2(df, use_pdb=False)
 
-        # Verify the weight ratios by examining the contribution columns
-        # When PDB is disabled (score=0), effective weights should be:
-        # Total active weight = 40 + 15 + 20 + 5 = 80% raw
-        # Normalized: Efficiency=50%, Angle=18.75%, Distance=25%, PDB=6.25%
+        # Verify that result columns were created
+        assert 'Angle_Score' in result.columns, "Angle_Score column should exist"
+        assert 'Angle_Contribution' in result.columns, "Angle_Contribution column should exist"
+        assert 'Distance_Contribution' in result.columns, "Distance_Contribution column should exist"
+        assert 'OQPLA_Final_Score' in result.columns, "OQPLA_Final_Score column should exist"
 
-        # With all component scores = 1.0 and QED_Multiplier = 1.0:
-        # Base score should be weighted sum of components
+        # Since Angle is optimal (45°), Angle_Score should be 1.0 for all rows
+        for i, score in enumerate(result['Angle_Score']):
+            assert abs(score - 1.0) < 0.01, f"Row {i}: Angle_Score should be ~1.0 for 45° angle, got {score}"
 
-        # Check the normalized weight ratios
+        # Verify Angle_Contribution uses the correct weight (18.75%)
+        # Angle_Contribution = Angle_Score * 0.1875 = 1.0 * 0.1875 = 0.1875
+        expected_angle_contribution = 0.1875
+        for i, contrib in enumerate(result['Angle_Contribution']):
+            assert abs(contrib - expected_angle_contribution) < 0.01, \
+                f"Row {i}: Angle_Contribution should be ~{expected_angle_contribution}, got {contrib}"
+
+        # Verify expected weight ratios (these are constants in the algorithm)
         total_raw_weight = 0.40 + 0.15 + 0.20 + 0.05  # 0.80
         expected_efficiency_weight = 0.40 / total_raw_weight  # 0.50
         expected_angle_weight = 0.15 / total_raw_weight  # 0.1875
@@ -317,11 +327,9 @@ class TestOQPLAPhase2NewWeights:
                        expected_distance_weight + expected_pdb_weight)
         assert abs(total_weight - 1.0) < 0.001, f"Weights should sum to 1.0, got {total_weight}"
 
-        # Verify individual weight values
-        assert abs(expected_efficiency_weight - 0.50) < 0.001, "Efficiency weight should be 50%"
-        assert abs(expected_angle_weight - 0.1875) < 0.001, "Angle weight should be 18.75%"
-        assert abs(expected_distance_weight - 0.25) < 0.001, "Distance weight should be 25%"
-        assert abs(expected_pdb_weight - 0.0625) < 0.001, "PDB weight should be 6.25%"
+        # Verify OQPLA scores are in valid range [0, 1]
+        for i, score in enumerate(result['OQPLA_Score']):
+            assert 0.0 <= score <= 1.0, f"Row {i}: OQPLA_Score should be in [0,1], got {score}"
 
 
 class TestQEDMultiplierNewFormula:

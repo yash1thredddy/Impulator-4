@@ -16,7 +16,15 @@ from backend.config import settings
 
 def migrate():
     """Add idempotency_key column to jobs table."""
-    db_path = Path(settings.DATA_DIR) / "impulator.db"
+    # Parse database path from settings.DATABASE_URL (not hardcoded)
+    db_url = settings.DATABASE_URL
+    # Handle both "sqlite:///./path" and "sqlite:///path" formats
+    db_path_str = db_url.replace("sqlite:///", "").replace("./", "")
+    db_path = Path(db_path_str)
+
+    # If relative path, resolve from project root
+    if not db_path.is_absolute():
+        db_path = Path(settings.DATA_DIR) / db_path.name
 
     if not db_path.exists():
         print(f"Database not found at {db_path}")
@@ -32,20 +40,50 @@ def migrate():
 
         if 'idempotency_key' in columns:
             print("✓ Column 'idempotency_key' already exists")
-            return
+        else:
+            # Add the column
+            print("Adding 'idempotency_key' column to jobs table...")
+            cursor.execute("""
+                ALTER TABLE jobs
+                ADD COLUMN idempotency_key VARCHAR(64)
+            """)
 
-        # Add the column
-        print("Adding 'idempotency_key' column to jobs table...")
-        cursor.execute("""
-            ALTER TABLE jobs
-            ADD COLUMN idempotency_key VARCHAR(64)
-        """)
+        # === INDEX RECONCILIATION ===
+        # Always check and fix indexes regardless of whether column existed
+        print("Checking existing indexes on jobs table...")
 
-        # Create index
-        print("Creating index on (session_id, idempotency_key)...")
+        # Get all indexes on jobs table
+        cursor.execute("PRAGMA index_list('jobs')")
+        indexes = cursor.fetchall()
+
+        # Find any existing index on (session_id, idempotency_key)
+        old_index_names = []
+        for idx in indexes:
+            idx_name = idx[1]
+            idx_unique = idx[2]
+
+            # Check columns in this index
+            cursor.execute(f"PRAGMA index_info('{idx_name}')")
+            idx_columns = [row[2] for row in cursor.fetchall()]
+
+            # If this index covers session_id and idempotency_key but is NOT unique, mark for removal
+            if 'session_id' in idx_columns and 'idempotency_key' in idx_columns:
+                if not idx_unique and idx_name != 'uix_job_session_idempotency':
+                    old_index_names.append(idx_name)
+                    print(f"  Found non-unique index to remove: {idx_name}")
+
+        # Drop any old non-unique indexes
+        for old_idx in old_index_names:
+            print(f"Dropping non-unique index '{old_idx}'...")
+            cursor.execute(f"DROP INDEX IF EXISTS {old_idx}")
+
+        # Create UNIQUE index to enforce idempotency constraint
+        # Uses the same name as defined in the ORM model: uix_job_session_idempotency
+        print("Creating UNIQUE index on (session_id, idempotency_key)...")
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS ix_jobs_idempotency
+            CREATE UNIQUE INDEX IF NOT EXISTS uix_job_session_idempotency
             ON jobs(session_id, idempotency_key)
+            WHERE idempotency_key IS NOT NULL
         """)
 
         conn.commit()

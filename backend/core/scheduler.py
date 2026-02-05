@@ -200,6 +200,11 @@ class JobScheduler:
                     except Exception as revert_error:
                         logger.error(f"Failed to revert job {job_id} status: {revert_error}")
 
+                    # IMPORTANT: Break out of claiming loop to prevent tight retry
+                    # The job is back to PENDING and will be retried on the next poll cycle
+                    work_done = True  # Signal that we attempted work (prevents immediate re-poll)
+                    break
+
             except OperationalError as e:
                 # Database locked or transient error - continue polling
                 logger.warning(f"Database busy, will retry: {e}")

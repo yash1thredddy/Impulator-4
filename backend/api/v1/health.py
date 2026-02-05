@@ -194,3 +194,54 @@ async def get_metrics() -> Dict[str, Any]:
         "metrics": metrics.to_dict(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+@router.post("/migrate")
+async def run_migrations(db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """
+    Run database migrations and sync to Azure.
+
+    This endpoint:
+    1. Runs pending database migrations
+    2. Syncs the updated database to Azure (if configured)
+
+    Returns migration status and any errors encountered.
+    """
+    from backend.core.database import _apply_migrations_with_lock
+    from backend.core.azure_sync import sync_db_to_azure, is_azure_configured
+
+    results = {
+        "status": "success",
+        "migrations_applied": True,
+        "azure_synced": False,
+        "errors": [],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    try:
+        # Run migrations
+        logger.info("Running database migrations via API...")
+        _apply_migrations_with_lock()
+        logger.info("Database migrations completed successfully")
+    except Exception as e:
+        logger.error(f"Migration failed: {e}", exc_info=True)
+        results["status"] = "error"
+        results["migrations_applied"] = False
+        results["errors"].append(f"Migration failed: {str(e)}")
+        return results
+
+    # Sync to Azure if configured
+    if is_azure_configured():
+        try:
+            logger.info("Syncing database to Azure after migration...")
+            sync_db_to_azure()
+            results["azure_synced"] = True
+            logger.info("Azure sync completed successfully")
+        except Exception as e:
+            logger.error(f"Azure sync failed: {e}", exc_info=True)
+            results["status"] = "partial"
+            results["errors"].append(f"Azure sync failed: {str(e)}")
+    else:
+        logger.info("Azure not configured, skipping sync")
+
+    return results

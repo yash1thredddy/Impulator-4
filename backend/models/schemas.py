@@ -3,7 +3,7 @@ Pydantic schemas for API request/response validation.
 """
 import re
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict
 from enum import Enum
 
 from pydantic import BaseModel, Field, ConfigDict, field_validator
@@ -347,6 +347,11 @@ class CheckDuplicatesResponse(BaseModel):
     structure_matches: List[DuplicateMatch] = Field(
         default_factory=list,
         description="Compounds that match existing compounds by InChIKey (structure)"
+    )
+    # Suggested version names for existing compounds (computed from full database state)
+    suggested_versions: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of existing compound name -> suggested next version name (e.g., 'Aspirin' -> 'Aspirin_v3')"
     )
 
 

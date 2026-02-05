@@ -144,9 +144,9 @@ class TestOQPLAFullPipeline:
         assert breakdown['efficiency_metrics']['NBEI']['used_in_score'] is False
 
         # Verify component weights
-        assert breakdown['component_scores']['efficiency']['weight_normalized'] == '50%'
+        assert breakdown['component_scores']['efficiency']['weight_normalized'] == '50.00%'
         assert breakdown['component_scores']['angle']['weight_normalized'] == '18.75%'
-        assert breakdown['component_scores']['distance']['weight_normalized'] == '25%'
+        assert breakdown['component_scores']['distance']['weight_normalized'] == '25.00%'
         assert breakdown['component_scores']['pdb']['weight_normalized'] == '6.25%'
 
 

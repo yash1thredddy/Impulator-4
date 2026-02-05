@@ -18,7 +18,7 @@ import time
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional
 from datetime import datetime
 
 # Add parent directory to path
@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 try:
     import requests
     from rdkit import Chem
-    from rdkit.Chem import AllChem, DataStructs
+    from rdkit.Chem import AllChem
 except ImportError as e:
     print(f"❌ Missing dependency: {e}")
     print("Run: pip install requests rdkit")
@@ -135,8 +135,8 @@ class ExternalAPITester:
         if not mol:
             raise ValueError(f"Invalid SMILES: {smiles}")
 
-        fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=2048)
-        fp_bits = fp.ToBitString()
+        # Validate that fingerprint can be generated (tests RDKit compatibility)
+        _ = AllChem.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=2048)
 
         # ChEMBL similarity API
         similarity_client = new_client.similarity
@@ -497,10 +497,10 @@ class ExternalAPITester:
 
     def run_all_tests(self, api_filter: Optional[str] = None):
         """Run all API tests or filter by API name."""
-        print(f"\n{'='*70}")
-        print(f"  IMPULATOR External API Test Suite")
+        print("\n" + "=" * 70)
+        print("  IMPULATOR External API Test Suite")
         print(f"  Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"{'='*70}\n")
+        print("=" * 70 + "\n")
 
         # Define test suite
         test_suite = [
@@ -539,7 +539,7 @@ class ExternalAPITester:
             if skipped_count > 0:
                 print(f"⚠️  Skipping {skipped_count} ChEMBL test(s) - API unavailable\n")
             else:
-                print(f"⚠️  WARNING: Expected to skip ChEMBL tests but skipped_count=0\n")
+                print("⚠️  WARNING: Expected to skip ChEMBL tests but skipped_count=0\n")
 
         # Run tests
         for api_name, test_name, test_func in test_suite:
@@ -592,15 +592,15 @@ class ExternalAPITester:
             print()
 
         # Overall summary
-        print(f"{'='*70}")
+        print("=" * 70)
         print(f"  Total: {total_passed}/{total_tests} passed, {total_failed} failed")
 
         if total_failed == 0:
-            print(f"  ✓ All tests passed!")
+            print("  ✓ All tests passed!")
         else:
             print(f"  ✗ {total_failed} test(s) failed")
 
-        print(f"{'='*70}\n")
+        print("=" * 70 + "\n")
 
         # Calculate average response times
         if total_passed > 0:

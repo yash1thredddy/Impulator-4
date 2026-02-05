@@ -14,8 +14,8 @@ urllib3>=2.0.0
 
 # Frontend
 streamlit>=1.52.0
-plotly>=6.0.0
-kaleido>=0.2.1  # For Plotly chart export to PNG (HTML reports)
+plotly  # Latest version - Plotly chart library
+kaleido  # For Plotly chart export to PNG (HTML reports)
 
 # Azure Blob Storage
 azure-storage-blob>=12.19.0

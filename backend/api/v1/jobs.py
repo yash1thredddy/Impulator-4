@@ -637,11 +637,17 @@ async def check_duplicates(
         f"{len(structure_matches)} structure matches, {len(new)} new"
     )
 
+    # Compute suggested version names for existing compounds (from full database state)
+    suggested_versions = {}
+    for compound_name in existing:
+        suggested_versions[compound_name] = get_next_version_name(db, compound_name)
+
     return CheckDuplicatesResponse(
         existing=existing,
         processing=processing,
         new=new,
         structure_matches=structure_matches,
+        suggested_versions=suggested_versions,
     )
 
 
@@ -734,32 +740,20 @@ async def create_batch_job(
                 skipped_existing.append(compound_name)
                 continue
 
-            # If action is 'replace', delete existing compound first
+            # Track data to delete AFTER successful job creation (prevents data loss on failure)
+            pending_deletion = None
+
+            # If action is 'replace', prepare deletion but defer execution
             if compound_action == 'replace':
-                # Find and delete existing compound
+                # Find existing compound to replace
                 existing = db.query(Compound).filter(Compound.compound_name == compound_name).first()
                 if existing:
-                    old_entry_id = existing.entry_id
-
-                    # Delete from Azure (UUID-based storage only)
-                    if old_entry_id:
-                        delete_result_from_azure_by_entry_id(old_entry_id)
-
-                        # Delete local ZIP if exists (UUID-based path)
-                        prefix = old_entry_id[:2].lower()
-                        local_zip = settings.RESULTS_DIR / prefix / f"{old_entry_id}.zip"
-                        if local_zip.exists():
-                            try:
-                                local_zip.unlink()
-                                logger.debug(f"Deleted local result for batch replace: {local_zip}")
-                            except Exception as e:
-                                logger.warning(f"Failed to delete local result: {e}")
-
-                    # Delete from database
-                    db.delete(existing)
-                    db.commit()
-                    logger.info(f"Batch replace: deleted existing compound '{compound_name}' (entry_id={old_entry_id})")
-                    replaced.append(compound_name)
+                    # Store deletion info - will execute AFTER job creation succeeds
+                    pending_deletion = {
+                        'entry_id': existing.entry_id,
+                        'compound': existing,
+                        'compound_name': compound_name
+                    }
 
             # Build job params - include duplicate metadata if marking as duplicate
             job_params = compound.model_dump(exclude={"session_id", "duplicate_action", "original_compound_name"})
@@ -772,6 +766,7 @@ async def create_batch_job(
                 job_params["duplicate_of"] = existing.entry_id if existing else None
                 marked_duplicate.append(compound_name)
 
+            # Create job FIRST - if this fails, no data is lost
             job = job_service.create_job(
                 db,
                 JobType.BATCH,
@@ -781,11 +776,41 @@ async def create_batch_job(
             )
             jobs.append(_job_to_response(job))
 
+            # Job creation succeeded - NOW safe to delete old data for replace action
+            if pending_deletion:
+                old_entry_id = pending_deletion['entry_id']
+                existing_compound = pending_deletion['compound']
+
+                # Delete from Azure (UUID-based storage only)
+                if old_entry_id:
+                    delete_result_from_azure_by_entry_id(old_entry_id)
+
+                    # Delete local ZIP if exists (UUID-based path)
+                    prefix = old_entry_id[:2].lower()
+                    local_zip = settings.RESULTS_DIR / prefix / f"{old_entry_id}.zip"
+                    if local_zip.exists():
+                        try:
+                            local_zip.unlink()
+                            logger.debug(f"Deleted local result for batch replace: {local_zip}")
+                        except Exception as e:
+                            logger.warning(f"Failed to delete local result: {e}")
+
+                # Delete from database
+                db.delete(existing_compound)
+                db.commit()
+                logger.info(f"Batch replace: deleted existing compound '{compound_name}' (entry_id={old_entry_id})")
+                replaced.append(compound_name)
+
         except Exception as e:
             # Track per-compound failures instead of failing entire batch
-            logger.error(f"Failed to create job for compound '{compound_name}': {e}")
+            # Log full exception for debugging, but expose only generic message to client
+            logger.error(f"Failed to create job for compound '{compound_name}': {e}", exc_info=True)
             db.rollback()  # Rollback any partial transaction
-            failed_compounds.append({"compound_name": compound_name, "error": str(e)})
+            # Security: Don't expose raw exception details to clients (could leak DB/path info)
+            failed_compounds.append({
+                "compound_name": compound_name,
+                "error": "Failed to create job. Please check compound data and try again."
+            })
 
     # Trigger scheduler to start processing (if not already running)
     if jobs:

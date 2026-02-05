@@ -3461,8 +3461,8 @@ def _render_report_efficiency_boxplots(df: pd.DataFrame) -> None:
     metric_descriptions = {
         'SEI': 'Surface Efficiency Index',
         'BEI': 'Binding Efficiency Index',
-        'NSEI': 'Normalized SEI',
-        'NBEI': 'Normalized BEI'
+        'NSEI': 'Normalized SEI (display only)',
+        'NBEI': 'Normalized BEI (display only)'
     }
 
     # Display metric cards
@@ -3473,11 +3473,12 @@ def _render_report_efficiency_boxplots(df: pd.DataFrame) -> None:
             with cols[i]:
                 mean_val = vals.mean()
                 used_in_score = " ✓" if metric in ['SEI', 'BEI'] else ""
+                description = metric_descriptions.get(metric, metric)
                 st.markdown(f"""
                 <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid {metric_colors.get(metric, '#636EFA')};">
                     <div style="color: #fff; font-size: 0.9em; margin-bottom: 5px;">{metric}{used_in_score}</div>
                     <div style="font-size: 1.5em; color: {metric_colors.get(metric, '#636EFA')}; font-weight: bold;">{mean_val:.2f}</div>
-                    <div style="color: #aaa; font-size: 0.75em;">Mean Value</div>
+                    <div style="color: #aaa; font-size: 0.75em;">{description}</div>
                     <div style="color: #888; font-size: 0.7em; margin-top: 3px;">Range: {vals.min():.1f}-{vals.max():.1f}</div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -4200,7 +4201,7 @@ def _create_html_efficiency_scatter(df: pd.DataFrame) -> str:
         mode='markers',
         marker=dict(size=15, color='orange', symbol='star', line=dict(width=2, color='white')),
         name=f'Mean Point ({mean_sei:.1f}, {mean_bei:.1f})',
-        hovertemplate=f'Mean SEI: {mean_sei:.2f}<br>Mean BEI: {mean_bei:.2f}<br>Angle: {mean_angle:.1f}°<extra></extra>'
+        hovertemplate=f'Mean SEI: {mean_sei:.2f}<br>Mean BEI: {mean_bei:.2f}<br>Angle: {mean_angle:.1f}°<br>Modulus: {mean_modulus:.2f}<extra></extra>'
     ))
 
     fig.update_layout(
@@ -4462,25 +4463,20 @@ def _generate_html_report(data: Dict[str, Any], df: pd.DataFrame) -> str:
             angle_status = "OPTIMAL ✓"
             angle_status_color = "#28a745"
             angle_status_bg = "#d4edda"
-            angle_balance = "(Optimal)"
         elif 35 <= angle_val <= 55:
             angle_status = "ACCEPTABLE"
             angle_status_color = "#17a2b8"
             angle_status_bg = "#d1ecf1"
-            angle_balance = "(Acceptable)"
         else:
             angle_status = "UNBALANCED"
             angle_status_color = "#fd7e14"
             angle_status_bg = "#fff3cd"
-            angle_balance = "(Unbalanced)"
     else:
         angle_status = "N/A"
         angle_status_color = "#6c757d"
         angle_status_bg = "#e9ecef"
-        angle_balance = ""
 
     # PDB evidence - try to load pdb_summary for accurate counts
-    pdb_html = ""
     pdb_total = 0
     high_q = med_q = poor_q = 0
 
@@ -4548,13 +4544,6 @@ def _generate_html_report(data: Dict[str, Any], df: pd.DataFrame) -> str:
     high_q_pct = (high_q / pdb_total * 100) if pdb_total > 0 else 0
     med_q_pct = (med_q / pdb_total * 100) if pdb_total > 0 else 0
     poor_q_pct = (poor_q / pdb_total * 100) if pdb_total > 0 else 0
-
-    if pdb_total > 0:
-        pdb_html = f"""
-        <tr><td>High Quality (&lt;2.0Å)</td><td>{high_q}</td><td style="color: #28a745;">★★★★★</td></tr>
-        <tr><td>Medium Quality (2-3Å)</td><td>{med_q}</td><td style="color: #fd7e14;">★★★</td></tr>
-        <tr><td>Poor Quality (&gt;3Å)</td><td>{poor_q}</td><td style="color: #dc3545;">★</td></tr>
-        """
 
     # Classification - ClassyFire and NPClassifier
     classyfire_html = ""

@@ -607,6 +607,60 @@ OQPLA_OUTPUT_COLUMNS = [
 ]
 
 
+def _build_component_scores(row: pd.Series) -> dict:
+    """
+    Build component scores dict with weights derived from config constants.
+
+    Weights are computed from the module-level constants (WEIGHT_*_RAW) rather
+    than being hardcoded, ensuring consistency with the actual scoring calculations.
+
+    Args:
+        row: A pandas Series containing OQPLA score columns
+
+    Returns:
+        dict with component score details including derived weights
+    """
+    # Calculate total weight and normalized weights from config constants
+    total_weight = WEIGHT_EFFICIENCY_RAW + WEIGHT_ANGLE_RAW + WEIGHT_DISTANCE_RAW + WEIGHT_PDB_RAW
+
+    # Derive normalized weights (percentages)
+    eff_norm = WEIGHT_EFFICIENCY_RAW / total_weight
+    angle_norm = WEIGHT_ANGLE_RAW / total_weight
+    dist_norm = WEIGHT_DISTANCE_RAW / total_weight
+    pdb_norm = WEIGHT_PDB_RAW / total_weight
+
+    return {
+        'efficiency': {
+            'value': row.get('Efficiency_Score'),
+            'weight_raw': f'{WEIGHT_EFFICIENCY_RAW * 100:.0f}%',
+            'weight_normalized': f'{eff_norm * 100:.2f}%',
+            'contribution': row.get('Efficiency_Contribution'),
+            'description': 'Outlier score based on SEI and BEI z-scores'
+        },
+        'angle': {
+            'value': row.get('Angle_Score'),
+            'weight_raw': f'{WEIGHT_ANGLE_RAW * 100:.0f}%',
+            'weight_normalized': f'{angle_norm * 100:.2f}%',
+            'contribution': row.get('Angle_Contribution'),
+            'description': 'Proximity to optimal 45° development angle'
+        },
+        'distance': {
+            'value': row.get('Distance_Score'),
+            'weight_raw': f'{WEIGHT_DISTANCE_RAW * 100:.0f}%',
+            'weight_normalized': f'{dist_norm * 100:.2f}%',
+            'contribution': row.get('Distance_Contribution'),
+            'description': 'Proximity to best-in-class compound (highest modulus)'
+        },
+        'pdb': {
+            'value': row.get('PDB_Score'),
+            'weight_raw': f'{WEIGHT_PDB_RAW * 100:.0f}%',
+            'weight_normalized': f'{pdb_norm * 100:.2f}%',
+            'contribution': row.get('PDB_Contribution'),
+            'description': 'Structural validation from RCSB PDB'
+        },
+    }
+
+
 def get_oqpla_score_breakdown(row: pd.Series) -> dict:
     """
     Get a complete breakdown of OQPLA score components for a single compound.
@@ -661,36 +715,7 @@ def get_oqpla_score_breakdown(row: pd.Series) -> dict:
                 'description': 'Development trajectory angle. 45° is optimal (balanced). <30° = too hydrophobic, >60° = too polar.'
             },
         },
-        'component_scores': {
-            'efficiency': {
-                'value': row.get('Efficiency_Score'),
-                'weight_raw': '40%',
-                'weight_normalized': '50%',
-                'contribution': row.get('Efficiency_Contribution'),
-                'description': 'Outlier score based on SEI and BEI z-scores'
-            },
-            'angle': {
-                'value': row.get('Angle_Score'),
-                'weight_raw': '15%',
-                'weight_normalized': '18.75%',
-                'contribution': row.get('Angle_Contribution'),
-                'description': 'Proximity to optimal 45° development angle'
-            },
-            'distance': {
-                'value': row.get('Distance_Score'),
-                'weight_raw': '20%',
-                'weight_normalized': '25%',
-                'contribution': row.get('Distance_Contribution'),
-                'description': 'Proximity to best-in-class compound (highest modulus)'
-            },
-            'pdb': {
-                'value': row.get('PDB_Score'),
-                'weight_raw': '5%',
-                'weight_normalized': '6.25%',
-                'contribution': row.get('PDB_Contribution'),
-                'description': 'Structural validation from RCSB PDB'
-            },
-        },
+        'component_scores': _build_component_scores(row),
         'final_calculation': {
             'base_score': row.get('OQPLA_Base_Score'),
             'qed': row.get('QED'),
