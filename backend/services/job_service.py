@@ -119,6 +119,7 @@ class JobService:
         input_params: Dict[str, Any],
         session_id: Optional[str] = None,
         batch_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Job:
         """
         Create a new job record.
@@ -129,6 +130,7 @@ class JobService:
             input_params: Input parameters for the job
             session_id: Session ID for user isolation
             batch_id: Batch ID for grouping related jobs
+            idempotency_key: Optional key for safe retries (unique per session)
 
         Returns:
             Created Job object
@@ -139,6 +141,7 @@ class JobService:
             status=JobStatus.PENDING,
             session_id=session_id,
             batch_id=batch_id,
+            idempotency_key=idempotency_key,
             input_params=json.dumps(input_params),
             progress=0.0,
             current_step="Queued",
@@ -202,20 +205,26 @@ class JobService:
         statuses: Optional[List[JobStatus]] = None,
         page: int = 1,
         page_size: int = 20,
+        session_id: Optional[str] = None,
     ) -> Dict:
         """
-        List jobs with optional status filter and pagination.
+        List jobs with optional status filter, session filter, and pagination.
 
         Args:
             db: Database session
             statuses: Optional list of statuses to filter by
             page: Page number (1-indexed)
             page_size: Number of items per page
+            session_id: Session ID to filter by (required for user isolation)
 
         Returns:
             Dict with items, total, page info
         """
         query = db.query(Job)
+
+        # Filter by session_id for user isolation
+        if session_id:
+            query = query.filter(Job.session_id == session_id)
 
         if statuses:
             query = query.filter(Job.status.in_(statuses))

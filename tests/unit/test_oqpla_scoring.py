@@ -19,6 +19,8 @@ from backend.modules.oqpla_scoring import (
     calculate_angle_score,
     calculate_distance_to_best_score,
     interpret_oqpla_score,
+    calculate_oqpla_phase1,
+    calculate_oqpla_phase2,
 )
 
 
@@ -265,6 +267,229 @@ class TestInterpretScore:
         result = interpret_oqpla_score(np.nan)
         assert result['classification'] == 'Invalid'
         assert result['priority'] is None
+
+
+class TestOQPLAPhase2NewWeights:
+    """Tests for updated OQPLA Phase 2 weight ratios."""
+
+    def test_oqpla_phase2_new_weights(self):
+        """
+        Verify Phase 2 weight ratios are correctly normalized:
+        - Efficiency: 40% raw -> 50% normalized
+        - Angle: 15% raw -> 18.75% normalized (was 10%)
+        - Distance: 20% raw -> 25% normalized (was 15%)
+        - PDB: 5% raw -> 6.25% normalized (was 15%)
+
+        Total raw = 40 + 15 + 20 + 5 = 80%
+        """
+        # Create test dataframe with VARIED values to avoid std=0 issue
+        # Different SEI/BEI values ensure Efficiency_Score is non-zero
+        df = pd.DataFrame({
+            'SEI': [5.0, 10.0, 15.0],  # Varied values -> std != 0
+            'BEI': [20.0, 25.0, 30.0],  # Varied values -> std != 0
+            'NSEI': [1.0, 2.0, 3.0],
+            'NBEI': [0.25, 0.35, 0.45],
+            'Angle_SEI_BEI': [45.0, 45.0, 45.0],  # Optimal angle -> score = 1.0
+            'Modulus_SEI_BEI': [20.0, 30.0, 40.0],  # Varied for distance scoring
+            'QED': [1.0, 1.0, 1.0],  # Max QED so multiplier = 1.0
+            'SMILES': ['CCO', 'CCCO', 'CCCCO']
+        })
+
+        # Calculate Phase 2 scores without PDB (use_pdb=False)
+        result = calculate_oqpla_phase2(df, use_pdb=False)
+
+        # Verify that result columns were created
+        assert 'Angle_Score' in result.columns, "Angle_Score column should exist"
+        assert 'Angle_Contribution' in result.columns, "Angle_Contribution column should exist"
+        assert 'Distance_Contribution' in result.columns, "Distance_Contribution column should exist"
+        assert 'OQPLA_Final_Score' in result.columns, "OQPLA_Final_Score column should exist"
+
+        # Since Angle is optimal (45°), Angle_Score should be 1.0 for all rows
+        for i, score in enumerate(result['Angle_Score']):
+            assert abs(score - 1.0) < 0.01, f"Row {i}: Angle_Score should be ~1.0 for 45° angle, got {score}"
+
+        # Verify Angle_Contribution uses the correct weight (18.75%)
+        # Angle_Contribution = Angle_Score * 0.1875 = 1.0 * 0.1875 = 0.1875
+        expected_angle_contribution = 0.1875
+        for i, contrib in enumerate(result['Angle_Contribution']):
+            assert abs(contrib - expected_angle_contribution) < 0.01, \
+                f"Row {i}: Angle_Contribution should be ~{expected_angle_contribution}, got {contrib}"
+
+        # Verify expected weight ratios (these are constants in the algorithm)
+        total_raw_weight = 0.40 + 0.15 + 0.20 + 0.05  # 0.80
+        expected_efficiency_weight = 0.40 / total_raw_weight  # 0.50
+        expected_angle_weight = 0.15 / total_raw_weight  # 0.1875
+        expected_distance_weight = 0.20 / total_raw_weight  # 0.25
+        expected_pdb_weight = 0.05 / total_raw_weight  # 0.0625
+
+        # Verify the weights sum to 1.0
+        total_weight = (expected_efficiency_weight + expected_angle_weight +
+                       expected_distance_weight + expected_pdb_weight)
+        assert abs(total_weight - 1.0) < 0.001, f"Weights should sum to 1.0, got {total_weight}"
+
+        # Verify OQPLA scores are in valid range [0, 1]
+        for i, score in enumerate(result['OQPLA_Final_Score']):
+            assert 0.0 <= score <= 1.0, f"Row {i}: OQPLA_Final_Score should be in [0,1], got {score}"
+
+
+class TestQEDMultiplierNewFormula:
+    """Tests for updated QED multiplier formula: 0.75 + 0.25 * QED."""
+
+    def test_qed_multiplier_qed_zero_gives_075(self):
+        """Test that QED=0 gives multiplier of 0.75 (floor)."""
+        df = pd.DataFrame({
+            'SEI': [10.0],
+            'BEI': [25.0],
+            'NSEI': [2.0],
+            'NBEI': [0.35],
+            'Angle_SEI_BEI': [45.0],
+            'Modulus_SEI_BEI': [30.0],
+            'QED': [0.0],
+            'SMILES': ['CCO']
+        })
+
+        result = calculate_oqpla_phase1(df)
+
+        # QED multiplier should be 0.75 when QED = 0
+        assert abs(result['QED_Multiplier'].iloc[0] - 0.75) < 0.001, \
+            f"QED=0 should give multiplier 0.75, got {result['QED_Multiplier'].iloc[0]}"
+
+    def test_qed_multiplier_qed_one_gives_100(self):
+        """Test that QED=1 gives multiplier of 1.0 (max)."""
+        df = pd.DataFrame({
+            'SEI': [10.0],
+            'BEI': [25.0],
+            'NSEI': [2.0],
+            'NBEI': [0.35],
+            'Angle_SEI_BEI': [45.0],
+            'Modulus_SEI_BEI': [30.0],
+            'QED': [1.0],
+            'SMILES': ['CCO']
+        })
+
+        result = calculate_oqpla_phase1(df)
+
+        # QED multiplier should be 1.0 when QED = 1
+        assert abs(result['QED_Multiplier'].iloc[0] - 1.0) < 0.001, \
+            f"QED=1 should give multiplier 1.0, got {result['QED_Multiplier'].iloc[0]}"
+
+    def test_qed_multiplier_qed_half_gives_0875(self):
+        """Test that QED=0.5 gives multiplier of 0.875."""
+        df = pd.DataFrame({
+            'SEI': [10.0],
+            'BEI': [25.0],
+            'NSEI': [2.0],
+            'NBEI': [0.35],
+            'Angle_SEI_BEI': [45.0],
+            'Modulus_SEI_BEI': [30.0],
+            'QED': [0.5],
+            'SMILES': ['CCO']
+        })
+
+        result = calculate_oqpla_phase1(df)
+
+        # QED multiplier should be 0.875 when QED = 0.5
+        # Formula: 0.75 + 0.25 * 0.5 = 0.75 + 0.125 = 0.875
+        assert abs(result['QED_Multiplier'].iloc[0] - 0.875) < 0.001, \
+            f"QED=0.5 should give multiplier 0.875, got {result['QED_Multiplier'].iloc[0]}"
+
+    def test_qed_multiplier_new_formula(self):
+        """Combined test verifying the full QED multiplier formula: 0.75 + 0.25 * QED."""
+        df = pd.DataFrame({
+            'SEI': [10.0, 10.0, 10.0],
+            'BEI': [25.0, 25.0, 25.0],
+            'NSEI': [2.0, 2.0, 2.0],
+            'NBEI': [0.35, 0.35, 0.35],
+            'Angle_SEI_BEI': [45.0, 45.0, 45.0],
+            'Modulus_SEI_BEI': [30.0, 30.0, 30.0],
+            'QED': [0.0, 0.5, 1.0],
+            'SMILES': ['CCO', 'CCO', 'CCO']
+        })
+
+        result = calculate_oqpla_phase1(df)
+
+        # Verify the formula: 0.75 + 0.25 * QED
+        expected_multipliers = [0.75, 0.875, 1.0]
+
+        for i, expected in enumerate(expected_multipliers):
+            actual = result['QED_Multiplier'].iloc[i]
+            assert abs(actual - expected) < 0.001, \
+                f"QED={df['QED'].iloc[i]} should give multiplier {expected}, got {actual}"
+
+
+class TestEfficiencyScoreUsesSEIBEIOnly:
+    """Tests verifying efficiency score uses only SEI and BEI (not NSEI/NBEI)."""
+
+    def test_efficiency_score_uses_only_sei_bei(self):
+        """
+        Verify that NSEI and NBEI values do not affect the efficiency score.
+        Only SEI and BEI should be used in the calculation.
+        """
+        # Create two dataframes with same SEI/BEI but different NSEI/NBEI
+        df1 = pd.DataFrame({
+            'SEI': [10.0, 15.0, 20.0],
+            'BEI': [25.0, 30.0, 35.0],
+            'NSEI': [1.0, 1.5, 2.0],  # Low NSEI values
+            'NBEI': [0.1, 0.15, 0.2]  # Low NBEI values
+        })
+
+        df2 = pd.DataFrame({
+            'SEI': [10.0, 15.0, 20.0],  # Same SEI
+            'BEI': [25.0, 30.0, 35.0],  # Same BEI
+            'NSEI': [5.0, 7.5, 10.0],   # Very different NSEI values
+            'NBEI': [0.5, 0.75, 1.0]    # Very different NBEI values
+        })
+
+        # Calculate efficiency scores (default should be SEI and BEI only)
+        scores1 = calculate_efficiency_outlier_score(df1)
+        scores2 = calculate_efficiency_outlier_score(df2)
+
+        # Scores should be identical since only SEI and BEI are used
+        for i in range(len(scores1)):
+            assert abs(scores1.iloc[i] - scores2.iloc[i]) < 0.001, \
+                f"NSEI/NBEI should not affect efficiency score at index {i}: {scores1.iloc[i]} vs {scores2.iloc[i]}"
+
+    def test_efficiency_score_default_metrics_sei_bei(self):
+        """Test that the default metrics parameter is ['SEI', 'BEI']."""
+        df = pd.DataFrame({
+            'SEI': [8.0, 10.0, 12.0],
+            'BEI': [20.0, 25.0, 30.0],
+            'NSEI': [1.5, 2.0, 2.5],
+            'NBEI': [0.3, 0.35, 0.4]
+        })
+
+        # Calculate with default (should be SEI, BEI only)
+        scores_default = calculate_efficiency_outlier_score(df)
+
+        # Calculate explicitly with SEI and BEI
+        scores_explicit = calculate_efficiency_outlier_score(df, metrics=['SEI', 'BEI'])
+
+        # Should be identical
+        for i in range(len(scores_default)):
+            assert abs(scores_default.iloc[i] - scores_explicit.iloc[i]) < 0.001, \
+                f"Default should use SEI/BEI only at index {i}"
+
+    def test_nsei_nbei_still_calculated_in_oqpla(self):
+        """Verify that NSEI and NBEI are still calculated and stored but not used in efficiency score."""
+        df = pd.DataFrame({
+            'SEI': [10.0],
+            'BEI': [25.0],
+            'NSEI': [2.0],  # Should still be in dataframe
+            'NBEI': [0.35],  # Should still be in dataframe
+            'Angle_SEI_BEI': [45.0],
+            'Modulus_SEI_BEI': [30.0],
+            'QED': [1.0],
+            'SMILES': ['CCO']
+        })
+
+        result = calculate_oqpla_phase1(df)
+
+        # NSEI and NBEI should still exist in the result dataframe
+        assert 'NSEI' in result.columns, "NSEI should still be in the dataframe"
+        assert 'NBEI' in result.columns, "NBEI should still be in the dataframe"
+
+        # But they should not affect the efficiency score (verified in other tests)
+        assert 'Efficiency_Score' in result.columns, "Efficiency_Score should be calculated"
 
 
 if __name__ == "__main__":

@@ -114,6 +114,77 @@ def get_next_version_name(db: Session, base_name: str) -> str:
     return f"{true_base}_v{next_version}"
 
 
+def get_next_version_names_bulk(db: Session, compound_names: List[str]) -> Dict[str, str]:
+    """
+    Calculate next available version names for multiple compounds in a single query.
+
+    This is the bulk-optimized version of get_next_version_name() that avoids
+    N+1 query issues. For 1000 compounds, this performs 1 query instead of 1000.
+
+    Args:
+        db: Database session
+        compound_names: List of compound names to get versions for
+
+    Returns:
+        Dict mapping original compound name to its next version name
+    """
+    import re
+    from sqlalchemy import or_
+
+    if not compound_names:
+        return {}
+
+    # Extract true base names (strip any existing _vN suffix)
+    version_pattern = re.compile(r'^(.+?)(_v(\d+))?$')
+    name_to_base = {}  # original_name -> true_base
+
+    for name in compound_names:
+        match = version_pattern.match(name)
+        true_base = match.group(1) if match else name
+        name_to_base[name] = true_base
+
+    # Get unique base names
+    unique_bases = list(set(name_to_base.values()))
+
+    # Build OR conditions for all base names (single query)
+    # Using LIKE for each base to catch versioned names
+    like_conditions = [Compound.compound_name.like(f"{base}%") for base in unique_bases]
+
+    # Single query to get all matching compound names
+    all_existing = db.query(Compound.compound_name).filter(
+        or_(*like_conditions)
+    ).all()
+
+    existing_names = {row[0] for row in all_existing}
+
+    # Compute max version for each base name
+    base_max_versions = {base: 1 for base in unique_bases}  # Default to 1
+
+    for base in unique_bases:
+        suffix_pattern = re.compile(rf'^{re.escape(base)}(_v(\d+))?$')
+
+        for name in existing_names:
+            match = suffix_pattern.match(name)
+            if match:
+                if match.group(2):
+                    # Has version suffix like _v2, _v3
+                    version = int(match.group(2))
+                    base_max_versions[base] = max(base_max_versions[base], version)
+                else:
+                    # Original name (no suffix) counts as version 1
+                    base_max_versions[base] = max(base_max_versions[base], 1)
+
+    # Build result dict
+    result = {}
+    for original_name in compound_names:
+        true_base = name_to_base[original_name]
+        next_version = base_max_versions[true_base] + 1
+        result[original_name] = f"{true_base}_v{next_version}"
+
+    logger.debug(f"Bulk version names: computed {len(result)} versions in 1 query")
+    return result
+
+
 # Rate limiting configuration
 RATE_LIMIT_WINDOW_SECONDS = 60  # 1 minute window
 RATE_LIMIT_MAX_JOBS = 10  # Max 10 single jobs per minute per session
@@ -281,6 +352,7 @@ async def create_job(
     request: JobCreate,
     db: Session = Depends(get_db),
     session_id: str = Depends(validate_session_id),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
 ):
     """
     Submit a new compound processing job.
@@ -293,8 +365,14 @@ async def create_job(
     `duplicate_found` response instead of creating the job. Use
     `/jobs/resolve-duplicate` to handle the duplicate.
 
+    **Idempotency:**
+    Include an `Idempotency-Key` header (max 64 chars) to safely retry
+    failed requests. If a job with the same key exists for your session,
+    it will be returned instead of creating a new job.
+
     Headers:
         X-Session-ID: Session ID for user isolation (validated UUID)
+        Idempotency-Key: Optional key for safe retries (max 64 chars)
 
     Rate Limit:
         Max 10 jobs per minute per session
@@ -306,6 +384,18 @@ async def create_job(
     # Use session_id from validated header, fall back to request body if anonymous
     if session_id.startswith("anon-") and request.session_id:
         session_id = request.session_id
+
+    # Check idempotency key - return existing job if already created
+    if idempotency_key:
+        # Truncate to max 64 chars for safety
+        idempotency_key = idempotency_key[:64]
+        existing_job = db.query(Job).filter(
+            Job.session_id == session_id,
+            Job.idempotency_key == idempotency_key
+        ).first()
+        if existing_job:
+            logger.info(f"Idempotent request - returning existing job {existing_job.id}")
+            return _job_to_response(existing_job)
 
     # Check rate limit
     allowed, remaining = rate_limiter.check_rate_limit(session_id, RATE_LIMIT_MAX_JOBS)
@@ -366,6 +456,7 @@ async def create_job(
                 JobType.SINGLE,
                 request.model_dump(exclude={"session_id"}),
                 session_id=session_id,
+                idempotency_key=idempotency_key,
             )
 
             # Trigger scheduler to start processing (if not already running)
@@ -617,11 +708,15 @@ async def check_duplicates(
         f"{len(structure_matches)} structure matches, {len(new)} new"
     )
 
+    # Compute suggested version names for existing compounds (bulk query - avoids N+1)
+    suggested_versions = get_next_version_names_bulk(db, existing) if existing else {}
+
     return CheckDuplicatesResponse(
         existing=existing,
         processing=processing,
         new=new,
         structure_matches=structure_matches,
+        suggested_versions=suggested_versions,
     )
 
 
@@ -693,6 +788,7 @@ async def create_batch_job(
     skipped_existing = []  # Compounds skipped by user choice
     replaced = []  # Compounds replaced (existing deleted)
     marked_duplicate = []  # Compounds marked as duplicates
+    failed_compounds = []  # Compounds that failed during job creation
 
     # Create all jobs in SQLite (status: PENDING)
     # Scheduler will pick them up and process 2 at a time
@@ -704,71 +800,111 @@ async def create_batch_job(
         if compound_name in skipped_processing:
             continue
 
-        # Get per-compound duplicate action (from compound data or duplicate_decisions dict)
-        compound_action = getattr(compound, 'duplicate_action', None) or duplicate_decisions.get(compound_name)
+        try:
+            # Get per-compound duplicate action (from compound data or duplicate_decisions dict)
+            compound_action = getattr(compound, 'duplicate_action', None) or duplicate_decisions.get(compound_name)
 
-        # If action is 'skip', don't process
-        if compound_action == 'skip':
-            skipped_existing.append(compound_name)
-            continue
+            # If action is 'skip', don't process
+            if compound_action == 'skip':
+                skipped_existing.append(compound_name)
+                continue
 
-        # If action is 'replace', delete existing compound first
-        if compound_action == 'replace':
-            # Find and delete existing compound
-            existing = db.query(Compound).filter(Compound.compound_name == compound_name).first()
-            if existing:
-                old_entry_id = existing.entry_id
+            # Track data to delete AFTER successful job creation (prevents data loss on failure)
+            pending_deletion = None
 
-                # Delete from Azure (UUID-based storage only)
-                if old_entry_id:
-                    delete_result_from_azure_by_entry_id(old_entry_id)
+            # If action is 'replace', prepare deletion but defer execution
+            if compound_action == 'replace':
+                # Find existing compound to replace
+                existing = db.query(Compound).filter(Compound.compound_name == compound_name).first()
+                if existing:
+                    # Store deletion info - will execute AFTER job creation succeeds
+                    pending_deletion = {
+                        'entry_id': existing.entry_id,
+                        'compound': existing,
+                        'compound_name': compound_name
+                    }
 
-                    # Delete local ZIP if exists (UUID-based path)
-                    prefix = old_entry_id[:2].lower()
-                    local_zip = settings.RESULTS_DIR / prefix / f"{old_entry_id}.zip"
-                    if local_zip.exists():
-                        try:
-                            local_zip.unlink()
-                            logger.debug(f"Deleted local result for batch replace: {local_zip}")
-                        except Exception as e:
-                            logger.warning(f"Failed to delete local result: {e}")
+            # Build job params - include duplicate metadata if marking as duplicate
+            job_params = compound.model_dump(exclude={"session_id", "duplicate_action", "original_compound_name"})
+            if compound_action == 'duplicate':
+                # Find existing compound to reference - use original_compound_name if provided
+                # (frontend sends new name in compound_name, original in original_compound_name)
+                original_name = getattr(compound, 'original_compound_name', None) or compound_name
+                existing = db.query(Compound).filter(Compound.compound_name == original_name).first()
+                job_params["is_duplicate"] = True
+                job_params["duplicate_of"] = existing.entry_id if existing else None
+                marked_duplicate.append(compound_name)
 
-                # Delete from database
-                db.delete(existing)
-                db.commit()
-                logger.info(f"Batch replace: deleted existing compound '{compound_name}' (entry_id={old_entry_id})")
+            # Create job FIRST - if this fails, no data is lost
+            job = job_service.create_job(
+                db,
+                JobType.BATCH,
+                job_params,
+                session_id=session_id,
+                batch_id=batch_id,
+            )
+            jobs.append(_job_to_response(job))
+
+            # Job creation succeeded - NOW safe to delete old data for replace action
+            # Cleanup failures are warnings, not job creation failures
+            if pending_deletion:
+                old_entry_id = pending_deletion['entry_id']
+                existing_compound = pending_deletion['compound']
+
+                try:
+                    # Delete from Azure (UUID-based storage only)
+                    if old_entry_id:
+                        delete_result_from_azure_by_entry_id(old_entry_id)
+
+                        # Delete local ZIP if exists (UUID-based path)
+                        prefix = old_entry_id[:2].lower()
+                        local_zip = settings.RESULTS_DIR / prefix / f"{old_entry_id}.zip"
+                        if local_zip.exists():
+                            try:
+                                local_zip.unlink()
+                                logger.debug(f"Deleted local result for batch replace: {local_zip}")
+                            except Exception as e:
+                                logger.warning(f"Failed to delete local result: {e}")
+
+                    # Delete from database
+                    db.delete(existing_compound)
+                    db.commit()
+                    logger.info(f"Batch replace: deleted existing compound '{compound_name}' (entry_id={old_entry_id})")
+                except Exception as cleanup_err:
+                    # Job was created successfully - cleanup failure is a warning, not a job failure
+                    # The new job will process correctly; old data may remain as orphan
+                    logger.warning(
+                        f"Batch replace cleanup failed for '{compound_name}' (job created successfully): {cleanup_err}"
+                    )
+                    db.rollback()  # Rollback the failed deletion transaction
+
+                # Always count as replaced since job was created
                 replaced.append(compound_name)
 
-        # Build job params - include duplicate metadata if marking as duplicate
-        job_params = compound.model_dump(exclude={"session_id", "duplicate_action", "original_compound_name"})
-        if compound_action == 'duplicate':
-            # Find existing compound to reference - use original_compound_name if provided
-            # (frontend sends new name in compound_name, original in original_compound_name)
-            original_name = getattr(compound, 'original_compound_name', None) or compound_name
-            existing = db.query(Compound).filter(Compound.compound_name == original_name).first()
-            job_params["is_duplicate"] = True
-            job_params["duplicate_of"] = existing.entry_id if existing else None
-            marked_duplicate.append(compound_name)
-
-        job = job_service.create_job(
-            db,
-            JobType.BATCH,
-            job_params,
-            session_id=session_id,
-            batch_id=batch_id,
-        )
-        jobs.append(_job_to_response(job))
+        except Exception as e:
+            # Track per-compound failures instead of failing entire batch
+            # Log full exception for debugging, but expose only generic message to client
+            logger.error(f"Failed to create job for compound '{compound_name}': {e}", exc_info=True)
+            db.rollback()  # Rollback any partial transaction
+            # Security: Don't expose raw exception details to clients (could leak DB/path info)
+            failed_compounds.append({
+                "compound_name": compound_name,
+                "error": "Failed to create job. Please check compound data and try again."
+            })
 
     # Trigger scheduler to start processing (if not already running)
     if jobs:
         job_scheduler.trigger()
 
     total_skipped = len(skipped_existing) + len(skipped_processing)
+    total_failed = len(failed_compounds)
     logger.info(
         f"Batch {batch_id}: {len(jobs)} jobs queued, "
         f"{len(replaced)} replaced, {len(marked_duplicate)} as duplicates, "
-        f"{total_skipped} skipped (session={truncate_session_id(session_id)})"
+        f"{total_skipped} skipped, {total_failed} failed (session={truncate_session_id(session_id)})"
     )
+    if failed_compounds:
+        logger.warning(f"Batch {batch_id} had {total_failed} compound failures: {[f['compound_name'] for f in failed_compounds]}")
 
     return BatchResponse(
         batch_id=batch_id,
@@ -778,25 +914,31 @@ async def create_batch_job(
         replaced=replaced,
         total_submitted=len(jobs),
         total_skipped=total_skipped,
+        failed_compounds=failed_compounds,  # Include failed compounds in response
     )
 
 
 @router.get(
     "",
     response_model=JobListResponse,
-    summary="List all jobs",
+    summary="List jobs for current session",
 )
 async def list_jobs(
     status: Optional[JobStatus] = Query(None, description="Filter by status"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
+    session_id: str = Depends(validate_session_id),
 ):
     """
-    List all jobs with optional status filter and pagination.
+    List jobs for the current session with optional status filter and pagination.
+
+    Users only see their own jobs (filtered by X-Session-ID header).
     """
     statuses = [status] if status else None
-    result = job_service.list_jobs(db, statuses=statuses, page=page, page_size=page_size)
+    result = job_service.list_jobs(
+        db, statuses=statuses, page=page, page_size=page_size, session_id=session_id
+    )
 
     return JobListResponse(
         items=[_job_to_response(j) for j in result["items"]],
@@ -814,34 +956,53 @@ async def list_jobs(
 )
 async def get_active_jobs(
     db: Session = Depends(get_db),
-    x_session_id: Optional[str] = Header(None, alias="X-Session-ID"),
+    session_id: str = Depends(validate_session_id),
 ):
     """
     Get active (pending/processing) jobs for the current session.
 
     Used by the frontend sidebar to display job progress.
-    Users only see their own jobs when X-Session-ID is provided.
+    Users only see their own jobs (filtered by X-Session-ID header).
 
     Headers:
-        X-Session-ID: Session ID for filtering jobs (required for isolation)
+        X-Session-ID: Session ID for filtering jobs (required, validated UUID)
     """
-    return job_service.get_active_jobs(db, session_id=x_session_id)
+    return job_service.get_active_jobs(db, session_id=session_id)
 
 
 @router.get(
     "/batch/{batch_id}",
     response_model=BatchSummary,
+    responses={403: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
     summary="Get batch summary",
 )
 async def get_batch_summary(
     batch_id: str,
     db: Session = Depends(get_db),
+    session_id: str = Depends(validate_session_id),
 ):
     """
     Get summary statistics for a batch of jobs.
 
+    Requires ownership of the batch (same session that created it).
     Returns overall progress and status counts.
     """
+    # Verify ownership by checking first job in batch
+    first_job = db.query(Job).filter(Job.batch_id == batch_id).first()
+
+    if not first_job:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    if first_job.session_id and first_job.session_id != session_id:
+        logger.warning(
+            f"Unauthorized batch access attempt: session {truncate_session_id(session_id)} "
+            f"tried to access batch {batch_id}"
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="You don't have permission to access this batch"
+        )
+
     summary = job_service.get_batch_summary(db, batch_id)
     if not summary:
         raise HTTPException(status_code=404, detail="Batch not found")
@@ -902,37 +1063,44 @@ async def cancel_batch(
 @router.get(
     "/{job_id}",
     response_model=JobResponse,
-    responses={404: {"model": ErrorResponse}},
+    responses={403: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
     summary="Get job status",
 )
 async def get_job(
     job_id: str,
     db: Session = Depends(get_db),
+    session_id: str = Depends(validate_session_id),
 ):
     """
     Get the current status of a job.
 
     Poll this endpoint (1s interval) to track progress.
+    Requires ownership of the job (same session that created it).
     """
-    job = job_service.get_job(db, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    # Verify ownership (returns job or raises 403/404)
+    job = _verify_job_ownership(db, job_id, session_id)
 
     return _job_to_response(job)
 
 
 @router.get(
     "/{job_id}/detail",
-    responses={404: {"model": ErrorResponse}},
+    responses={403: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
     summary="Get detailed job info",
 )
 async def get_job_detail(
     job_id: str,
     db: Session = Depends(get_db),
+    session_id: str = Depends(validate_session_id),
 ):
     """
     Get detailed job information including parsed input parameters.
+
+    Requires ownership of the job (same session that created it).
     """
+    # Verify ownership first
+    _verify_job_ownership(db, job_id, session_id)
+
     job = job_service.get_job_with_params(db, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")

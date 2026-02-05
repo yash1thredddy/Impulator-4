@@ -127,7 +127,12 @@ def render_duplicate_dialog(duplicate_info: dict) -> Tuple[Optional[str], Option
 
 
 def clear_duplicate_dialog_state():
-    """Clear all duplicate dialog related session state."""
+    """Clear all duplicate dialog related session state.
+
+    Note: 'duplicate_resolution_success' is NOT cleared here because it's set
+    AFTER clearing dialog state and needs to persist through the rerun to
+    display success messages after the dialog closes.
+    """
     keys_to_clear = [
         'pending_duplicate_info',
         'show_duplicate_dialog',

@@ -13,6 +13,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
 
 from frontend.services import (
     get_api_client,
@@ -74,7 +75,7 @@ def render_compound_detail_page() -> None:
     _render_quick_stats(data)
 
     # Main content with tabs
-    tabs = st.tabs(["📊 Overview", "📈 Visualizations", "🧬 Molecules", "📋 Data"])
+    tabs = st.tabs(["📊 Overview", "📈 Visualizations", "🧬 Molecules", "📋 Data", "📄 Report"])
 
     with tabs[0]:
         _render_overview_tab(data)
@@ -87,6 +88,9 @@ def render_compound_detail_page() -> None:
 
     with tabs[3]:
         _render_data_tab(data)
+
+    with tabs[4]:
+        _render_report_tab(data)
 
 
 def _render_quick_stats(data: Dict[str, Any]) -> None:
@@ -1115,6 +1119,238 @@ def _render_pains_analysis(df: pd.DataFrame) -> None:
     """)
 
 
+def _render_oqpla_score_breakdown(df: pd.DataFrame, compound_name: str) -> None:
+    """
+    Render detailed OQPLA score breakdown for a representative compound.
+
+    Shows all individual scores, efficiency metrics, and contribution breakdown.
+    """
+    if df is None or df.empty:
+        return
+
+    # Check if we have the required columns
+    required_cols = ['OQPLA_Final_Score', 'Efficiency_Score', 'Angle_Score', 'Distance_Score']
+    if not all(col in df.columns for col in required_cols):
+        return
+
+    st.markdown("---")
+
+    with st.expander("🎯 Detailed Score Breakdown", expanded=True):
+        # Get representative row (highest scoring or first valid row)
+        valid_df = df[df['OQPLA_Final_Score'].notna()]
+        if valid_df.empty:
+            st.info("No valid OQPLA scores available for breakdown")
+            return
+
+        # Use highest scoring compound for breakdown
+        row = valid_df.loc[valid_df['OQPLA_Final_Score'].idxmax()]
+
+        # Final Score Hero Section
+        final_score = row.get('OQPLA_Final_Score', 0)
+        classification = row.get('OQPLA_Classification', 'Unknown')
+        priority = row.get('OQPLA_Priority', 'N/A')
+
+        # Color based on score
+        if final_score >= 0.7:
+            score_color = "#28a745"  # Green
+        elif final_score >= 0.5:
+            score_color = "#ffc107"  # Yellow
+        elif final_score >= 0.3:
+            score_color = "#fd7e14"  # Orange
+        else:
+            score_color = "#dc3545"  # Red
+
+        st.markdown(f"""
+        <div style="text-align: center; padding: 15px; background: linear-gradient(135deg, {score_color}22, {score_color}11); border-radius: 10px; border: 2px solid {score_color}; margin-bottom: 15px;">
+            <h2 style="color: {score_color}; margin: 0; font-size: 2.5em;">{final_score:.3f}</h2>
+            <p style="color: {score_color}; margin: 5px 0; font-size: 1.1em; font-weight: bold;">{classification}</p>
+            <p style="color: #666; margin: 0; font-size: 0.9em;">Priority: {priority} | Best scoring compound shown</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Efficiency Metrics Section
+        st.markdown("#### 📊 Efficiency Metrics")
+        st.caption("All four metrics are calculated. Only **SEI** and **BEI** are used in the score.")
+
+        eff_cols = st.columns(4)
+
+        with eff_cols[0]:
+            sei = row.get('SEI')
+            st.metric("SEI", f"{sei:.2f}" if pd.notna(sei) else "N/A",
+                      help="Surface Efficiency Index = pActivity ÷ (PSA/100). **Used in score.**")
+
+        with eff_cols[1]:
+            bei = row.get('BEI')
+            st.metric("BEI", f"{bei:.2f}" if pd.notna(bei) else "N/A",
+                      help="Binding Efficiency Index = pActivity ÷ (MW/1000). **Used in score.**")
+
+        with eff_cols[2]:
+            nsei = row.get('NSEI')
+            st.metric("NSEI", f"{nsei:.2f}" if pd.notna(nsei) else "N/A",
+                      help="Normalized SEI = pActivity ÷ NPOL. Display only.")
+
+        with eff_cols[3]:
+            nbei = row.get('NBEI')
+            st.metric("NBEI", f"{nbei:.3f}" if pd.notna(nbei) else "N/A",
+                      help="Normalized BEI = pActivity ÷ NHA. Display only.")
+
+        # Plane Geometry Section
+        st.markdown("#### 📐 Efficiency Plane Geometry")
+
+        geom_cols = st.columns(2)
+
+        with geom_cols[0]:
+            modulus = row.get('Modulus_SEI_BEI')
+            st.metric("Modulus", f"{modulus:.2f}" if pd.notna(modulus) else "N/A")
+            st.caption("""
+            The modulus measures the distance of the combined efficiency vector (SEI, BEI)
+            from the origin on the efficiency plane. It represents the overall efficiency
+            magnitude. While derived from SEI and BEI, the modulus is independent of
+            the development angle—the angle defines direction, not magnitude.
+            """)
+
+        with geom_cols[1]:
+            angle = row.get('Angle_SEI_BEI')
+            if pd.notna(angle):
+                angle_deviation = abs(angle - 45)
+                if angle_deviation < 10:
+                    angle_status = "✅ Optimal"
+                elif angle_deviation < 20:
+                    angle_status = "⚠️ Moderate"
+                else:
+                    angle_status = "❌ Unbalanced"
+                st.metric("Development Angle", f"{angle:.1f}°", delta=angle_status, delta_color="off")
+            else:
+                st.metric("Development Angle", "N/A")
+            st.caption("Optimal angle is 45°. <30° = too hydrophobic, >60° = too polar.")
+
+        # Component Scores Section
+        st.markdown("#### 🎯 Component Scores & Contributions")
+
+        comp_cols = st.columns(4)
+
+        with comp_cols[0]:
+            eff_score = row.get('Efficiency_Score', 0)
+            eff_contrib = row.get('Efficiency_Contribution', 0)
+            st.metric("Efficiency", f"{eff_score:.3f}" if pd.notna(eff_score) else "N/A",
+                      help="Weight: 50% (normalized)")
+            if pd.notna(eff_score):
+                st.progress(max(0.0, min(1.0, float(eff_score))))
+            st.caption(f"Contribution: {eff_contrib:.3f}" if pd.notna(eff_contrib) else "")
+
+        with comp_cols[1]:
+            ang_score = row.get('Angle_Score', 0)
+            ang_contrib = row.get('Angle_Contribution', 0)
+            st.metric("Angle", f"{ang_score:.3f}" if pd.notna(ang_score) else "N/A",
+                      help="Weight: 18.75% (normalized)")
+            if pd.notna(ang_score):
+                st.progress(max(0.0, min(1.0, float(ang_score))))
+            st.caption(f"Contribution: {ang_contrib:.3f}" if pd.notna(ang_contrib) else "")
+
+        with comp_cols[2]:
+            dist_score = row.get('Distance_Score', 0)
+            dist_contrib = row.get('Distance_Contribution', 0)
+            st.metric("Distance", f"{dist_score:.3f}" if pd.notna(dist_score) else "N/A",
+                      help="Weight: 25% (normalized)")
+            if pd.notna(dist_score):
+                st.progress(max(0.0, min(1.0, float(dist_score))))
+            st.caption(f"Contribution: {dist_contrib:.3f}" if pd.notna(dist_contrib) else "")
+
+        with comp_cols[3]:
+            pdb_score = row.get('PDB_Score', 0)
+            pdb_contrib = row.get('PDB_Contribution', 0)
+            st.metric("PDB Evidence", f"{pdb_score:.3f}" if pd.notna(pdb_score) else "N/A",
+                      help="Weight: 6.25% (normalized)")
+            if pd.notna(pdb_score):
+                st.progress(max(0.0, min(1.0, float(pdb_score))))
+            st.caption(f"Contribution: {pdb_contrib:.3f}" if pd.notna(pdb_contrib) else "")
+
+        # Final Calculation Section
+        st.markdown("#### 🧮 Final Calculation")
+
+        base_score = row.get('OQPLA_Base_Score', 0)
+        qed = row.get('QED', 0)
+        qed_mult = row.get('QED_Multiplier', 0)
+        qed_impact = row.get('QED_Impact', 0)
+
+        calc_cols = st.columns(3)
+
+        with calc_cols[0]:
+            st.metric("Base Score", f"{base_score:.3f}" if pd.notna(base_score) else "N/A",
+                      help="Sum of weighted component contributions")
+
+        with calc_cols[1]:
+            st.metric("QED", f"{qed:.3f}" if pd.notna(qed) else "N/A",
+                      help="Quantitative Estimate of Drug-likeness (0-1)")
+
+        with calc_cols[2]:
+            st.metric("QED Multiplier", f"{qed_mult:.3f}" if pd.notna(qed_mult) else "N/A",
+                      delta=f"Impact: {qed_impact:+.3f}" if pd.notna(qed_impact) else None,
+                      help="Formula: 0.75 + 0.25 × QED. Floor at 75%.")
+
+        # Formula display
+        if pd.notna(base_score) and pd.notna(qed_mult):
+            st.code(f"""
+Final Score = Base Score × QED Multiplier
+            = {base_score:.3f} × {qed_mult:.3f}
+            = {final_score:.3f}
+            """, language=None)
+
+        # Contribution Pie Chart
+        _render_contribution_chart(row)
+
+        # PDB Details (if available)
+        pdb_structures = row.get('PDB_Num_Structures', 0)
+        if pd.notna(pdb_structures) and pdb_structures > 0:
+            st.markdown("#### 🔬 PDB Structural Evidence")
+
+            pdb_cols = st.columns(4)
+
+            with pdb_cols[0]:
+                st.metric("Total Structures", int(pdb_structures))
+            with pdb_cols[1]:
+                st.metric("High Quality (<2.0Å)", int(row.get('PDB_High_Quality', 0)))
+            with pdb_cols[2]:
+                st.metric("Medium Quality (2-3Å)", int(row.get('PDB_Medium_Quality', 0)))
+            with pdb_cols[3]:
+                st.metric("Poor Quality (>3.0Å)", int(row.get('PDB_Poor_Quality', 0)))
+
+            st.caption("""
+            **Interpretation:**
+            High quality structures (<2.0Å) provide strongest validation.
+            Multiple structures increase confidence.
+            Low PDB score with high efficiency = potential artifact (RED FLAG).
+            """)
+
+
+def _render_contribution_chart(row: pd.Series) -> None:
+    """Render a pie chart showing score contributions."""
+    contributions = {
+        'Efficiency (50%)': row.get('Efficiency_Contribution', 0),
+        'Angle (18.75%)': row.get('Angle_Contribution', 0),
+        'Distance (25%)': row.get('Distance_Contribution', 0),
+        'PDB (6.25%)': row.get('PDB_Contribution', 0),
+    }
+
+    # Filter out zero/nan values
+    contributions = {k: float(v) for k, v in contributions.items() if pd.notna(v) and v > 0}
+
+    if not contributions:
+        return
+
+    fig = px.pie(
+        values=list(contributions.values()),
+        names=list(contributions.keys()),
+        title="Score Contribution Breakdown",
+        color_discrete_sequence=px.colors.qualitative.Set2
+    )
+
+    fig.update_traces(textposition='inside', textinfo='percent+label')
+    fig.update_layout(showlegend=False, height=300, margin=dict(t=40, b=10, l=10, r=10))
+
+    st.plotly_chart(fig, width='stretch')
+
+
 def _render_oqpla_analysis(df: pd.DataFrame, compound_name: str) -> None:
     """IMP and OQPLA analysis with full explanations."""
     if df is None:
@@ -1133,26 +1369,31 @@ def _render_oqpla_analysis(df: pd.DataFrame, compound_name: str) -> None:
         st.markdown("""
 **O[Q/P/L]A (Overall Quality/Promise/Likelihood Assessment)** is a multi-criteria scoring system for evaluating compound quality and IMP (Invalid Metabolic Panacea) likelihood.
 
-**Scoring Components:**
-1. **Efficiency Outlier Score (40%)** - How exceptional are the compound's efficiency metrics (SEI, BEI, NSEI, NBEI) compared to the cohort? Higher outlier scores suggest unusual activity.
-2. **Development Angle Score (10%)** - Is the compound balanced between surface and binding efficiency? An angle of 45° is optimal.
-3. **Distance to Best-in-Class (15%)** - How close is the compound to the best performer in the dataset?
-4. **PDB Structural Evidence (15%)** - Does experimental crystallography data support the binding? High-resolution structures (< 2.0 Å) provide strongest evidence.
-5. **QED Multiplier** - Drug-likeness adjustment based on Quantitative Estimate of Drug-likeness.
+**Scoring Components (Raw Weights → Normalized):**
+| Component | Raw | Normalized | Description |
+|-----------|-----|------------|-------------|
+| **Efficiency Outlier** | 40% | 50% | How exceptional are SEI and BEI metrics? (NSEI/NBEI displayed but not used in score) |
+| **Development Angle** | 15% | 18.75% | Is the compound balanced? 45° is optimal |
+| **Distance to Best** | 20% | 25% | How close to the best performer? |
+| **PDB Evidence** | 5% | 6.25% | Structural validation from crystallography |
 
-**Score Interpretation (Higher = More Likely IMP):**
-- **0.0 - 0.3**: Not IMP - normal behavior, likely genuine activity
-- **0.3 - 0.5**: Weak IMP - some outlier characteristics, low confidence
-- **0.5 - 0.7**: Moderate IMP - potential lead, needs more validation
-- **0.7 - 0.9**: Strong IMP - high confidence outlier, priority for validation
-- **0.9 - 1.0**: Exceptional IMP - highest confidence, immediate validation needed
+**QED Multiplier:** `0.75 + 0.25 × QED`
+- Floor at 75% (even QED=0 retains most of score)
+- Maximum impact of 25% (QED=1 gives full score)
 
-**IMP Classification:**
-- **Not IMP**: Compounds showing normal behavior within expected ranges (likely genuine)
-- **Weak IMP**: Some outlier characteristics but lacking validation (deprioritize)
-- **Moderate IMP**: Potential lead with some validation evidence (monitor and gather data)
-- **Strong IMP**: High confidence - most validation criteria met (validate within 1 month)
-- **Exceptional IMP**: Highest confidence - multiple validation streams confirm (priority 1)
+**Score Interpretation:**
+| Score | Classification | Priority | Recommended Action |
+|-------|---------------|----------|-------------------|
+| 0.90-1.00 | Exceptional IMP | 1 (Highest) | Immediate experimental validation |
+| 0.70-0.89 | Strong IMP | 2 | Validate within 1 month |
+| 0.50-0.69 | Moderate IMP | 3 | Monitor, gather more data |
+| 0.30-0.49 | Weak IMP | 4 | Deprioritize (unless novel) |
+| < 0.30 | Not IMP | None | Exclude from pipeline |
+
+**Note on Efficiency Metrics:**
+All four efficiency metrics (SEI, BEI, NSEI, NBEI) are calculated and displayed for reference.
+However, only **SEI and BEI** are used in the Efficiency Outlier Score to avoid redundancy,
+since NSEI and NBEI are derived from the same underlying activity data.
         """)
 
     # OQPLA Scoring
@@ -1171,8 +1412,9 @@ def _render_oqpla_analysis(df: pd.DataFrame, compound_name: str) -> None:
             min_val = scores.min() if len(scores) > 0 else None
             st.metric("Lowest Score", f"{min_val:.3f}" if pd.notna(min_val) else "N/A")
         with score_cols[3]:
-            high_quality = len(scores[scores >= 0.5]) if len(scores) > 0 else 0
-            st.metric("High Quality (≥0.5)", high_quality)
+            # Higher OQPLA = MORE IMP risk (worse, not better)
+            moderate_plus_imp = len(scores[scores >= 0.5]) if len(scores) > 0 else 0
+            st.metric("Moderate+ IMP (≥0.5)", moderate_plus_imp, help="Higher score = Higher false positive risk")
 
         # Score histogram with better styling
         col1, col2 = st.columns([2, 1])
@@ -1184,9 +1426,9 @@ def _render_oqpla_analysis(df: pd.DataFrame, compound_name: str) -> None:
                 xaxis_title="O[Q/P/L]A Score",
                 yaxis_title="Count"
             )
-            # Add vertical lines for thresholds
-            fig.add_vline(x=0.3, line_dash="dash", line_color="orange", annotation_text="Low/Moderate")
-            fig.add_vline(x=0.5, line_dash="dash", line_color="green", annotation_text="Good")
+            # Add vertical lines for thresholds - higher score = MORE IMP risk
+            fig.add_vline(x=0.3, line_dash="dash", line_color="orange", annotation_text="IMP Threshold")
+            fig.add_vline(x=0.5, line_dash="dash", line_color="red", annotation_text="Moderate+ IMP")
             st.plotly_chart(fig, width='stretch')
 
         with col2:
@@ -1203,6 +1445,9 @@ def _render_oqpla_analysis(df: pd.DataFrame, compound_name: str) -> None:
                         st.warning(f"**{cls}**: {count} ({pct:.0f}%)")
                     else:
                         st.error(f"**{cls}**: {count} ({pct:.0f}%)")
+
+        # Detailed Score Breakdown Section
+        _render_oqpla_score_breakdown(df, compound_name)
 
     # IMP Candidates section
     if has_imp:
@@ -1963,11 +2208,46 @@ def _render_pdb_evidence(
     # Get unique compounds with PDB data
     unique_df = df.drop_duplicates('ChEMBL_ID') if 'ChEMBL_ID' in df.columns else df
 
-    # Calculate summary statistics
-    total_structs = int(unique_df['PDB_Num_Structures'].sum()) if 'PDB_Num_Structures' in unique_df.columns else 0
-    high_q = int(unique_df['PDB_High_Quality'].sum()) if 'PDB_High_Quality' in unique_df.columns else 0
-    med_q = int(unique_df['PDB_Medium_Quality'].sum()) if 'PDB_Medium_Quality' in unique_df.columns else 0
-    poor_q = int(unique_df['PDB_Poor_Quality'].sum()) if 'PDB_Poor_Quality' in unique_df.columns else 0
+    # Try to load detailed PDB summary file FIRST to get accurate counts
+    pdb_summary_df = None
+    try:
+        safe_name = sanitize_compound_name(compound_name)
+        for filename in ["pdb_summary.csv", f"{safe_name}_pdb_summary.csv", f"{safe_name}_pdb_details.csv"]:
+            pdb_summary_df = smart_load_dataframe(
+                filename,
+                entry_id=entry_id,
+                storage_path=storage_path
+            )
+            if pdb_summary_df is not None and not pdb_summary_df.empty:
+                break
+    except Exception:
+        pdb_summary_df = None
+
+    # Calculate summary statistics - use pdb_summary_df if available for accurate counts
+    if pdb_summary_df is not None and not pdb_summary_df.empty:
+        # Use actual unique PDB structures from the detailed file
+        total_structs = len(pdb_summary_df)
+        # Count quality from the Quality column
+        if 'Quality' in pdb_summary_df.columns:
+            high_q = int((pdb_summary_df['Quality'] == '***').sum())
+            med_q = int((pdb_summary_df['Quality'] == '**').sum())
+            poor_q = int((pdb_summary_df['Quality'] == '*').sum())
+        else:
+            # Fallback to resolution-based counting
+            if 'Resolution' in pdb_summary_df.columns:
+                pdb_summary_df['_res'] = pd.to_numeric(pdb_summary_df['Resolution'], errors='coerce')
+                high_q = int((pdb_summary_df['_res'] < 2.0).sum())
+                med_q = int(((pdb_summary_df['_res'] >= 2.0) & (pdb_summary_df['_res'] <= 3.0)).sum())
+                poor_q = int((pdb_summary_df['_res'] > 3.0).sum())
+            else:
+                high_q = med_q = poor_q = 0
+    else:
+        # Fallback to summing from unique compounds (less accurate)
+        total_structs = int(unique_df['PDB_Num_Structures'].sum()) if 'PDB_Num_Structures' in unique_df.columns else 0
+        high_q = int(unique_df['PDB_High_Quality'].sum()) if 'PDB_High_Quality' in unique_df.columns else 0
+        med_q = int(unique_df['PDB_Medium_Quality'].sum()) if 'PDB_Medium_Quality' in unique_df.columns else 0
+        poor_q = int(unique_df['PDB_Poor_Quality'].sum()) if 'PDB_Poor_Quality' in unique_df.columns else 0
+
     avg_score = unique_df['PDB_Score'].mean() if 'PDB_Score' in unique_df.columns else None
     compounds_with_pdb = len(unique_df[unique_df['PDB_Num_Structures'] > 0]) if 'PDB_Num_Structures' in unique_df.columns else 0
     pct_with_pdb = (compounds_with_pdb / len(unique_df) * 100) if len(unique_df) > 0 else 0
@@ -2019,22 +2299,7 @@ def _render_pdb_evidence(
 
     st.markdown("---")
 
-    # Try to load detailed PDB summary file first
-    pdb_summary_df = None
-    try:
-        safe_name = sanitize_compound_name(compound_name)
-        # Try different possible filenames for PDB summary using smart loader
-        for filename in ["pdb_summary.csv", f"{safe_name}_pdb_summary.csv", f"{safe_name}_pdb_details.csv"]:
-            pdb_summary_df = smart_load_dataframe(
-                filename,
-                entry_id=entry_id,
-                storage_path=storage_path
-            )
-            if pdb_summary_df is not None and not pdb_summary_df.empty:
-                break
-    except Exception:
-        pdb_summary_df = None
-
+    # pdb_summary_df was already loaded earlier for accurate counts
     # If we have detailed PDB summary, display it in the exact format
     if pdb_summary_df is not None and not pdb_summary_df.empty:
         st.markdown("**Detailed PDB Structures:**")
@@ -2611,3 +2876,2083 @@ def _show_delete_confirmation(compound_name: str, entry_id: Optional[str] = None
             except Exception as e:
                 logger.error(f"Error deleting compound: {e}")
                 st.error(f"Error: {e}")
+
+
+# =============================================================================
+# REPORT TAB FUNCTIONS
+# =============================================================================
+
+def _get_imp_color(score: float) -> str:
+    """Return color based on OQPLA score - Higher IMP = MORE DANGEROUS (RED)."""
+    if pd.isna(score):
+        return "#6c757d"  # Gray for N/A
+    if score >= 0.9:
+        return "#721c24"  # Dark Red - Exceptional IMP
+    elif score >= 0.7:
+        return "#dc3545"  # Red - Strong IMP
+    elif score >= 0.5:
+        return "#fd7e14"  # Orange - Moderate IMP
+    elif score >= 0.3:
+        return "#28a745"  # Light Green - Weak IMP
+    else:
+        return "#155724"  # Green - Not IMP
+
+
+def _get_imp_bg_color(score: float) -> str:
+    """Return background color (lighter version) for IMP badges."""
+    if pd.isna(score):
+        return "#e9ecef"  # Light gray for N/A
+    if score >= 0.9:
+        return "#f8d7da"  # Light red bg
+    elif score >= 0.7:
+        return "#f8d7da"  # Light red bg
+    elif score >= 0.5:
+        return "#fff3cd"  # Light orange bg
+    elif score >= 0.3:
+        return "#d4edda"  # Light green bg
+    else:
+        return "#d4edda"  # Light green bg
+
+
+def _get_imp_interpretation(score: float) -> dict:
+    """Return IMP interpretation - Strong IMP = FALSE POSITIVE risk."""
+    if pd.isna(score):
+        return {
+            "label": "N/A",
+            "risk": "Score not available",
+            "action": "Check data quality",
+            "priority": None
+        }
+    if score >= 0.9:
+        return {
+            "label": "Exceptional IMP",
+            "risk": "VERY HIGH false positive risk",
+            "action": "Immediate validation required - likely assay artifact",
+            "priority": 1
+        }
+    elif score >= 0.7:
+        return {
+            "label": "Strong IMP",
+            "risk": "HIGH false positive risk",
+            "action": "Validate within 1 month with orthogonal assay",
+            "priority": 2
+        }
+    elif score >= 0.5:
+        return {
+            "label": "Moderate IMP",
+            "risk": "Moderate false positive risk",
+            "action": "Monitor and gather additional validation data",
+            "priority": 3
+        }
+    elif score >= 0.3:
+        return {
+            "label": "Weak IMP",
+            "risk": "Lower false positive risk",
+            "action": "More likely genuine - standard follow-up",
+            "priority": 4
+        }
+    else:
+        return {
+            "label": "Not IMP",
+            "risk": "Likely genuine activity",
+            "action": "Proceed with development",
+            "priority": None
+        }
+
+
+def _render_report_tab(data: Dict[str, Any]) -> None:
+    """Render the Report tab with comprehensive analysis and export."""
+    df = data.get('results')
+    if df is None or df.empty:
+        st.warning("No data available for report generation.")
+        return
+
+    compound_name = data.get('compound_name', 'Unknown')
+    smiles = data.get('smiles', '')
+    summary = data.get('summary', {})
+
+    # Calculate scores - use MAX (best scoring compound) to match Overview tab behavior
+    # The Overview shows "Best scoring compound" so we match that for consistency
+    mean_score = df['OQPLA_Final_Score'].max() if 'OQPLA_Final_Score' in df.columns else 0
+    mean_qed = df['QED'].mean() if 'QED' in df.columns else 0
+
+    # On-demand HTML generation using session state to save memory
+    # HTML is only generated when user clicks "Generate Report", not on every page load
+    report_key = f"html_report_{compound_name}"
+
+    col1, col2, col3 = st.columns([2, 2, 4])
+    with col1:
+        # Generate button - only creates HTML when clicked
+        if st.button("🔄 Generate HTML Report", key="generate_report_btn", help="Click to generate the HTML report for download"):
+            with st.spinner("Generating report with charts..."):
+                html_content = _generate_html_report(data, df)
+                st.session_state[report_key] = html_content
+                st.success("Report ready for download!")
+
+    with col2:
+        # Download button - only shown if HTML has been generated
+        if report_key in st.session_state:
+            st.download_button(
+                "📄 Download HTML",
+                st.session_state[report_key],
+                f"{compound_name.replace(' ', '_')}_report.html",
+                "text/html",
+                key="download_report_btn"
+            )
+        else:
+            st.markdown("<small style='color: #888;'>Click 'Generate' first</small>", unsafe_allow_html=True)
+
+    with col3:
+        st.info("💡 **Tip:** Generate the report, download the HTML, then use Ctrl+P to print to PDF")
+
+    st.markdown("---")
+
+    # Render all report sections
+    _render_report_header(data, smiles)
+    _render_report_executive_summary(df, mean_score, mean_qed, summary)
+    _render_report_properties_table(df)
+    _render_report_oqpla_calculation(df)
+    _render_report_red_flags(df)
+    _render_report_bioactivity_donut(df)
+    _render_report_efficiency_boxplots(df)
+    _render_report_efficiency_plane(df)
+    _render_report_pdb_evidence(df, data)
+    _render_report_classification(df)
+    _render_report_indications(data)
+    _render_report_recommendation(df, mean_score)
+
+
+def _render_report_header(data: Dict[str, Any], smiles: str) -> None:
+    """Render report header with 2D structure, compound name, SMILES."""
+    st.markdown("## 📋 IMPULATOR Compound Analysis Report")
+
+    compound_name = data.get('compound_name', 'Unknown')
+    summary = data.get('summary', {})
+
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        # Render 2D structure
+        if smiles:
+            try:
+                from rdkit import Chem
+                from rdkit.Chem import Draw
+                import io
+                import base64
+
+                mol = Chem.MolFromSmiles(smiles)
+                if mol:
+                    # High-quality image (2x size for better resolution)
+                    img = Draw.MolToImage(mol, size=(600, 500))
+                    buffered = io.BytesIO()
+                    img.save(buffered, format="PNG", optimize=False, quality=95)
+                    img_b64 = base64.b64encode(buffered.getvalue()).decode()
+                    # Display at 300x250 but use 600x500 source for crisp rendering
+                    st.markdown(
+                        f'<img src="data:image/png;base64,{img_b64}" style="width: 300px; height: 250px; border: 1px solid #ddd; border-radius: 8px;">',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.warning("Could not render structure")
+            except Exception as e:
+                st.warning(f"Structure rendering unavailable: {e}")
+        else:
+            st.info("No SMILES available")
+
+    with col2:
+        st.markdown(f"### {html.escape(compound_name)}")
+
+        # Generate InChIKey if possible
+        inchikey = "N/A"
+        if smiles:
+            try:
+                from rdkit import Chem
+                from rdkit.Chem.inchi import MolToInchiKey
+                mol = Chem.MolFromSmiles(smiles)
+                if mol:
+                    inchikey = MolToInchiKey(mol)
+            except Exception:
+                pass
+
+        st.markdown(f"**InChIKey:** `{inchikey}`")
+        smiles_display = smiles[:80] + '...' if len(smiles) > 80 else smiles
+        st.markdown(f"**SMILES:** `{smiles_display}`")
+        st.markdown(f"**Analysis Date:** {summary.get('processing_date', 'N/A')}")
+
+    st.markdown("---")
+
+    # Add summary stats row matching the Overview header
+    df = data.get('results')
+    if df is not None and not df.empty:
+        # Get stats from summary (same source as Overview header)
+        summary = data.get('summary', {})
+        similar_count = summary.get('similar_count', df['ChEMBL_ID'].nunique() if 'ChEMBL_ID' in df.columns else len(df))
+        activities_count = summary.get('total_activities', len(df))
+        avg_qed = summary.get('qed') or (df['QED'].mean() if 'QED' in df.columns else None)
+        avg_oqpla = df['OQPLA_Final_Score'].mean() if 'OQPLA_Final_Score' in df.columns else None
+
+        # Use IMP count from summary (same as Overview header)
+        imp_count = summary.get('imp_candidates', 0)
+        has_warning = summary.get('has_imp_candidates', False)
+
+        # Display stats in columns
+        stat_cols = st.columns(5)
+        with stat_cols[0]:
+            st.metric("Similar Compounds", similar_count)
+        with stat_cols[1]:
+            st.metric("Activities", activities_count)
+        with stat_cols[2]:
+            st.metric("QED", f"{avg_qed:.2f}" if avg_qed else "N/A")
+        with stat_cols[3]:
+            st.metric("Avg OQPLA", f"{avg_oqpla:.2f}" if avg_oqpla else "N/A")
+        with stat_cols[4]:
+            if has_warning and imp_count > 0:
+                st.markdown(f"""
+                <div style="background-color: #721c24; color: white; padding: 10px 15px; border-radius: 5px; text-align: center;">
+                    <div style="font-size: 0.8em;">⚠️</div>
+                    <div style="font-size: 1.5em; font-weight: bold;">{imp_count} IMP</div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.success("✓ Clean")
+
+    st.markdown("---")
+
+
+def _render_report_executive_summary(df: pd.DataFrame, mean_score: float, mean_qed: float, summary: dict) -> None:
+    """Render executive summary with verdict badge."""
+    st.markdown("### 📊 Executive Summary")
+
+    interpretation = _get_imp_interpretation(mean_score)
+    border_color = _get_imp_color(mean_score)
+
+    # Count red flags - use SAME column names as Overview
+    # Count UNIQUE COMPOUNDS with flags (not all rows)
+    red_flag_cols = ['PAINS_Violation', 'Aggregator_Risk', 'Redox_Reactive', 'Fluorescence_Interference', 'Thiol_Reactive']
+    unique_df = df.drop_duplicates('ChEMBL_ID') if 'ChEMBL_ID' in df.columns else df
+    red_flag_count = 0
+    for col in red_flag_cols:
+        if col in unique_df.columns:
+            red_flag_count += int(unique_df[col].sum() if unique_df[col].dtype == bool else unique_df[col].astype(bool).sum())
+
+    # Verdict badge with DARK background for good contrast
+    priority_text = f"Priority {interpretation['priority']}" if interpretation['priority'] else "N/A"
+    warning_icon = '⚠️' if mean_score >= 0.5 else '✓'
+
+    # Use dark background with colored border and text for better contrast
+    st.markdown(f"""
+    <div style="background-color: #1e1e1e; border-left: 5px solid {border_color}; padding: 15px; border-radius: 5px; margin-bottom: 15px;">
+        <h4 style="color: {border_color}; margin: 0 0 10px 0;">
+            {warning_icon} {interpretation['label'].upper()} - {priority_text}
+        </h4>
+        <p style="margin: 5px 0; color: #e0e0e0;"><strong style="color: #fff;">OQPLA Score:</strong> {mean_score:.3f} | <strong style="color: #fff;">QED:</strong> {mean_qed:.3f} | <strong style="color: #fff;">Red Flags:</strong> {red_flag_count} active</p>
+        <p style="margin: 5px 0; color: #e0e0e0;"><strong style="color: #fff;">Risk Level:</strong> {interpretation['risk']}</p>
+        <p style="margin: 5px 0; color: #e0e0e0;"><strong style="color: #fff;">Recommended Action:</strong> {interpretation['action']}</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Warning for high IMP scores
+    if mean_score >= 0.7:
+        st.warning("""
+        **⚠️ HIGH FALSE POSITIVE RISK**
+
+        This compound shows strong evidence of being an assay artifact (Invalid Metabolic Panacea).
+        **DEPRIORITIZE** unless validated with orthogonal assays (SPR, ITC, or similar).
+        """)
+
+    st.markdown("---")
+
+
+def _render_report_properties_table(df: pd.DataFrame) -> None:
+    """Render compound properties table for BEST scoring compound."""
+    st.markdown("### 🧪 Compound Properties")
+
+    # Get best scoring compound to match Overview behavior
+    if 'OQPLA_Final_Score' not in df.columns:
+        st.info("Property data not available")
+        st.markdown("---")
+        return
+
+    valid_df = df.dropna(subset=['OQPLA_Final_Score'])
+    if valid_df.empty:
+        st.info("Property data not available")
+        st.markdown("---")
+        return
+
+    best_row = valid_df.loc[valid_df['OQPLA_Final_Score'].idxmax()]
+
+    # Get values from best compound
+    def get_val(col):
+        return best_row.get(col) if col in best_row.index else None
+
+    props = {
+        "pActivity": (get_val('pActivity'), "-log10(IC50), higher = more potent"),
+        "Molecular Weight": (get_val('Molecular_Weight'), "g/mol"),
+        "PSA (TPSA)": (get_val('TPSA'), "Polar surface area (Å²)"),
+        "Heavy Atoms": (get_val('Heavy_Atoms'), "Non-hydrogen atom count"),
+        "N+O Atoms (NPOL)": (get_val('NPOL'), "Heteroatom count"),
+        "QED": (get_val('QED'), "Drug-likeness (0-1)"),
+        "LogP": (get_val('MolLogP') or get_val('LogP'), "Lipophilicity"),
+    }
+
+    # Create table
+    table_data = []
+    for prop_name, (value, description) in props.items():
+        if value is not None and not pd.isna(value):
+            table_data.append({
+                "Property": prop_name,
+                "Value": f"{value:.2f}" if isinstance(value, float) else str(value),
+                "Description": description
+            })
+
+    if table_data:
+        st.table(pd.DataFrame(table_data))
+    else:
+        st.info("Property data not available")
+
+    st.markdown("---")
+
+
+def _render_report_oqpla_calculation(df: pd.DataFrame) -> None:
+    """Render step-by-step OQPLA calculation breakdown for BEST scoring compound."""
+    st.markdown("### 🔢 OQPLA Score Calculation")
+
+    # Get the best scoring compound (matches Overview tab behavior)
+    if 'OQPLA_Final_Score' not in df.columns:
+        st.info("OQPLA score data not available")
+        st.markdown("---")
+        return
+
+    valid_df = df.dropna(subset=['OQPLA_Final_Score'])
+    if valid_df.empty:
+        st.info("No valid OQPLA scores available")
+        st.markdown("---")
+        return
+
+    # Get the row with highest OQPLA_Final_Score (best compound)
+    best_row = valid_df.loc[valid_df['OQPLA_Final_Score'].idxmax()]
+
+    st.caption("**Showing calculation for best scoring compound** (matches Overview tab)")
+
+    # Step 1: Efficiency Metrics
+    st.markdown("#### Step 1: Efficiency Metrics")
+
+    metrics_data = []
+    metric_cols = [
+        ('SEI', 'pActivity × 100 / PSA', True),
+        ('BEI', 'pActivity × 1000 / MW', True),
+        ('NSEI', 'pActivity / (N+O Atoms)', False),
+        ('NBEI', 'pActivity / Heavy Atoms', False),
+    ]
+
+    for col, formula, used in metric_cols:
+        if col in best_row.index:
+            value = best_row[col]
+            metrics_data.append({
+                "Metric": col,
+                "Formula": formula,
+                "Value": f"{value:.3f}" if not pd.isna(value) else "N/A",
+                "Used in Score": "✓ YES" if used else "○ Display only"
+            })
+
+    if metrics_data:
+        st.table(pd.DataFrame(metrics_data))
+
+    st.caption("**Note:** Only SEI and BEI contribute to the Efficiency Score (NSEI/NBEI are for reference)")
+
+    # Step 2: Component Scores
+    st.markdown("#### Step 2: Component Scores")
+
+    component_data = []
+    components = [
+        ('Efficiency_Score', 'Efficiency', '40%', '50%'),
+        ('Angle_Score', 'Angle', '15%', '18.75%'),
+        ('Distance_Score', 'Distance', '20%', '25%'),
+        ('PDB_Score', 'PDB Evidence', '5%', '6.25%'),
+    ]
+
+    for col, name, raw_wt, norm_wt in components:
+        if col in best_row.index:
+            score = best_row[col]
+            contrib_col = col.replace('_Score', '_Contribution')
+            contrib = best_row[contrib_col] if contrib_col in best_row.index else None
+            component_data.append({
+                "Component": name,
+                "Score": f"{score:.3f}" if not pd.isna(score) else "N/A",
+                "Weight (Raw)": raw_wt,
+                "Weight (Norm)": norm_wt,
+                "Contribution": f"{contrib:.3f}" if contrib and not pd.isna(contrib) else "N/A"
+            })
+
+    if component_data:
+        st.table(pd.DataFrame(component_data))
+
+    # Step 3: Final Calculation
+    st.markdown("#### Step 3: Final Calculation")
+
+    # Use direct indexing for pandas Series (not .get())
+    base_score = best_row['OQPLA_Base_Score'] if 'OQPLA_Base_Score' in best_row.index else None
+    qed = best_row['QED'] if 'QED' in best_row.index else None
+    qed_mult = best_row['QED_Multiplier'] if 'QED_Multiplier' in best_row.index else None
+    final_score = best_row['OQPLA_Final_Score'] if 'OQPLA_Final_Score' in best_row.index else None
+
+    if all(v is not None and not pd.isna(v) for v in [base_score, qed, qed_mult, final_score]):
+        # Display as formatted text box (not code block to avoid scrolling)
+        st.markdown(f"""
+<div style="background-color: #1e1e1e; padding: 15px; border-radius: 8px; font-family: monospace; white-space: pre-wrap;">
+<strong>Base Score</strong> (sum of contributions): <span style="color: #4ec9b0;">{base_score:.3f}</span>
+
+<strong>QED Value:</strong> <span style="color: #4ec9b0;">{qed:.3f}</span>
+<strong>QED Multiplier</strong> = 0.75 + 0.25 × QED
+             = 0.75 + 0.25 × {qed:.3f}
+             = <span style="color: #4ec9b0;">{qed_mult:.3f}</span>
+
+<strong>FINAL SCORE</strong> = Base Score × QED Multiplier
+            = {base_score:.3f} × {qed_mult:.3f}
+            = <span style="color: #dcdcaa; font-size: 1.2em;"><strong>{final_score:.3f}</strong></span>
+</div>
+        """, unsafe_allow_html=True)
+    else:
+        st.info("Complete OQPLA calculation data not available")
+
+    st.markdown("---")
+
+
+def _render_report_red_flags(df: pd.DataFrame) -> None:
+    """Render red flags assessment section using SAME column names as Overview."""
+    st.markdown("### ⚠️ Red Flags Assessment")
+
+    # Use SAME column names as Overview tab (lines 1042-1046)
+    flags = [
+        ('PAINS_Violation', 'PAINS', 'Pan-Assay Interference compounds detected'),
+        ('Aggregator_Risk', 'Aggregator', 'May form colloidal aggregates'),
+        ('Redox_Reactive', 'Redox', 'May interfere via redox cycling'),
+        ('Fluorescence_Interference', 'Fluorescence', 'May interfere with fluorescence assays'),
+        ('Thiol_Reactive', 'Thiol', 'May react with cysteine residues'),
+    ]
+
+    total_flags = 0
+    flag_data = []
+
+    # Count UNIQUE COMPOUNDS with flags (not all rows) - same as Overview tab
+    unique_df = df.drop_duplicates('ChEMBL_ID') if 'ChEMBL_ID' in df.columns else df
+
+    for col, name, description in flags:
+        if col in unique_df.columns:
+            count = int(unique_df[col].sum() if unique_df[col].dtype == bool else unique_df[col].astype(bool).sum())
+            total_flags += count
+            flag_data.append((name, count, description))
+
+    # Overall assessment
+    if total_flags == 0:
+        overall = "LOW CONCERN - No red flags detected"
+        overall_color = "#28a745"
+        overall_bg = "#d4edda"
+    elif total_flags <= 5:
+        overall = f"MODERATE CONCERN - {total_flags} flags detected"
+        overall_color = "#856404"
+        overall_bg = "#fff3cd"
+    else:
+        overall = f"HIGH CONCERN - {total_flags} flags detected"
+        overall_color = "#721c24"
+        overall_bg = "#f8d7da"
+
+    st.markdown(f"""
+    <div style="background-color: {overall_bg}; padding: 12px; border-radius: 5px; margin-bottom: 15px; border: 1px solid {overall_color};">
+        <strong style="color: {overall_color};">Overall Assessment: {overall}</strong>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Display each flag with counts
+    cols = st.columns(len(flag_data)) if flag_data else []
+    for i, (name, count, description) in enumerate(flag_data):
+        with cols[i]:
+            if count > 0:
+                st.markdown(f"""
+                <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #dc3545;">
+                    <div style="font-size: 1.5em; color: #dc3545; font-weight: bold;">{count}</div>
+                    <div style="color: #fff;">{name}</div>
+                    <div style="font-size: 0.7em; color: #dc3545;">⚠️ Flagged</div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #28a745;">
+                    <div style="font-size: 1.5em; color: #28a745; font-weight: bold;">0</div>
+                    <div style="color: #fff;">{name}</div>
+                    <div style="font-size: 0.7em; color: #28a745;">✓ Clean</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+    st.markdown("---")
+
+
+def _render_report_bioactivity_donut(df: pd.DataFrame) -> None:
+    """Render bioactivity distribution donut chart."""
+    st.markdown("### 🎯 Bioactivity Distribution")
+
+    if 'Activity_Type' not in df.columns:
+        st.info("Activity type data not available")
+        st.markdown("---")
+        return
+
+    # Count activity types
+    activity_counts = df['Activity_Type'].value_counts()
+
+    col1, col2 = st.columns([1, 1])
+
+    with col1:
+        # Create donut chart
+        fig = px.pie(
+            values=activity_counts.values,
+            names=activity_counts.index,
+            hole=0.4,
+            color_discrete_sequence=px.colors.qualitative.Set2
+        )
+        fig.update_traces(textposition='inside', textinfo='percent+label')
+        fig.update_layout(
+            height=350,
+            margin=dict(t=30, b=30, l=30, r=30),
+            showlegend=True,
+            legend=dict(orientation="v", yanchor="middle", y=0.5, xanchor="left", x=1.02)
+        )
+        st.plotly_chart(fig, width='stretch', key="report_activity_donut")
+
+    with col2:
+        # Summary table
+        st.markdown(f"**Total Activities:** {len(df)}")
+        st.markdown(f"**Activity Types:** {len(activity_counts)}")
+
+        table_data = []
+        for activity_type, count in activity_counts.head(10).items():
+            pct = (count / len(df)) * 100
+            table_data.append({
+                "Type": activity_type,
+                "Count": count,
+                "Percentage": f"{pct:.1f}%"
+            })
+        st.table(pd.DataFrame(table_data))
+
+    st.markdown("---")
+
+
+def _render_report_efficiency_boxplots(df: pd.DataFrame) -> None:
+    """Render efficiency metrics box plots with enhanced statistics cards."""
+    st.markdown("### 📈 Efficiency Metrics Distribution")
+
+    metrics = ['SEI', 'BEI', 'NSEI', 'NBEI']
+    available_metrics = [m for m in metrics if m in df.columns]
+
+    if not available_metrics:
+        st.info("Efficiency metrics not available")
+        st.markdown("---")
+        return
+
+    st.caption("**Note:** Only SEI and BEI are used in OQPLA scoring. NSEI and NBEI are shown for additional context.")
+
+    # Calculate statistics and create metric cards
+    metric_colors = {
+        'SEI': '#1f77b4',
+        'BEI': '#2ca02c',
+        'NSEI': '#ff7f0e',
+        'NBEI': '#9467bd'
+    }
+
+    metric_descriptions = {
+        'SEI': 'Surface Efficiency Index',
+        'BEI': 'Binding Efficiency Index',
+        'NSEI': 'Normalized SEI (display only)',
+        'NBEI': 'Normalized BEI (display only)'
+    }
+
+    # Display metric cards
+    cols = st.columns(len(available_metrics))
+    for i, metric in enumerate(available_metrics):
+        vals = df[metric].dropna()
+        if len(vals) > 0:
+            with cols[i]:
+                mean_val = vals.mean()
+                used_in_score = " ✓" if metric in ['SEI', 'BEI'] else ""
+                description = metric_descriptions.get(metric, metric)
+                st.markdown(f"""
+                <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid {metric_colors.get(metric, '#636EFA')};">
+                    <div style="color: #fff; font-size: 0.9em; margin-bottom: 5px;">{metric}{used_in_score}</div>
+                    <div style="font-size: 1.5em; color: {metric_colors.get(metric, '#636EFA')}; font-weight: bold;">{mean_val:.2f}</div>
+                    <div style="color: #aaa; font-size: 0.75em;">{description}</div>
+                    <div style="color: #888; font-size: 0.7em; margin-top: 3px;">Range: {vals.min():.1f}-{vals.max():.1f}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+    st.markdown("")
+
+    # Prepare data for box plots
+    plot_data = []
+    for metric in available_metrics:
+        for value in df[metric].dropna():
+            plot_data.append({"Metric": metric, "Value": value})
+
+    plot_df = pd.DataFrame(plot_data)
+
+    # Create box plot
+    fig = px.box(
+        plot_df,
+        x="Metric",
+        y="Value",
+        color="Metric",
+        points="all",
+        color_discrete_map=metric_colors
+    )
+    fig.update_layout(
+        height=400,
+        margin=dict(t=30, b=30, l=30, r=30),
+        showlegend=False,
+        xaxis_title="Efficiency Metric",
+        yaxis_title="Value"
+    )
+    st.plotly_chart(fig, width='stretch', key="report_efficiency_box")
+
+    # Enhanced descriptions
+    st.markdown("#### Metric Descriptions")
+
+    desc_col1, desc_col2 = st.columns(2)
+
+    with desc_col1:
+        st.markdown("""
+        **SEI (Surface Efficiency Index)** ✓ *Used in OQPLA*
+        - Formula: `pActivity × 100 / PSA`
+        - Measures potency efficiency relative to polar surface area
+        - Higher values indicate better size efficiency
+        - Typical range: 5-20 (good), >20 (exceptional)
+
+        **NSEI (Normalized SEI)**
+        - Formula: `pActivity / N+O Atoms`
+        - Alternative normalization by heteroatom count
+        - Not used in OQPLA but provides additional context
+        """)
+
+    with desc_col2:
+        st.markdown("""
+        **BEI (Binding Efficiency Index)** ✓ *Used in OQPLA*
+        - Formula: `pActivity × 1000 / MW`
+        - Measures potency efficiency relative to molecular weight
+        - Higher values indicate better binding efficiency
+        - Typical range: 15-25 (good), >25 (exceptional)
+
+        **NBEI (Normalized BEI)**
+        - Formula: `pActivity / Heavy Atoms`
+        - Alternative normalization by heavy atom count
+        - Not used in OQPLA but provides additional context
+        """)
+
+    st.markdown("---")
+
+
+def _render_report_efficiency_plane(df: pd.DataFrame) -> None:
+    """Render SEI vs BEI scatter plot with EQUAL AXIS SCALING for accurate angle visualization."""
+    st.markdown("### 📐 Efficiency Plane: SEI vs BEI")
+
+    if 'SEI' not in df.columns or 'BEI' not in df.columns:
+        st.info("SEI/BEI data not available")
+        st.markdown("---")
+        return
+
+    plot_df = df.dropna(subset=['SEI', 'BEI'])
+
+    if plot_df.empty:
+        st.info("No valid SEI/BEI data points")
+        st.markdown("---")
+        return
+
+    # Calculate mean angle and modulus
+    mean_sei = plot_df['SEI'].mean()
+    mean_bei = plot_df['BEI'].mean()
+    mean_angle = plot_df['Angle_SEI_BEI'].mean() if 'Angle_SEI_BEI' in plot_df.columns else np.arctan2(mean_bei, mean_sei) * 180 / np.pi
+    mean_modulus = plot_df['Modulus_SEI_BEI'].mean() if 'Modulus_SEI_BEI' in plot_df.columns else np.sqrt(mean_sei**2 + mean_bei**2)
+
+    # Angle assessment
+    if 40 <= mean_angle <= 50:
+        angle_status = "OPTIMAL ✓"
+        angle_color = "#28a745"
+        angle_bg = "#d4edda"
+    elif 30 <= mean_angle < 40 or 50 < mean_angle <= 60:
+        angle_status = "ACCEPTABLE"
+        angle_color = "#856404"
+        angle_bg = "#fff3cd"
+    else:
+        angle_status = "UNBALANCED ⚠️"
+        angle_color = "#721c24"
+        angle_bg = "#f8d7da"
+
+    # Display angle assessment banner
+    st.markdown(f"""
+    <div style="background-color: {angle_bg}; padding: 12px; border-radius: 5px; margin-bottom: 15px; border: 1px solid {angle_color};">
+        <strong style="color: {angle_color};">Development Trajectory: {angle_status} (Angle: {mean_angle:.1f}°)</strong>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Create scatter plot
+    fig = go.Figure()
+
+    # Add data points
+    color_col = 'OQPLA_Final_Score' if 'OQPLA_Final_Score' in plot_df.columns else None
+
+    fig.add_trace(go.Scatter(
+        x=plot_df['SEI'],
+        y=plot_df['BEI'],
+        mode='markers',
+        marker=dict(
+            size=8,
+            color=plot_df[color_col] if color_col else '#636EFA',
+            colorscale='RdYlGn_r' if color_col else None,  # Red = high IMP (bad)
+            showscale=True if color_col else False,
+            colorbar=dict(title="OQPLA Score") if color_col else None,
+            opacity=0.7
+        ),
+        text=plot_df['Molecule_Name'] if 'Molecule_Name' in plot_df.columns else None,
+        hovertemplate="<b>%{text}</b><br>SEI: %{x:.2f}<br>BEI: %{y:.2f}<extra></extra>" if 'Molecule_Name' in plot_df.columns else "SEI: %{x:.2f}<br>BEI: %{y:.2f}<extra></extra>",
+        name='Compounds'
+    ))
+
+    # Add 45° reference line (optimal development angle)
+    max_val = max(plot_df['SEI'].max(), plot_df['BEI'].max()) * 1.1
+    fig.add_trace(go.Scatter(
+        x=[0, max_val],
+        y=[0, max_val],
+        mode='lines',
+        line=dict(color='green', dash='dash', width=2),
+        name='45° Optimal',
+        hoverinfo='skip'
+    ))
+
+    # Add mean angle line from origin
+    angle_rad = mean_angle * np.pi / 180
+    line_length = mean_modulus * 1.2
+    fig.add_trace(go.Scatter(
+        x=[0, line_length * np.cos(angle_rad)],
+        y=[0, line_length * np.sin(angle_rad)],
+        mode='lines',
+        line=dict(color='red', width=2),
+        name=f'Mean Angle ({mean_angle:.1f}°)',
+        hoverinfo='skip'
+    ))
+
+    # Add mean point marker
+    fig.add_trace(go.Scatter(
+        x=[mean_sei],
+        y=[mean_bei],
+        mode='markers',
+        marker=dict(size=15, color='orange', symbol='star', line=dict(width=2, color='white')),
+        name=f'Mean Point ({mean_sei:.1f}, {mean_bei:.1f})',
+        hovertemplate="Mean SEI: %{x:.2f}<br>Mean BEI: %{y:.2f}<extra></extra>"
+    ))
+
+    # CRITICAL: Equal axis scaling so visual angle matches calculated angle
+    fig.update_layout(
+        height=500,
+        margin=dict(t=30, b=30, l=30, r=30),
+        xaxis=dict(
+            title="SEI (Surface Efficiency Index)",
+            scaleanchor="y",  # CRITICAL: Link x to y
+            scaleratio=1,     # CRITICAL: 1:1 ratio
+            range=[0, max_val],  # Start at 0 (SEI/BEI always positive)
+            autorange=False,  # Disable autorange to enforce range
+            constrain="domain"  # Constrain to specified range
+        ),
+        yaxis=dict(
+            title="BEI (Binding Efficiency Index)",
+            range=[0, max_val],  # Start at 0 (SEI/BEI always positive)
+            autorange=False,  # Disable autorange to enforce range
+            constrain="domain"  # Constrain to specified range
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        )
+    )
+
+    st.plotly_chart(fig, width='stretch', key="report_efficiency_plane")
+
+    # Enhanced interpretation with metrics cards
+    st.markdown("#### Efficiency Plane Analysis")
+
+    cols = st.columns(4)
+    with cols[0]:
+        st.markdown(f"""
+        <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #636EFA;">
+            <div style="font-size: 1.2em; color: #636EFA; font-weight: bold;">{mean_angle:.1f}°</div>
+            <div style="color: #fff; font-size: 0.9em;">Mean Angle</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with cols[1]:
+        st.markdown(f"""
+        <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #ff7f0e;">
+            <div style="font-size: 1.2em; color: #ff7f0e; font-weight: bold;">{mean_modulus:.1f}</div>
+            <div style="color: #fff; font-size: 0.9em;">Mean Modulus</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with cols[2]:
+        st.markdown(f"""
+        <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #2ca02c;">
+            <div style="font-size: 1.2em; color: #2ca02c; font-weight: bold;">{mean_sei:.1f}</div>
+            <div style="color: #fff; font-size: 0.9em;">Mean SEI</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with cols[3]:
+        st.markdown(f"""
+        <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #d62728;">
+            <div style="font-size: 1.2em; color: #d62728; font-weight: bold;">{mean_bei:.1f}</div>
+            <div style="color: #fff; font-size: 0.9em;">Mean BEI</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("""
+    **Angle Interpretation:**
+    - **< 45°:** Compound favors **size efficiency** (SEI) - efficient use of polar surface area
+    - **= 45°:** **Balanced development** (OPTIMAL) - equal efficiency in size and binding
+    - **> 45°:** Compound favors **binding efficiency** (BEI) - efficient use of molecular weight
+
+    **Note:** Most approved drugs have angles between 40-60°. The green dashed line shows the optimal 45° trajectory. The orange star marks the mean efficiency point.
+    """)
+
+    st.markdown("---")
+
+
+def _render_report_pdb_evidence(df: pd.DataFrame, data: Dict[str, Any]) -> None:
+    """Render PDB structural evidence section."""
+    st.markdown("### 🔬 PDB Structural Evidence")
+
+    # Check for PDB columns
+    pdb_cols = ['PDB_Score', 'PDB_Num_Structures', 'PDB_High_Quality', 'PDB_Medium_Quality', 'PDB_Poor_Quality']
+    has_pdb = any(col in df.columns for col in pdb_cols)
+
+    if not has_pdb:
+        st.info("PDB structural evidence data not available")
+        st.markdown("---")
+        return
+
+    # Try to load detailed PDB summary file for accurate counts
+    pdb_summary_df = None
+    compound_name = data.get('compound_name', '')
+    entry_id = data.get('entry_id')
+    storage_path = data.get('storage_path')
+
+    try:
+        safe_name = sanitize_compound_name(compound_name)
+        for filename in ["pdb_summary.csv", f"{safe_name}_pdb_summary.csv", f"{safe_name}_pdb_details.csv"]:
+            pdb_summary_df = smart_load_dataframe(
+                filename,
+                entry_id=entry_id,
+                storage_path=storage_path
+            )
+            if pdb_summary_df is not None and not pdb_summary_df.empty:
+                break
+    except Exception:
+        pdb_summary_df = None
+
+    # Calculate stats - use pdb_summary_df if available for accurate counts
+    if pdb_summary_df is not None and not pdb_summary_df.empty:
+        total_structures = len(pdb_summary_df)
+        if 'Quality' in pdb_summary_df.columns:
+            high_quality = int((pdb_summary_df['Quality'] == '***').sum())
+            medium_quality = int((pdb_summary_df['Quality'] == '**').sum())
+            poor_quality = int((pdb_summary_df['Quality'] == '*').sum())
+        else:
+            if 'Resolution' in pdb_summary_df.columns:
+                pdb_summary_df['_res'] = pd.to_numeric(pdb_summary_df['Resolution'], errors='coerce')
+                high_quality = int((pdb_summary_df['_res'] < 2.0).sum())
+                medium_quality = int(((pdb_summary_df['_res'] >= 2.0) & (pdb_summary_df['_res'] <= 3.0)).sum())
+                poor_quality = int((pdb_summary_df['_res'] > 3.0).sum())
+            else:
+                high_quality = medium_quality = poor_quality = 0
+    else:
+        # Fallback to summing from dataframe (less accurate)
+        total_structures = int(df['PDB_Num_Structures'].sum()) if 'PDB_Num_Structures' in df.columns else 0
+        high_quality = int(df['PDB_High_Quality'].sum()) if 'PDB_High_Quality' in df.columns else 0
+        medium_quality = int(df['PDB_Medium_Quality'].sum()) if 'PDB_Medium_Quality' in df.columns else 0
+        poor_quality = int(df['PDB_Poor_Quality'].sum()) if 'PDB_Poor_Quality' in df.columns else 0
+
+    mean_pdb_score = df['PDB_Score'].mean() if 'PDB_Score' in df.columns else 0
+
+    # Confidence assessment banner
+    if mean_pdb_score >= 0.7:
+        confidence = "HIGH CONFIDENCE"
+        conf_color = "#28a745"
+        conf_bg = "#d4edda"
+        conf_icon = "✓"
+    elif mean_pdb_score >= 0.4:
+        confidence = "MEDIUM CONFIDENCE"
+        conf_color = "#856404"
+        conf_bg = "#fff3cd"
+        conf_icon = "●"
+    else:
+        confidence = "LOW CONFIDENCE"
+        conf_color = "#721c24"
+        conf_bg = "#f8d7da"
+        conf_icon = "⚠️"
+
+    st.markdown(f"""
+    <div style="background-color: {conf_bg}; padding: 12px; border-radius: 5px; margin-bottom: 15px; border: 1px solid {conf_color};">
+        <strong style="color: {conf_color};">{conf_icon} Structural Validation: {confidence} (PDB Score: {mean_pdb_score:.3f})</strong>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Quality distribution cards
+    cols = st.columns(4)
+    with cols[0]:
+        st.markdown(f"""
+        <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #636EFA;">
+            <div style="font-size: 1.5em; color: #636EFA; font-weight: bold;">{total_structures}</div>
+            <div style="color: #fff; font-size: 0.9em;">Total Structures</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with cols[1]:
+        star_display = '⭐⭐⭐' if high_quality > 0 else ''
+        st.markdown(f"""
+        <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #28a745;">
+            <div style="font-size: 1.5em; color: #28a745; font-weight: bold;">{high_quality}</div>
+            <div style="color: #fff; font-size: 0.9em;">High Quality</div>
+            <div style="color: #28a745; font-size: 0.8em;">{star_display}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with cols[2]:
+        star_display = '⭐⭐' if medium_quality > 0 else ''
+        st.markdown(f"""
+        <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #ffc107;">
+            <div style="font-size: 1.5em; color: #ffc107; font-weight: bold;">{medium_quality}</div>
+            <div style="color: #fff; font-size: 0.9em;">Medium Quality</div>
+            <div style="color: #ffc107; font-size: 0.8em;">{star_display}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with cols[3]:
+        star_display = '⭐' if poor_quality > 0 else ''
+        st.markdown(f"""
+        <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #dc3545;">
+            <div style="font-size: 1.5em; color: #dc3545; font-weight: bold;">{poor_quality}</div>
+            <div style="color: #fff; font-size: 0.9em;">Poor Quality</div>
+            <div style="color: #dc3545; font-size: 0.8em;">{star_display}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    if total_structures > 0:
+        st.markdown("")
+
+        # Create horizontal bar chart for quality distribution (full-width)
+        quality_data = pd.DataFrame({
+            'Quality': ['High (<2.0Å)', 'Medium (2-3Å)', 'Poor (>3Å)'],
+            'Count': [high_quality, medium_quality, poor_quality],
+            'Percentage': [
+                f"{high_quality/total_structures*100:.1f}%" if total_structures > 0 else "0%",
+                f"{medium_quality/total_structures*100:.1f}%" if total_structures > 0 else "0%",
+                f"{poor_quality/total_structures*100:.1f}%" if total_structures > 0 else "0%"
+            ]
+        })
+
+        fig = px.bar(
+            quality_data,
+            x='Count',
+            y='Quality',
+            orientation='h',
+            color='Quality',
+            text='Percentage',
+            color_discrete_map={
+                'High (<2.0Å)': '#28a745',
+                'Medium (2-3Å)': '#ffc107',
+                'Poor (>3Å)': '#dc3545'
+            }
+        )
+        fig.update_traces(textposition='outside')
+        fig.update_layout(
+            height=300,
+            margin=dict(t=10, b=10, l=10, r=10),
+            showlegend=False,
+            xaxis_title="Number of Structures",
+            yaxis_title=""
+        )
+        st.plotly_chart(fig, width='stretch', key="report_pdb_quality")
+
+        # Resolution Quality info box below
+        st.markdown("""
+        <div style="background-color: #e3f2fd; padding: 15px; border-radius: 8px; border-left: 4px solid #1976d2; margin-top: 15px; color: #0d47a1;">
+            <strong style="color: #0d47a1;">📊 Resolution Quality:</strong><br>
+            High-resolution structures (&lt;2.0Å) provide the most reliable structural validation.
+            PDB Score component contributes 6.25% to final OQPLA score (weight=5%, normalized weight=6.25%).
+            <ul style="margin-top: 10px; margin-bottom: 5px; color: #0d47a1;">
+                <li><strong>⭐⭐⭐⭐⭐ High (&lt;2.0Å):</strong> Excellent resolution - high confidence in binding mode</li>
+                <li><strong>⭐⭐⭐ Medium (2-3Å):</strong> Good resolution - reliable structural information</li>
+                <li><strong>⭐ Poor (&gt;3Å):</strong> Lower resolution - general binding information only</li>
+            </ul>
+            <strong style="color: #0d47a1;">Note:</strong> High PDB scores (&gt;0.7) indicate strong structural validation with multiple high-resolution crystal structures, providing confidence that the compound genuinely binds to the target (not an assay artifact).
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.info("No PDB structures found for these compounds. This is common for early-stage research compounds not yet structurally characterized.")
+
+    st.markdown("---")
+
+
+def _render_report_classification(df: pd.DataFrame) -> None:
+    """Render chemical classification section (ClassyFire + NPClassifier)."""
+    st.markdown("### 🧬 Chemical Classification")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("**ClassyFire Taxonomy:**")
+        classyfire_cols = ['Kingdom', 'Superclass', 'Class', 'Subclass']
+        has_classyfire = any(col in df.columns for col in classyfire_cols)
+
+        if has_classyfire:
+            for col in classyfire_cols:
+                if col in df.columns:
+                    # Get most common value
+                    mode_vals = df[col].mode()
+                    value = mode_vals.iloc[0] if not mode_vals.empty else "N/A"
+                    st.markdown(f"- **{col}:** {value}")
+        else:
+            st.info("ClassyFire data not available")
+
+    with col2:
+        st.markdown("**NPClassifier (Natural Products):**")
+        np_cols = ['NP_Pathway', 'NP_Superclass', 'NP_Class']
+        has_np = any(col in df.columns for col in np_cols)
+
+        if has_np:
+            for col in np_cols:
+                if col in df.columns:
+                    display_name = col.replace('NP_', '')
+                    mode_vals = df[col].mode()
+                    value = mode_vals.iloc[0] if not mode_vals.empty else "N/A"
+                    st.markdown(f"- **{display_name}:** {value}")
+        else:
+            st.info("NPClassifier data not available")
+
+    st.markdown("---")
+
+
+def _render_report_indications(data: Dict[str, Any]) -> None:
+    """Render drug indications section."""
+    st.markdown("### 💊 Drug Indications")
+
+    indications_df = data.get('indications')
+
+    if indications_df is None or (isinstance(indications_df, pd.DataFrame) and indications_df.empty):
+        st.info("No drug indication data available")
+        st.markdown("---")
+        return
+
+    # Get max phase
+    max_phase = indications_df['Max_Phase'].max() if 'Max_Phase' in indications_df.columns else "N/A"
+    unique_indications = indications_df['MESH_Heading'].nunique() if 'MESH_Heading' in indications_df.columns else 0
+
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        st.markdown(f"""
+        **Maximum Clinical Phase:** {max_phase}
+
+        **Unique Indications:** {unique_indications}
+
+        **Compounds with Data:** {indications_df['ChEMBL_ID'].nunique() if 'ChEMBL_ID' in indications_df.columns else 'N/A'}
+        """)
+
+    with col2:
+        # Top indications table
+        if 'MESH_Heading' in indications_df.columns and 'Max_Phase' in indications_df.columns:
+            top_indications = indications_df.groupby('MESH_Heading')['Max_Phase'].max().sort_values(ascending=False).head(5)
+
+            if not top_indications.empty:
+                st.markdown("**Top Indications by Phase:**")
+                table_data = [{"Indication": ind, "Max Phase": phase} for ind, phase in top_indications.items()]
+                st.table(pd.DataFrame(table_data))
+
+    st.markdown("---")
+
+
+def _render_report_recommendation(df: pd.DataFrame, mean_score: float) -> None:
+    """Render final recommendation section with IMP interpretation guide."""
+    st.markdown("### 🎯 Final Recommendation")
+
+    interpretation = _get_imp_interpretation(mean_score)
+    color = _get_imp_color(mean_score)
+
+    # Verdict box
+    warning_icon = '⚠️' if mean_score >= 0.5 else '✓'
+    st.markdown(f"""
+    <div style="border: 2px solid {color}; padding: 20px; border-radius: 10px; margin-bottom: 20px;">
+        <h4 style="color: {color}; margin: 0 0 15px 0;">
+            {warning_icon} VERDICT: {interpretation['label'].upper()}
+        </h4>
+        <p style="margin: 10px 0;">{interpretation['risk']}</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Recommended actions based on score and flags
+    st.markdown("**Recommended Actions:**")
+
+    actions = []
+
+    if mean_score >= 0.7:
+        actions.append(("HIGH", "Validate with orthogonal binding assay (SPR/ITC/MST)"))
+        actions.append(("HIGH", "Counter-screen against aggregation"))
+
+    # Check for PAINS - use correct column name
+    if 'PAINS_Violation' in df.columns and df['PAINS_Violation'].any():
+        actions.append(("HIGH", "Counter-screen PAINS-flagged compounds"))
+
+    if 0.5 <= mean_score < 0.7:
+        actions.append(("MEDIUM", "Moderate IMP risk - validation recommended before advancing"))
+
+    if 'QED' in df.columns and df['QED'].mean() < 0.5:
+        actions.append(("LOW", "Consider SAR optimization to improve drug-likeness"))
+
+    if 'PDB_Score' in df.columns and df['PDB_Score'].mean() < 0.3:
+        actions.append(("LOW", "Obtain structural evidence (X-ray/cryo-EM) before advancing"))
+
+    if mean_score < 0.3:
+        actions.append(("INFO", "Low IMP risk - compound more likely genuine, proceed with development"))
+
+    # Display actions
+    for priority, action in actions:
+        if priority == "HIGH":
+            st.markdown(f"🔴 **[{priority}]** {action}")
+        elif priority == "MEDIUM":
+            st.markdown(f"🟠 **[{priority}]** {action}")
+        elif priority == "LOW":
+            st.markdown(f"🟡 **[{priority}]** {action}")
+        else:
+            st.markdown(f"🟢 **[{priority}]** {action}")
+
+    # Interpretation guide
+    st.markdown("---")
+    st.markdown("**IMP Interpretation Guide:**")
+    st.markdown("""
+    | Score Range | Classification | Meaning | Action |
+    |-------------|----------------|---------|--------|
+    | 0.90+ | Exceptional IMP | ⚠️ VERY HIGH false positive risk | Immediate validation |
+    | 0.70-0.89 | Strong IMP | ⚠️ HIGH false positive risk | DEPRIORITIZE unless validated |
+    | 0.50-0.69 | Moderate IMP | ⚠️ Moderate risk | Validate carefully |
+    | 0.30-0.49 | Weak IMP | Lower risk - more likely genuine | Standard follow-up |
+    | < 0.30 | Not IMP | ✓ Likely genuine activity | Proceed with development |
+    """)
+
+    st.caption("**Remember:** IMP = Invalid Metabolic Panacea = Likely FALSE POSITIVE (assay artifact)")
+
+
+def _export_plotly_to_base64(fig, width: int = 700, height: int = 400, scale: float = 3.0) -> str:
+    """Export a Plotly figure to base64 PNG string using kaleido.
+
+    Args:
+        fig: Plotly figure to export
+        width: Width in pixels (logical size)
+        height: Height in pixels (logical size)
+        scale: Scale factor for high-DPI export (default 3.0 = ~288 DPI)
+               Higher values = better quality but larger file size
+               1.0 = 96 DPI, 2.0 = 192 DPI, 3.0 = 288 DPI
+    """
+    try:
+        import base64
+        # Update figure for static export (white background, anti-aliased text)
+        fig.update_layout(
+            paper_bgcolor='white',
+            plot_bgcolor='white',
+            font_color='#333',
+            font_size=12  # Slightly larger font for better readability in print
+        )
+
+        # Export with high DPI (scale parameter increases resolution)
+        img_bytes = fig.to_image(
+            format="png",
+            width=width,
+            height=height,
+            scale=scale,  # High-quality export (3x = 288 DPI)
+            engine="kaleido"
+        )
+        img_b64 = base64.b64encode(img_bytes).decode()
+        return f'<img src="data:image/png;base64,{img_b64}" style="max-width: 100%; height: auto;">'
+    except Exception as e:
+        return f"<p style='color: #999;'>Chart unavailable: {str(e)}</p>"
+
+
+def _create_html_bioactivity_donut(df: pd.DataFrame) -> str:
+    """Create bioactivity donut chart for HTML export."""
+    if 'Activity_Type' not in df.columns:
+        return "<p>Activity type data not available</p>"
+
+    type_counts = df['Activity_Type'].value_counts().head(6)
+    fig = px.pie(
+        values=type_counts.values,
+        names=type_counts.index,
+        hole=0.4,
+        color_discrete_sequence=px.colors.qualitative.Set2
+    )
+    fig.update_traces(textposition='inside', textinfo='percent+label')
+    fig.update_layout(
+        height=400,
+        margin=dict(t=30, b=30, l=30, r=30),
+        showlegend=True
+    )
+    return _export_plotly_to_base64(fig, 800, 400)
+
+
+def _create_html_efficiency_boxplots(df: pd.DataFrame) -> str:
+    """Create efficiency metrics box plots for HTML export."""
+    metrics = ['SEI', 'BEI', 'NSEI', 'NBEI']
+    available_metrics = [m for m in metrics if m in df.columns]
+
+    if not available_metrics:
+        return "<p>Efficiency metrics not available</p>"
+
+    fig = go.Figure()
+    colors = ['#3498db', '#2ecc71', '#f39c12', '#9b59b6']
+
+    for i, metric in enumerate(available_metrics):
+        values = df[metric].dropna()
+        if len(values) > 0:
+            fig.add_trace(go.Box(
+                y=values,
+                name=metric,
+                marker_color=colors[i % len(colors)],
+                boxpoints='outliers'
+            ))
+
+    fig.update_layout(
+        height=400,
+        margin=dict(t=30, b=50, l=50, r=30),
+        showlegend=False,
+        yaxis_title="Value"
+    )
+    return _export_plotly_to_base64(fig, 900, 400)
+
+
+def _create_html_efficiency_scatter(df: pd.DataFrame) -> str:
+    """Create SEI vs BEI scatter plot with equal axis scaling for HTML export."""
+    if 'SEI' not in df.columns or 'BEI' not in df.columns:
+        return "<p>SEI/BEI data not available</p>"
+
+    plot_df = df[['SEI', 'BEI']].dropna()
+    if plot_df.empty:
+        return "<p>No valid SEI/BEI data</p>"
+
+    # Get color data if available
+    if 'OQPLA_Final_Score' in df.columns:
+        plot_df = df[['SEI', 'BEI', 'OQPLA_Final_Score']].dropna()
+        color_col = 'OQPLA_Final_Score'
+    else:
+        color_col = None
+
+    # Calculate mean values
+    mean_sei = plot_df['SEI'].mean()
+    mean_bei = plot_df['BEI'].mean()
+    mean_angle = np.degrees(np.arctan2(mean_bei, mean_sei))
+    mean_modulus = np.sqrt(mean_sei**2 + mean_bei**2)
+
+    fig = go.Figure()
+
+    # Add data points
+    if color_col:
+        fig.add_trace(go.Scatter(
+            x=plot_df['SEI'],
+            y=plot_df['BEI'],
+            mode='markers',
+            marker=dict(
+                size=8,
+                color=plot_df[color_col],
+                colorscale='RdYlGn_r',
+                showscale=True,
+                colorbar=dict(title="OQPLA Score")
+            ),
+            name='Compounds',
+            hovertemplate='SEI: %{x:.2f}<br>BEI: %{y:.2f}<br>OQPLA: %{marker.color:.3f}<extra></extra>'
+        ))
+    else:
+        fig.add_trace(go.Scatter(
+            x=plot_df['SEI'],
+            y=plot_df['BEI'],
+            mode='markers',
+            marker=dict(size=8, color='#3498db'),
+            name='Compounds',
+            hovertemplate='SEI: %{x:.2f}<br>BEI: %{y:.2f}<extra></extra>'
+        ))
+
+    # Add 45° reference line
+    max_val = max(plot_df['SEI'].max(), plot_df['BEI'].max()) * 1.1
+    fig.add_trace(go.Scatter(
+        x=[0, max_val],
+        y=[0, max_val],
+        mode='lines',
+        line=dict(dash='dash', color='gray', width=1),
+        name='45° Optimal Line',
+        hovertemplate='45° Optimal (Balanced Development)<extra></extra>'
+    ))
+
+    # Add mean point marker (orange star)
+    fig.add_trace(go.Scatter(
+        x=[mean_sei],
+        y=[mean_bei],
+        mode='markers',
+        marker=dict(size=15, color='orange', symbol='star', line=dict(width=2, color='white')),
+        name=f'Mean Point ({mean_sei:.1f}, {mean_bei:.1f})',
+        hovertemplate=f'Mean SEI: {mean_sei:.2f}<br>Mean BEI: {mean_bei:.2f}<br>Angle: {mean_angle:.1f}°<br>Modulus: {mean_modulus:.2f}<extra></extra>'
+    ))
+
+    fig.update_layout(
+        template='plotly_white',
+        height=600,
+        margin=dict(t=40, b=50, l=60, r=30),
+        xaxis=dict(
+            title="SEI (Surface Efficiency Index)",
+            scaleanchor="y",  # CRITICAL: Link x to y
+            scaleratio=1,     # CRITICAL: 1:1 ratio
+            range=[0, max_val],  # Start at 0 (SEI/BEI always positive)
+            autorange=False,  # Disable autorange to enforce range
+            constrain="domain"  # Constrain to specified range
+        ),
+        yaxis=dict(
+            title="BEI (Binding Efficiency Index)",
+            range=[0, max_val],  # Start at 0
+            autorange=False,
+            constrain="domain"
+        ),
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+
+    return _export_plotly_to_base64(fig, 900, 600)
+
+
+def _create_html_pdb_quality_bar(df: pd.DataFrame, data: Dict[str, Any]) -> str:
+    """Create PDB quality distribution bar chart for HTML export."""
+    # Try to load pdb_summary for accurate counts
+    pdb_summary_df = None
+    compound_name = data.get('compound_name', '')
+    entry_id = data.get('entry_id')
+    storage_path = data.get('storage_path')
+
+    try:
+        safe_name = sanitize_compound_name(compound_name)
+        for filename in ["pdb_summary.csv", f"{safe_name}_pdb_summary.csv"]:
+            pdb_summary_df = smart_load_dataframe(filename, entry_id=entry_id, storage_path=storage_path)
+            if pdb_summary_df is not None and not pdb_summary_df.empty:
+                break
+    except Exception:
+        pass
+
+    if pdb_summary_df is not None and not pdb_summary_df.empty and 'Quality' in pdb_summary_df.columns:
+        high_q = int((pdb_summary_df['Quality'] == '***').sum())
+        med_q = int((pdb_summary_df['Quality'] == '**').sum())
+        poor_q = int((pdb_summary_df['Quality'] == '*').sum())
+    elif 'PDB_High_Quality' in df.columns:
+        high_q = int(df['PDB_High_Quality'].max()) if df['PDB_High_Quality'].notna().any() else 0
+        med_q = int(df['PDB_Medium_Quality'].max()) if 'PDB_Medium_Quality' in df.columns and df['PDB_Medium_Quality'].notna().any() else 0
+        poor_q = int(df['PDB_Poor_Quality'].max()) if 'PDB_Poor_Quality' in df.columns and df['PDB_Poor_Quality'].notna().any() else 0
+    else:
+        return "<p>PDB quality data not available</p>"
+
+    if high_q + med_q + poor_q == 0:
+        return "<p>No PDB structures found</p>"
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        y=['High (<2.0Å)', 'Medium (2-3Å)', 'Poor (>3Å)'],
+        x=[high_q, med_q, poor_q],
+        orientation='h',
+        marker_color=['#28a745', '#ffc107', '#dc3545']
+    ))
+    fig.update_layout(
+        height=250,
+        margin=dict(t=20, b=30, l=100, r=30),
+        xaxis_title="Count",
+        showlegend=False
+    )
+    return _export_plotly_to_base64(fig, 700, 250)
+
+
+def _generate_html_report(data: Dict[str, Any], df: pd.DataFrame) -> str:
+    """Generate comprehensive HTML report with ALL sections matching Report tab."""
+    import base64
+    import io
+    from datetime import datetime
+
+    compound_name = data.get('compound_name', 'Unknown')
+    smiles = data.get('smiles', '')
+    summary = data.get('summary', {})
+
+    # Get BEST scoring compound row (matches Overview behavior)
+    best_row = None
+    if 'OQPLA_Final_Score' in df.columns:
+        valid_df = df.dropna(subset=['OQPLA_Final_Score'])
+        if not valid_df.empty:
+            best_row = valid_df.loc[valid_df['OQPLA_Final_Score'].idxmax()]
+
+    # Calculate scores from best compound
+    final_score = best_row['OQPLA_Final_Score'] if best_row is not None else 0
+    qed_val = best_row['QED'] if best_row is not None and 'QED' in best_row.index else 0
+    interpretation = _get_imp_interpretation(final_score)
+    color = _get_imp_color(final_score)
+    bg_color = _get_imp_bg_color(final_score)
+
+    # Generate 2D structure image
+    structure_img_html = "<p>Structure unavailable</p>"
+    if smiles:
+        try:
+            from rdkit import Chem
+            from rdkit.Chem import Draw
+            mol = Chem.MolFromSmiles(smiles)
+            if mol:
+                # High-quality image (2x size for better resolution in HTML/PDF)
+                img = Draw.MolToImage(mol, size=(600, 500))
+                buffered = io.BytesIO()
+                # Save with high quality
+                img.save(buffered, format="PNG", optimize=False, quality=95)
+                img_b64 = base64.b64encode(buffered.getvalue()).decode()
+                # Display at 300x250 but use 600x500 source for crisp rendering
+                structure_img_html = f'<img src="data:image/png;base64,{img_b64}" style="width: 300px; height: 250px; border: 1px solid #ddd; border-radius: 8px;">'
+        except Exception:
+            pass
+
+    # Generate InChIKey
+    inchikey = "N/A"
+    if smiles:
+        try:
+            from rdkit import Chem
+            from rdkit.Chem.inchi import MolToInchiKey
+            mol = Chem.MolFromSmiles(smiles)
+            if mol:
+                inchikey = MolToInchiKey(mol)
+        except Exception:
+            pass
+
+    # Compute summary stats for header (matching Overview quick stats)
+    # Use summary data as source of truth (same as Overview header)
+    similar_count = summary.get('similar_count', df['ChEMBL_ID'].nunique() if 'ChEMBL_ID' in df.columns else len(df))
+    activities_count = summary.get('total_activities', len(df))
+    avg_qed = summary.get('qed') or (df['QED'].mean() if 'QED' in df.columns else None)
+    avg_oqpla = df['OQPLA_Final_Score'].mean() if 'OQPLA_Final_Score' in df.columns else None
+
+    # Use IMP count from summary (same as Overview header)
+    imp_count = summary.get('imp_candidates', 0)
+    has_warning = summary.get('has_imp_candidates', False)
+
+    # Format stats
+    avg_qed_str = f"{avg_qed:.2f}" if avg_qed is not None and not pd.isna(avg_qed) else "N/A"
+    avg_oqpla_str = f"{avg_oqpla:.2f}" if avg_oqpla is not None and not pd.isna(avg_oqpla) else "N/A"
+
+    # Build properties table from best compound
+    props_html = ""
+    if best_row is not None:
+        prop_cols = [
+            ('pActivity', 'pActivity', '-log10(IC50)'),
+            ('Molecular_Weight', 'Molecular Weight', 'g/mol'),
+            ('TPSA', 'PSA (TPSA)', 'Å²'),
+            ('Heavy_Atoms', 'Heavy Atoms', 'count'),
+            ('NPOL', 'N+O Atoms', 'count'),
+            ('QED', 'QED', 'Drug-likeness'),
+        ]
+        for col, label, unit in prop_cols:
+            if col in best_row.index and not pd.isna(best_row[col]):
+                props_html += f"<tr><td>{label}</td><td>{best_row[col]:.3f}</td><td>{unit}</td></tr>"
+
+    # Build efficiency metrics table from best compound
+    efficiency_html = ""
+    if best_row is not None:
+        eff_cols = [
+            ('SEI', 'SEI', 'pActivity × 100 / PSA', True),
+            ('BEI', 'BEI', 'pActivity × 1000 / MW', True),
+            ('NSEI', 'NSEI', 'pActivity / NPOL', False),
+            ('NBEI', 'NBEI', 'pActivity / Heavy Atoms', False),
+        ]
+        for col, label, formula, used in eff_cols:
+            if col in best_row.index and not pd.isna(best_row[col]):
+                used_text = "✓ Used" if used else "Display only"
+                efficiency_html += f"<tr><td>{label}</td><td>{best_row[col]:.3f}</td><td>{formula}</td><td>{used_text}</td></tr>"
+
+    # Build component scores table from best compound
+    components_html = ""
+    if best_row is not None:
+        components = [
+            ('Efficiency_Score', 'Efficiency', '40%', '50%'),
+            ('Angle_Score', 'Angle', '15%', '18.75%'),
+            ('Distance_Score', 'Distance', '20%', '25%'),
+            ('PDB_Score', 'PDB Evidence', '5%', '6.25%'),
+        ]
+        for col, name, raw_wt, norm_wt in components:
+            if col in best_row.index and not pd.isna(best_row[col]):
+                contrib_col = col.replace('_Score', '_Contribution')
+                contrib = best_row[contrib_col] if contrib_col in best_row.index else None
+                contrib_str = f"{contrib:.3f}" if contrib and not pd.isna(contrib) else "N/A"
+                components_html += f"<tr><td>{name}</td><td>{best_row[col]:.3f}</td><td>{raw_wt}</td><td>{norm_wt}</td><td>{contrib_str}</td></tr>"
+
+    # Red flags section - count UNIQUE COMPOUNDS (not all rows)
+    red_flags_html = ""
+    flag_cols = [
+        ('PAINS_Violation', 'PAINS', 'Pan-Assay Interference'),
+        ('Aggregator_Risk', 'Aggregator', 'Colloidal Aggregation'),
+        ('Redox_Reactive', 'Redox', 'Redox Cycling'),
+        ('Fluorescence_Interference', 'Fluorescence', 'Fluorescence Interference'),
+        ('Thiol_Reactive', 'Thiol', 'Thiol Reactivity'),
+    ]
+    total_flags = 0
+    unique_df_flags = df.drop_duplicates('ChEMBL_ID') if 'ChEMBL_ID' in df.columns else df
+    for col, name, desc in flag_cols:
+        if col in unique_df_flags.columns:
+            count = int(unique_df_flags[col].sum() if unique_df_flags[col].dtype == bool else unique_df_flags[col].astype(bool).sum())
+            total_flags += count
+            status = f"⚠️ {count} flagged" if count > 0 else "✓ Clean"
+            color_style = "color: #dc3545;" if count > 0 else "color: #28a745;"
+            red_flags_html += f"<tr><td>{name}</td><td style='{color_style}'>{status}</td><td>{desc}</td></tr>"
+
+    flag_assessment = "LOW CONCERN" if total_flags == 0 else ("MODERATE CONCERN" if total_flags <= 5 else "HIGH CONCERN")
+    flag_color = "#28a745" if total_flags == 0 else ("#fd7e14" if total_flags <= 5 else "#dc3545")
+
+    # Bioactivity distribution
+    bioactivity_html = ""
+    if 'Activity_Type' in df.columns:
+        type_counts = df['Activity_Type'].value_counts().head(5)
+        for stype, count in type_counts.items():
+            pct = count / len(df) * 100
+            bioactivity_html += f"<tr><td>{stype}</td><td>{count}</td><td>{pct:.1f}%</td></tr>"
+
+    # Efficiency metrics statistics
+    efficiency_metrics_stats = {}
+    metric_colors_html = {
+        'SEI': '#1f77b4',
+        'BEI': '#2ca02c',
+        'NSEI': '#ff7f0e',
+        'NBEI': '#9467bd'
+    }
+    for metric in ['SEI', 'BEI', 'NSEI', 'NBEI']:
+        if metric in df.columns:
+            vals = df[metric].dropna()
+            if len(vals) > 0:
+                efficiency_metrics_stats[metric] = {
+                    'mean': vals.mean(),
+                    'min': vals.min(),
+                    'max': vals.max(),
+                    'used': metric in ['SEI', 'BEI']
+                }
+
+    # Efficiency plane summary - compute from full dataset
+    mean_sei = df['SEI'].mean() if 'SEI' in df.columns else None
+    mean_bei = df['BEI'].mean() if 'BEI' in df.columns else None
+
+    if mean_sei is not None and mean_bei is not None and not pd.isna(mean_sei) and not pd.isna(mean_bei):
+        angle_val = np.degrees(np.arctan2(mean_bei, mean_sei))
+        modulus_val = np.sqrt(mean_sei**2 + mean_bei**2)
+    else:
+        angle_val = best_row['Angle_SEI_BEI'] if best_row is not None and 'Angle_SEI_BEI' in best_row.index else None
+        modulus_val = best_row['Modulus_SEI_BEI'] if best_row is not None and 'Modulus_SEI_BEI' in best_row.index else None
+
+    # Pre-compute formatted strings for angle and modulus
+    angle_str = f"{angle_val:.1f}" if angle_val is not None and not pd.isna(angle_val) else "N/A"
+    modulus_str = f"{modulus_val:.2f}" if modulus_val is not None and not pd.isna(modulus_val) else "N/A"
+    mean_sei_str = f"{mean_sei:.2f}" if mean_sei is not None and not pd.isna(mean_sei) else "N/A"
+    mean_bei_str = f"{mean_bei:.2f}" if mean_bei is not None and not pd.isna(mean_bei) else "N/A"
+
+    # Compute angle assessment
+    if angle_val is not None and not pd.isna(angle_val):
+        if 40 <= angle_val <= 50:
+            angle_status = "OPTIMAL ✓"
+            angle_status_color = "#28a745"
+            angle_status_bg = "#d4edda"
+        elif 35 <= angle_val <= 55:
+            angle_status = "ACCEPTABLE"
+            angle_status_color = "#17a2b8"
+            angle_status_bg = "#d1ecf1"
+        else:
+            angle_status = "UNBALANCED"
+            angle_status_color = "#fd7e14"
+            angle_status_bg = "#fff3cd"
+    else:
+        angle_status = "N/A"
+        angle_status_color = "#6c757d"
+        angle_status_bg = "#e9ecef"
+
+    # PDB evidence - try to load pdb_summary for accurate counts
+    pdb_total = 0
+    high_q = med_q = poor_q = 0
+
+    # Try to load pdb_summary file for accurate counts
+    pdb_summary_df_html = None
+    try:
+        safe_name = sanitize_compound_name(compound_name)
+        entry_id = data.get('entry_id')
+        storage_path = data.get('storage_path')
+        for filename in ["pdb_summary.csv", f"{safe_name}_pdb_summary.csv", f"{safe_name}_pdb_details.csv"]:
+            pdb_summary_df_html = smart_load_dataframe(
+                filename,
+                entry_id=entry_id,
+                storage_path=storage_path
+            )
+            if pdb_summary_df_html is not None and not pdb_summary_df_html.empty:
+                break
+    except Exception:
+        pdb_summary_df_html = None
+
+    if pdb_summary_df_html is not None and not pdb_summary_df_html.empty:
+        pdb_total = len(pdb_summary_df_html)
+        if 'Quality' in pdb_summary_df_html.columns:
+            high_q = int((pdb_summary_df_html['Quality'] == '***').sum())
+            med_q = int((pdb_summary_df_html['Quality'] == '**').sum())
+            poor_q = int((pdb_summary_df_html['Quality'] == '*').sum())
+        elif 'Resolution' in pdb_summary_df_html.columns:
+            pdb_summary_df_html['_res'] = pd.to_numeric(pdb_summary_df_html['Resolution'], errors='coerce')
+            high_q = int((pdb_summary_df_html['_res'] < 2.0).sum())
+            med_q = int(((pdb_summary_df_html['_res'] >= 2.0) & (pdb_summary_df_html['_res'] <= 3.0)).sum())
+            poor_q = int((pdb_summary_df_html['_res'] > 3.0).sum())
+    else:
+        # Fallback to dataframe columns
+        if 'PDB_Num_Structures' in df.columns:
+            pdb_total = int(df['PDB_Num_Structures'].max()) if df['PDB_Num_Structures'].notna().any() else 0
+        if 'PDB_High_Quality' in df.columns and 'PDB_Medium_Quality' in df.columns and 'PDB_Poor_Quality' in df.columns:
+            high_q = int(df['PDB_High_Quality'].max()) if df['PDB_High_Quality'].notna().any() else 0
+            med_q = int(df['PDB_Medium_Quality'].max()) if df['PDB_Medium_Quality'].notna().any() else 0
+            poor_q = int(df['PDB_Poor_Quality'].max()) if df['PDB_Poor_Quality'].notna().any() else 0
+
+    # Calculate PDB confidence
+    mean_pdb_score = df['PDB_Score'].mean() if 'PDB_Score' in df.columns and df['PDB_Score'].notna().any() else 0
+    if mean_pdb_score >= 0.7:
+        pdb_confidence = "HIGH CONFIDENCE"
+        pdb_conf_icon = "✓✓✓"
+        pdb_conf_color = "#28a745"
+        pdb_conf_bg = "#d4edda"
+    elif mean_pdb_score >= 0.4:
+        pdb_confidence = "MODERATE CONFIDENCE"
+        pdb_conf_icon = "✓✓"
+        pdb_conf_color = "#17a2b8"
+        pdb_conf_bg = "#d1ecf1"
+    elif mean_pdb_score > 0:
+        pdb_confidence = "LOW CONFIDENCE"
+        pdb_conf_icon = "✓"
+        pdb_conf_color = "#fd7e14"
+        pdb_conf_bg = "#fff3cd"
+    else:
+        pdb_confidence = "NO STRUCTURAL DATA"
+        pdb_conf_icon = "✗"
+        pdb_conf_color = "#6c757d"
+        pdb_conf_bg = "#e9ecef"
+
+    # PDB quality percentages
+    high_q_pct = (high_q / pdb_total * 100) if pdb_total > 0 else 0
+    med_q_pct = (med_q / pdb_total * 100) if pdb_total > 0 else 0
+    poor_q_pct = (poor_q / pdb_total * 100) if pdb_total > 0 else 0
+
+    # Classification - ClassyFire and NPClassifier
+    classyfire_html = ""
+    class_cols = ['Kingdom', 'Superclass', 'Class', 'Subclass']
+    for col in class_cols:
+        if col in df.columns and df[col].notna().any():
+            val = df[col].iloc[0]
+            classyfire_html += f"<tr><td>{col}</td><td>{val}</td></tr>"
+
+    # NPClassifier
+    npclassifier_html = ""
+    np_cols = ['NP_Pathway', 'NP_Superclass', 'NP_Class']
+    np_labels = ['Pathway', 'Superclass', 'Class']
+    for col, label in zip(np_cols, np_labels):
+        if col in df.columns and df[col].notna().any():
+            val = df[col].iloc[0]
+            npclassifier_html += f"<tr><td>{label}</td><td>{val}</td></tr>"
+
+    # Drug indications
+    indications_html = ""
+    max_clinical_phase = 0
+    unique_indications = 0
+    compounds_with_indications = 0
+
+    indications_df = data.get('indications_df')
+    if indications_df is not None and not indications_df.empty:
+        # Calculate summary statistics
+        max_clinical_phase = indications_df['Max_Phase'].max() if 'Max_Phase' in indications_df.columns else 0
+        unique_indications = indications_df['MESH_Heading'].nunique() if 'MESH_Heading' in indications_df.columns else 0
+        compounds_with_indications = indications_df['ChEMBL_ID'].nunique() if 'ChEMBL_ID' in indications_df.columns else len(df)
+
+        # Get top indications
+        top_indications = indications_df.groupby('MESH_Heading')['Max_Phase'].max().sort_values(ascending=False).head(10)
+        for indication, phase in top_indications.items():
+            indications_html += f"<tr><td>{indication}</td><td>Phase {int(phase)}</td></tr>"
+
+    # Get base score and QED multiplier from best compound
+    base_score = best_row['OQPLA_Base_Score'] if best_row is not None and 'OQPLA_Base_Score' in best_row.index else None
+    qed_mult = best_row['QED_Multiplier'] if best_row is not None and 'QED_Multiplier' in best_row.index else None
+
+    # Pre-compute formatted strings (can't use conditionals inside f-string format specifiers)
+    base_score_str = f"{base_score:.3f}" if base_score is not None and not pd.isna(base_score) else "N/A"
+    qed_mult_str = f"{qed_mult:.3f}" if qed_mult is not None and not pd.isna(qed_mult) else "N/A"
+    qed_val_str = f"{qed_val:.3f}" if qed_val is not None and not pd.isna(qed_val) else "N/A"
+    final_score_str = f"{final_score:.3f}" if final_score is not None and not pd.isna(final_score) else "N/A"
+
+    # Escape compound name for HTML
+    safe_compound_name = html.escape(compound_name)
+    smiles_display = smiles[:60] + '...' if len(smiles) > 60 else smiles
+
+    # Priority text
+    priority_text = f"Priority {interpretation['priority']}" if interpretation['priority'] else "N/A"
+    warning_icon = '⚠️' if final_score >= 0.5 else '✓'
+
+    # Generate chart images for HTML export
+    bioactivity_chart_html = _create_html_bioactivity_donut(df)
+    efficiency_boxplots_html = _create_html_efficiency_boxplots(df)
+    efficiency_scatter_html = _create_html_efficiency_scatter(df)
+    pdb_quality_chart_html = _create_html_pdb_quality_bar(df, data)
+
+    # Build comprehensive HTML
+    html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>IMPULATOR Report - {safe_compound_name}</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; max-width: 950px; margin: 0 auto; padding: 20px; color: #333; }}
+        h1 {{ color: #333; border-bottom: 3px solid #667eea; padding-bottom: 10px; }}
+        h2 {{ color: #444; margin-top: 30px; border-bottom: 1px solid #ddd; padding-bottom: 5px; }}
+        h3 {{ color: #555; margin-top: 20px; }}
+        .header {{ display: flex; gap: 30px; align-items: flex-start; margin-bottom: 20px; }}
+        .header-info {{ flex: 1; }}
+        .verdict {{ background-color: {bg_color}; border-left: 5px solid {color}; padding: 15px; margin: 20px 0; border-radius: 5px; }}
+        .verdict h3 {{ color: {color}; margin: 0 0 10px 0; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
+        th, td {{ border: 1px solid #ddd; padding: 10px; text-align: left; }}
+        th {{ background-color: #f5f5f5; font-weight: bold; }}
+        .warning {{ background-color: #f8d7da; border: 1px solid #dc3545; padding: 12px; margin: 10px 0; border-radius: 5px; }}
+        .info {{ background-color: #e3f2fd; border-left: 4px solid #1976d2; padding: 15px; margin: 10px 0; border-radius: 8px; color: #0d47a1; }}
+        .success {{ background-color: #d4edda; border: 1px solid #28a745; padding: 12px; margin: 10px 0; border-radius: 5px; }}
+        .section {{ margin-bottom: 30px; }}
+        .calc-box {{ background-color: #f8f9fa; padding: 15px; border-radius: 5px; font-family: monospace; white-space: pre-wrap; }}
+        .guide {{ background-color: #f8f9fa; padding: 15px; border-radius: 5px; }}
+        .two-col {{ display: flex; gap: 30px; }}
+        .two-col > div {{ flex: 1; }}
+        code {{ background-color: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-family: monospace; }}
+        @media print {{
+            body {{ max-width: 100%; }}
+            .no-print {{ display: none; }}
+            h2 {{ page-break-before: auto; }}
+        }}
+    </style>
+</head>
+<body>
+    <h1>IMPULATOR Compound Analysis Report</h1>
+
+    <!-- 1. HEADER -->
+    <div class="header">
+        <div>{structure_img_html}</div>
+        <div class="header-info">
+            <h2 style="margin-top: 0; border: none;">{safe_compound_name}</h2>
+            <p><strong>InChIKey:</strong> <code>{inchikey}</code></p>
+            <p><strong>SMILES:</strong> <code>{smiles_display}</code></p>
+            <p><strong>Analysis Date:</strong> {summary.get('processing_date', 'N/A')}</p>
+            <p><strong>Report Generated:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
+        </div>
+    </div>
+
+    <!-- Summary Stats Row -->
+    <div style="display: flex; justify-content: space-around; background-color: #f8f9fa; padding: 15px; border-radius: 8px; margin: 15px 0;">
+        <div style="text-align: center;">
+            <div style="font-size: 0.9em; color: #666;">Similar Compounds</div>
+            <div style="font-size: 1.8em; font-weight: bold;">{similar_count}</div>
+        </div>
+        <div style="text-align: center;">
+            <div style="font-size: 0.9em; color: #666;">Activities</div>
+            <div style="font-size: 1.8em; font-weight: bold;">{activities_count}</div>
+        </div>
+        <div style="text-align: center;">
+            <div style="font-size: 0.9em; color: #666;">QED</div>
+            <div style="font-size: 1.8em; font-weight: bold;">{avg_qed_str}</div>
+        </div>
+        <div style="text-align: center;">
+            <div style="font-size: 0.9em; color: #666;">Avg OQPLA</div>
+            <div style="font-size: 1.8em; font-weight: bold;">{avg_oqpla_str}</div>
+        </div>
+        <div style="text-align: center; background-color: {'#721c24' if has_warning and imp_count > 0 else '#28a745'}; color: white; padding: 10px 20px; border-radius: 5px;">
+            <div style="font-size: 0.8em;">{'⚠️' if has_warning and imp_count > 0 else '✓'}</div>
+            <div style="font-size: 1.5em; font-weight: bold;">{imp_count if has_warning else 0} IMP</div>
+        </div>
+    </div>
+
+    <!-- 2. EXECUTIVE SUMMARY -->
+    <h2>📊 Executive Summary</h2>
+    <div class="verdict">
+        <h3>{warning_icon} {interpretation['label'].upper()} - {priority_text}</h3>
+        <p><strong>OQPLA Score:</strong> {final_score:.3f} | <strong>QED:</strong> {qed_val:.3f} | <strong>Red Flags:</strong> {total_flags} active</p>
+        <p><strong>Risk Level:</strong> {interpretation['risk']}</p>
+        <p><strong>Recommended Action:</strong> {interpretation['action']}</p>
+    </div>
+    {"<div class='warning'><strong>⚠️ HIGH FALSE POSITIVE RISK:</strong> This compound shows strong evidence of being an assay artifact. DEPRIORITIZE unless validated with orthogonal assays.</div>" if final_score >= 0.7 else ""}
+
+    <!-- 3. COMPOUND PROPERTIES -->
+    <h2>🧪 Compound Properties</h2>
+    <table>
+        <tr><th>Property</th><th>Value</th><th>Unit/Description</th></tr>
+        {props_html if props_html else "<tr><td colspan='3'>No property data available</td></tr>"}
+    </table>
+
+    <!-- 4. EFFICIENCY METRICS -->
+    <h2>📈 Efficiency Metrics</h2>
+    <table>
+        <tr><th>Metric</th><th>Value</th><th>Formula</th><th>Used in Score</th></tr>
+        {efficiency_html if efficiency_html else "<tr><td colspan='4'>No efficiency data available</td></tr>"}
+    </table>
+    <p><em>Only SEI and BEI contribute to the Efficiency Score. NSEI/NBEI are for reference.</em></p>
+
+    <!-- 5. OQPLA SCORE CALCULATION -->
+    <h2>🔢 OQPLA Score Calculation</h2>
+    <h3>Component Scores</h3>
+    <table>
+        <tr><th>Component</th><th>Score</th><th>Weight (Raw)</th><th>Weight (Norm)</th><th>Contribution</th></tr>
+        {components_html if components_html else "<tr><td colspan='5'>No component data available</td></tr>"}
+    </table>
+
+    <h3>Final Calculation</h3>
+    <div class="calc-box">
+<strong>Base Score</strong> (sum of contributions): {base_score_str}
+
+<strong>QED Value:</strong> {qed_val_str}
+<strong>QED Multiplier</strong> = 0.75 + 0.25 × QED
+             = 0.75 + 0.25 × {qed_val_str}
+             = {qed_mult_str}
+
+<strong>FINAL SCORE</strong> = Base Score × QED Multiplier
+            = {base_score_str} × {qed_mult_str}
+            = <strong>{final_score_str}</strong>
+    </div>
+
+    <!-- 6. RED FLAGS -->
+    <h2>⚠️ Red Flags Assessment</h2>
+    <div style="background-color: {'#d4edda' if total_flags == 0 else ('#fff3cd' if total_flags <= 5 else '#f8d7da')}; padding: 10px; border-radius: 5px; margin-bottom: 15px; border-left: 4px solid {flag_color};">
+        <strong style="color: {flag_color};">{flag_assessment} - {total_flags} flags detected</strong>
+    </div>
+    <table>
+        <tr><th>Flag Type</th><th>Status</th><th>Description</th></tr>
+        {red_flags_html if red_flags_html else "<tr><td colspan='3'>No flag data available</td></tr>"}
+    </table>
+
+    <!-- 7. BIOACTIVITY DISTRIBUTION -->
+    <h2>🎯 Bioactivity Distribution</h2>
+    <div class="two-col">
+        <div>{bioactivity_chart_html}</div>
+        <div>
+            <table>
+                <tr><th>Activity Type</th><th>Count</th><th>Percentage</th></tr>
+                {bioactivity_html if bioactivity_html else "<tr><td colspan='3'>No bioactivity data available</td></tr>"}
+            </table>
+            <p><strong>Total Activities:</strong> {len(df)}</p>
+        </div>
+    </div>
+
+    <!-- 8. EFFICIENCY METRICS -->
+    <h2>📈 Efficiency Metrics Distribution</h2>
+
+    <!-- Metric Cards -->
+    <div style="display: flex; gap: 15px; margin-bottom: 15px; flex-wrap: wrap;">
+        {"".join([f'''
+        <div style="flex: 1; min-width: 200px; text-align: center; padding: 15px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid {metric_colors_html[metric]};">
+            <div style="color: #fff; font-size: 0.95em; margin-bottom: 5px;">{metric}{"" if not stats["used"] else " ✓"}</div>
+            <div style="font-size: 1.5em; color: {metric_colors_html[metric]}; font-weight: bold;">{stats["mean"]:.2f}</div>
+            <div style="color: #aaa; font-size: 0.8em; margin-top: 3px;">Mean Value</div>
+            <div style="color: #888; font-size: 0.75em; margin-top: 3px;">Range: {stats["min"]:.1f}-{stats["max"]:.1f}</div>
+        </div>
+        ''' for metric, stats in efficiency_metrics_stats.items()])}
+    </div>
+
+    <!-- Description -->
+    <div class="info" style="margin-bottom: 15px;">
+        <strong>📊 Efficiency Metrics Explained:</strong><br>
+        • <strong>SEI (Surface Efficiency Index)</strong> = pActivity × 100 / PSA — Potency per unit polar surface area (✓ used in OQPLA)<br>
+        • <strong>BEI (Binding Efficiency Index)</strong> = pActivity × 1000 / MW — Potency per unit molecular weight (✓ used in OQPLA)<br>
+        • <strong>NSEI</strong> = pActivity / (N+O atoms) — Potency per heteroatom count (informational only)<br>
+        • <strong>NBEI</strong> = pActivity / Heavy atoms — Potency per heavy atom count (informational only)
+    </div>
+
+    {efficiency_boxplots_html}
+    <p><em>Box plots show the distribution of all efficiency metrics across all bioactivities. Only SEI and BEI contribute to the OQPLA Efficiency Score.</em></p>
+
+    <!-- 9. EFFICIENCY PLANE -->
+    <h2>📐 Efficiency Plane (SEI vs BEI)</h2>
+
+    <!-- Angle Status Banner -->
+    <div style="background-color: {angle_status_bg}; padding: 12px; border-radius: 5px; margin-bottom: 15px; border: 1px solid {angle_status_color};">
+        <strong style="color: {angle_status_color};">Development Trajectory: {angle_status} (Angle: {angle_str}°)</strong>
+    </div>
+
+    <!-- Metric Cards Row -->
+    <div style="display: flex; gap: 15px; margin-bottom: 15px;">
+        <div style="flex: 1; text-align: center; padding: 15px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #636EFA;">
+            <div style="font-size: 1.4em; color: #636EFA; font-weight: bold;">{angle_str}°</div>
+            <div style="color: #fff; font-size: 0.95em; margin-top: 5px;">Mean Angle</div>
+            <div style="color: #aaa; font-size: 0.8em; margin-top: 3px;">Development trajectory</div>
+        </div>
+        <div style="flex: 1; text-align: center; padding: 15px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #00CC96;">
+            <div style="font-size: 1.4em; color: #00CC96; font-weight: bold;">{modulus_str}</div>
+            <div style="color: #fff; font-size: 0.95em; margin-top: 5px;">Modulus</div>
+            <div style="color: #aaa; font-size: 0.8em; margin-top: 3px;">Overall efficiency</div>
+        </div>
+        <div style="flex: 1; text-align: center; padding: 15px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #EF553B;">
+            <div style="font-size: 1.4em; color: #EF553B; font-weight: bold;">{mean_sei_str}</div>
+            <div style="color: #fff; font-size: 0.95em; margin-top: 5px;">Mean SEI</div>
+            <div style="color: #aaa; font-size: 0.8em; margin-top: 3px;">Surface efficiency</div>
+        </div>
+        <div style="flex: 1; text-align: center; padding: 15px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #FFA15A;">
+            <div style="font-size: 1.4em; color: #FFA15A; font-weight: bold;">{mean_bei_str}</div>
+            <div style="color: #fff; font-size: 0.95em; margin-top: 5px;">Mean BEI</div>
+            <div style="color: #aaa; font-size: 0.8em; margin-top: 3px;">Binding efficiency</div>
+        </div>
+    </div>
+
+    <!-- Chart and Interpretation -->
+    <div class="two-col">
+        <div>{efficiency_scatter_html}</div>
+        <div>
+            <h3>Angle Interpretation</h3>
+            <ul style="line-height: 1.8;">
+                <li><strong>&lt; 45°:</strong> Favors size efficiency (SEI) - Compound optimized more for surface area efficiency</li>
+                <li><strong>≈ 45°:</strong> Balanced development (OPTIMAL) - Ideal balance between size and binding efficiency</li>
+                <li><strong>&gt; 45°:</strong> Favors binding efficiency (BEI) - Compound optimized more for binding potency</li>
+            </ul>
+            <div class="info" style="margin-top: 15px;">
+                <strong>📊 What This Means:</strong><br>
+                The 45° optimal angle represents balanced development where compounds achieve efficiency improvements
+                through both size reduction (SEI) and potency enhancement (BEI). Most drugs exhibit angles between 50-70°
+                due to typical PSA/MW ratios.
+            </div>
+            <p style="margin-top: 10px;"><strong>Modulus Formula:</strong> <code>sqrt(SEI² + BEI²)</code></p>
+            <p><strong>Angle Formula:</strong> <code>arctan2(BEI, SEI)</code> in degrees</p>
+        </div>
+    </div>
+
+    <!-- 10. PDB EVIDENCE -->
+    <h2>🔬 PDB Structural Evidence</h2>
+
+    <!-- Confidence Banner -->
+    <div style="background-color: {pdb_conf_bg}; padding: 12px; border-radius: 5px; margin-bottom: 15px; border: 1px solid {pdb_conf_color};">
+        <strong style="color: {pdb_conf_color};">{pdb_conf_icon} Structural Validation: {pdb_confidence} (PDB Score: {mean_pdb_score:.3f})</strong>
+    </div>
+
+    <!-- Quality Distribution Cards -->
+    <div style="display: flex; gap: 15px; margin-bottom: 15px;">
+        <div style="flex: 1; text-align: center; padding: 15px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #636EFA;">
+            <div style="font-size: 1.5em; color: #636EFA; font-weight: bold;">{pdb_total}</div>
+            <div style="color: #fff; font-size: 0.95em; margin-top: 5px;">Total Structures</div>
+            <div style="color: #aaa; font-size: 0.8em; margin-top: 3px;">PDB entries found</div>
+        </div>
+        <div style="flex: 1; text-align: center; padding: 15px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #28a745;">
+            <div style="font-size: 1.5em; color: #28a745; font-weight: bold;">{high_q}</div>
+            <div style="color: #fff; font-size: 0.95em; margin-top: 5px;">High Quality</div>
+            <div style="color: #aaa; font-size: 0.8em; margin-top: 3px;">&lt;2.0Å ({high_q_pct:.0f}%) ★★★★★</div>
+        </div>
+        <div style="flex: 1; text-align: center; padding: 15px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #fd7e14;">
+            <div style="font-size: 1.5em; color: #fd7e14; font-weight: bold;">{med_q}</div>
+            <div style="color: #fff; font-size: 0.95em; margin-top: 5px;">Medium Quality</div>
+            <div style="color: #aaa; font-size: 0.8em; margin-top: 3px;">2-3Å ({med_q_pct:.0f}%) ★★★</div>
+        </div>
+        <div style="flex: 1; text-align: center; padding: 15px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #dc3545;">
+            <div style="font-size: 1.5em; color: #dc3545; font-weight: bold;">{poor_q}</div>
+            <div style="color: #fff; font-size: 0.95em; margin-top: 5px;">Poor Quality</div>
+            <div style="color: #aaa; font-size: 0.8em; margin-top: 3px;">&gt;3Å ({poor_q_pct:.0f}%) ★</div>
+        </div>
+    </div>
+
+    <!-- Quality Distribution Chart (Full Width) -->
+    <div style="margin-bottom: 20px;">
+        {pdb_quality_chart_html}
+    </div>
+
+    <!-- Resolution Quality Info -->
+    <div class="info">
+        <strong>📊 Resolution Quality:</strong><br>
+        High-resolution structures (&lt;2.0Å) provide the most reliable structural validation.
+        PDB Score component contributes 6.25% to final OQPLA score (weight=5%, normalized weight=6.25%).
+        <ul style="margin-top: 10px; margin-bottom: 5px;">
+            <li><strong>⭐⭐⭐⭐⭐ High (&lt;2.0Å):</strong> Excellent resolution - high confidence in binding mode</li>
+            <li><strong>⭐⭐⭐ Medium (2-3Å):</strong> Good resolution - reliable structural information</li>
+            <li><strong>⭐ Poor (&gt;3Å):</strong> Lower resolution - general binding information only</li>
+        </ul>
+    </div>
+
+    <!-- 11. CLASSIFICATION -->
+    <h2>🏷️ Chemical Classification</h2>
+
+    <div class="two-col">
+        <!-- ClassyFire Taxonomy -->
+        <div>
+            <h3>ClassyFire Taxonomy:</h3>
+            <table>
+                <tr><th>Level</th><th>Classification</th></tr>
+                {classyfire_html if classyfire_html else "<tr><td colspan='2'>No ClassyFire data available</td></tr>"}
+            </table>
+        </div>
+
+        <!-- NPClassifier (Natural Products) -->
+        <div>
+            <h3>NPClassifier (Natural Products):</h3>
+            <table>
+                <tr><th>Level</th><th>Classification</th></tr>
+                {npclassifier_html if npclassifier_html else "<tr><td colspan='2'>No NPClassifier data available</td></tr>"}
+            </table>
+        </div>
+    </div>
+
+    <!-- 12. DRUG INDICATIONS -->
+    <h2>💊 Drug Indications</h2>
+
+    {f'''
+    <div style="display: flex; gap: 20px; margin-bottom: 15px;">
+        <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #667eea;">
+            <div style="font-size: 0.9em; color: #666; margin-bottom: 5px;">Maximum Clinical Phase</div>
+            <div style="font-size: 1.8em; color: #667eea; font-weight: bold;">{max_clinical_phase:.1f}</div>
+        </div>
+        <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #28a745;">
+            <div style="font-size: 0.9em; color: #666; margin-bottom: 5px;">Unique Indications</div>
+            <div style="font-size: 1.8em; color: #28a745; font-weight: bold;">{unique_indications}</div>
+        </div>
+        <div style="flex: 1; background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #17a2b8;">
+            <div style="font-size: 0.9em; color: #666; margin-bottom: 5px;">Compounds with Data</div>
+            <div style="font-size: 1.8em; color: #17a2b8; font-weight: bold;">{compounds_with_indications}</div>
+        </div>
+    </div>
+
+    <h3>Top Indications by Phase:</h3>
+    <table>
+        <tr><th>Indication</th><th>Max Phase</th></tr>
+        {indications_html}
+    </table>
+    ''' if indications_html else "<p>No drug indication data available</p>"}
+
+    <!-- 13. FINAL RECOMMENDATION -->
+    <h2>🎯 Final Recommendation</h2>
+    <div class="verdict">
+        <h3>{warning_icon} VERDICT: {interpretation['label'].upper()}</h3>
+        <p><strong>{interpretation['risk']}</strong></p>
+        <p>{interpretation['action']}</p>
+    </div>
+
+    <!-- IMP GUIDE -->
+    <h2>📚 IMP Interpretation Guide</h2>
+    <div class="guide">
+        <table>
+            <tr><th>Score Range</th><th>Classification</th><th>Meaning</th><th>Action</th></tr>
+            <tr><td>0.90+</td><td>Exceptional IMP</td><td>⚠️ VERY HIGH false positive risk</td><td>Immediate validation</td></tr>
+            <tr><td>0.70-0.89</td><td>Strong IMP</td><td>⚠️ HIGH false positive risk</td><td>DEPRIORITIZE unless validated</td></tr>
+            <tr><td>0.50-0.69</td><td>Moderate IMP</td><td>⚠️ Moderate risk</td><td>Validate carefully</td></tr>
+            <tr><td>0.30-0.49</td><td>Weak IMP</td><td>Lower risk - more likely genuine</td><td>Standard follow-up</td></tr>
+            <tr><td>&lt; 0.30</td><td>Not IMP</td><td>✓ Likely genuine activity</td><td>Proceed with development</td></tr>
+        </table>
+        <p style="margin-top: 15px;"><em><strong>IMP = Invalid Metabolic Panacea = Likely FALSE POSITIVE (assay artifact)</strong></em></p>
+    </div>
+
+    <footer style="margin-top: 40px; padding-top: 20px; border-top: 2px solid #667eea; color: #666; font-size: 12px; text-align: center;">
+        <p>Generated by <strong>IMPULATOR</strong> | {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
+        <p>💡 <em>Tip: Use Ctrl+P (Cmd+P on Mac) to print this report to PDF</em></p>
+    </footer>
+</body>
+</html>
+"""
+    return html_content

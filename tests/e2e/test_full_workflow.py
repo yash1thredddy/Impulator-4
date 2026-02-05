@@ -102,8 +102,11 @@ class TestJobSubmissionWorkflow:
 
         job_id = job_data["id"]
 
-        # Check job status
-        status_response = client_with_db.get(f"/api/v1/jobs/{job_id}")
+        # Check job status (must use same session ID)
+        status_response = client_with_db.get(
+            f"/api/v1/jobs/{job_id}",
+            headers={"X-Session-ID": "12345678-1234-4123-8123-123456789012"}
+        )
         assert status_response.status_code == 200
 
         status_data = status_response.json()
@@ -132,9 +135,12 @@ class TestJobSubmissionWorkflow:
         assert "jobs" in batch_data
         assert batch_data["total_submitted"] == 3
 
-        # Check batch summary
+        # Check batch summary (must use same session ID)
         batch_id = batch_data["batch_id"]
-        summary_response = client_with_db.get(f"/api/v1/jobs/batch/{batch_id}")
+        summary_response = client_with_db.get(
+            f"/api/v1/jobs/batch/{batch_id}",
+            headers={"X-Session-ID": "22345678-1234-4123-8123-123456789012"}
+        )
         assert summary_response.status_code == 200
 
         summary = summary_response.json()

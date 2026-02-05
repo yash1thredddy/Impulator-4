@@ -52,9 +52,18 @@ async def list_compounds(
     if not include_duplicates:
         query = query.filter(Compound.is_duplicate == False)  # noqa: E712
 
-    # Apply search filter
+    # Apply search filter with escaped wildcards to prevent SQL injection
     if search:
-        query = query.filter(Compound.compound_name.ilike(f"%{search}%"))
+        # Escape SQL ILIKE special characters to prevent pattern injection attacks
+        # IMPORTANT: Escape backslash FIRST, then wildcards (order matters!)
+        # Without this, input like '\' would escape the trailing '%' wildcard
+        search_escaped = (
+            search
+            .replace('\\', '\\\\')  # Escape backslash first (escape char itself)
+            .replace('%', '\\%')    # Then escape % wildcard
+            .replace('_', '\\_')    # Then escape _ wildcard
+        )
+        query = query.filter(Compound.compound_name.ilike(f"%{search_escaped}%", escape='\\'))
 
     # Get total count
     total = query.count()

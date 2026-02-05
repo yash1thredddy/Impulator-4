@@ -181,6 +181,20 @@ def _apply_migrations() -> None:
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_jobs_batch_id ON jobs(batch_id)"))
                 migrations_applied.append('jobs.batch_id')
 
+            # Add idempotency_key column if missing (for safe retries)
+            if 'idempotency_key' not in jobs_columns:
+                conn.execute(text("ALTER TABLE jobs ADD COLUMN idempotency_key VARCHAR(64)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_jobs_idempotency_key ON jobs(idempotency_key)"))
+                migrations_applied.append('jobs.idempotency_key')
+
+            # Create unique constraint for idempotency: same key per session = same job
+            # SQLite doesn't support adding constraints to existing tables, so we use a unique index
+            conn.execute(text("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uix_job_session_idempotency
+                ON jobs(session_id, idempotency_key)
+                WHERE idempotency_key IS NOT NULL
+            """))
+
             # Performance indexes for jobs table
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_jobs_created_at ON jobs(created_at)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_jobs_completed_at ON jobs(completed_at)"))

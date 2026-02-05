@@ -24,6 +24,12 @@ def render_job_form() -> Optional[str]:
     Returns:
         Optional[str]: Job ID if submitted successfully, None otherwise
     """
+    # Check if we have a pending success from duplicate resolution
+    # Just return the job_id - analyze.py will handle the success display
+    if st.session_state.get('duplicate_resolution_success'):
+        success_info = st.session_state.pop('duplicate_resolution_success')
+        return success_info['job_id']
+
     # Check if we need to show the duplicate dialog
     if st.session_state.get('show_duplicate_dialog'):
         duplicate_info = st.session_state.get('pending_duplicate_info', {})
@@ -229,6 +235,10 @@ def _submit_job(
             return response.job_id
         elif response.is_duplicate:
             # Duplicate detected - store info and show dialog
+            # First clear any previous success state to prevent it showing behind dialog
+            SessionState.set('just_submitted_job', False)
+            SessionState.set('last_submitted_job_id', None)
+
             st.session_state['show_duplicate_dialog'] = True
             st.session_state['pending_duplicate_info'] = response.duplicate_info
             # Store job params for later resolution
@@ -282,7 +292,7 @@ def _resolve_duplicate_action(action: str, new_name: Optional[str]) -> Optional[
             activity_types=activity_types
         )
 
-        # Clear duplicate dialog state
+        # Clear duplicate dialog state BEFORE rerun
         clear_duplicate_dialog_state()
 
         if response.success:
@@ -291,15 +301,21 @@ def _resolve_duplicate_action(action: str, new_name: Optional[str]) -> Optional[
                 st.rerun()
                 return None
             else:
-                # Job was created
+                # Job was created - store success info and rerun to close dialog
                 final_name = new_name or compound_name
-                st.success(f"Job submitted! ID: {response.job_id}")
                 SessionState.add_active_job(
                     job_id=response.job_id,
                     compound_name=final_name,
                     status="pending"
                 )
                 start_polling()
+
+                # Store success state for display after rerun (closes the dialog first)
+                st.session_state['duplicate_resolution_success'] = {
+                    'job_id': response.job_id,
+                    'compound_name': final_name
+                }
+                st.rerun()
                 return response.job_id
         else:
             st.error(f"Failed to resolve duplicate: {response.error}")
@@ -499,6 +515,53 @@ def _inchi_to_smiles(inchi: str) -> Optional[str]:
         return None
 
 
+def _generate_next_version_name(compound_name: str, existing_names: List[str]) -> str:
+    """
+    Generate next version name for a duplicate compound.
+
+    First normalizes compound_name by stripping any existing _vN suffix to get base_name,
+    then finds the highest existing version and returns base_name_v{max+1}.
+
+    Examples:
+        - "Aspirin" with no existing versions -> "Aspirin_v2"
+        - "Aspirin" with "Aspirin_v2" existing -> "Aspirin_v3"
+        - "Aspirin_v2" (already versioned) -> "Aspirin_v3" (strips suffix first)
+        - "Aspirin" with "Aspirin_v2", "Aspirin_v3" existing -> "Aspirin_v4"
+
+    Args:
+        compound_name: Original compound name (may already have _vN suffix)
+        existing_names: List of existing compound names to check against
+
+    Returns:
+        Next available version name (e.g., "Aspirin_v3")
+    """
+    import re
+
+    # First, normalize compound_name by stripping any existing _vN suffix
+    version_suffix_pattern = re.compile(r'^(.+?)_v(\d+)$', re.IGNORECASE)
+    suffix_match = version_suffix_pattern.match(compound_name)
+
+    if suffix_match:
+        # compound_name already has version suffix - extract base and seed max_version
+        base_name = suffix_match.group(1)
+        max_version = int(suffix_match.group(2))
+    else:
+        # No suffix - use as-is, original counts as version 1
+        base_name = compound_name
+        max_version = 1
+
+    # Find all existing versions matching pattern {base_name}_v{number}
+    pattern = re.compile(rf'^{re.escape(base_name)}_v(\d+)$', re.IGNORECASE)
+
+    for name in existing_names:
+        match = pattern.match(name)
+        if match:
+            version = int(match.group(1))
+            max_version = max(max_version, version)
+
+    return f"{base_name}_v{max_version + 1}"
+
+
 def render_csv_upload_form() -> Optional[str]:
     """Render the CSV batch upload form with duplicate confirmation.
 
@@ -532,6 +595,13 @@ def render_csv_upload_form() -> Optional[str]:
             _clear_column_mapping_state()
         except Exception as e:
             st.error(f"Failed to read CSV: {e}")
+            # Clear stale state to prevent showing old data on error
+            _clear_duplicate_check_state()
+            _clear_column_mapping_state()
+            if 'csv_preview' in st.session_state:
+                del st.session_state['csv_preview']
+            if 'csv_mapped' in st.session_state:
+                del st.session_state['csv_mapped']
             return None
 
     df = st.session_state.get('csv_preview')
@@ -618,6 +688,8 @@ def render_csv_upload_form() -> Optional[str]:
                     st.session_state['batch_new'] = result.get('new', [])
                     # Store structure matches for enhanced duplicate handling
                     st.session_state['batch_structure_matches'] = result.get('structure_matches', [])
+                    # Store backend-computed suggested version names (avoids collision issues)
+                    st.session_state['batch_suggested_versions'] = result.get('suggested_versions', {})
                     st.rerun()
                 else:
                     st.error(f"Failed to check duplicates: {result.get('error', 'Unknown error')}")
@@ -742,12 +814,20 @@ def render_csv_upload_form() -> Optional[str]:
                     st.caption("For individual control with large batches, consider processing in smaller groups.")
 
             # Apply default action to compounds not individually configured
+            # Get backend-computed suggested versions (avoids collision issues)
+            suggested_versions = st.session_state.get('batch_suggested_versions', {})
+
             for compound_name in all_existing:
                 if compound_name not in duplicate_decisions:
                     duplicate_decisions[compound_name] = default_action
-                # Auto-generate new name for duplicates without custom names
+                # Use backend-provided version name for duplicates (computed from full database state)
                 if duplicate_decisions.get(compound_name) == "duplicate" and compound_name not in duplicate_new_names:
-                    duplicate_new_names[compound_name] = f"{compound_name}_v2"
+                    # Prefer backend-computed version name, fallback to local generation
+                    if compound_name in suggested_versions:
+                        duplicate_new_names[compound_name] = suggested_versions[compound_name]
+                    else:
+                        # Fallback for structure matches not in existing list
+                        duplicate_new_names[compound_name] = _generate_next_version_name(compound_name, existing)
 
             # Store decisions in session state
             st.session_state['batch_duplicate_decisions'] = duplicate_decisions

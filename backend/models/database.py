@@ -2,7 +2,7 @@
 SQLAlchemy ORM models for Jobs and Compounds.
 """
 
-from sqlalchemy import Column, String, Integer, Float, Text, DateTime, Enum, Boolean
+from sqlalchemy import Column, String, Integer, Float, Text, DateTime, Enum, Boolean, UniqueConstraint
 from sqlalchemy.sql import func
 import enum
 
@@ -43,6 +43,10 @@ class Job(Base):
     # Allows batch cancellation and grouped display
     batch_id = Column(String(36), nullable=True, index=True)
 
+    # Idempotency key for safe retries - prevents duplicate job creation
+    # Unique per session to allow same key across different sessions
+    idempotency_key = Column(String(64), nullable=True, index=True)
+
     # Input parameters (JSON)
     input_params = Column(Text, nullable=True)
 
@@ -61,6 +65,11 @@ class Job(Base):
     created_at = Column(DateTime, default=func.now())
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
+
+    # Unique constraint for idempotency: same key per session = same job
+    __table_args__ = (
+        UniqueConstraint('session_id', 'idempotency_key', name='uix_job_session_idempotency'),
+    )
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
@@ -114,6 +123,10 @@ class Compound(Base):
 
     # Timestamps
     processed_at = Column(DateTime, default=func.now())
+
+    # Note: InChIKey is NOT unique - duplicates are allowed and tagged via is_duplicate flag
+    # Uniqueness is enforced via entry_id (UUID) instead
+    # Duplicate detection is done at application level before job creation
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""

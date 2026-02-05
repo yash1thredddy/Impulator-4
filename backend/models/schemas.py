@@ -3,7 +3,7 @@ Pydantic schemas for API request/response validation.
 """
 import re
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict
 from enum import Enum
 
 from pydantic import BaseModel, Field, ConfigDict, field_validator
@@ -348,6 +348,11 @@ class CheckDuplicatesResponse(BaseModel):
         default_factory=list,
         description="Compounds that match existing compounds by InChIKey (structure)"
     )
+    # Suggested version names for existing compounds (computed from full database state)
+    suggested_versions: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of existing compound name -> suggested next version name (e.g., 'Aspirin' -> 'Aspirin_v3')"
+    )
 
 
 class DuplicateAction(str, Enum):
@@ -520,6 +525,13 @@ class SkipResponse(MessageResponse):
     compound_name: Optional[str] = None
 
 
+class FailedCompound(BaseModel):
+    """Information about a compound that failed during batch job creation."""
+
+    compound_name: str
+    error: str
+
+
 class BatchResponse(BaseModel):
     """Response for batch job creation."""
 
@@ -528,6 +540,7 @@ class BatchResponse(BaseModel):
     skipped_existing: List[str] = []
     skipped_processing: List[str] = []
     replaced: List[str] = []  # Compounds that were replaced (existing deleted)
+    failed_compounds: List[FailedCompound] = []  # Compounds that failed during job creation
     total_submitted: int
     total_skipped: int
     message: Optional[str] = None
