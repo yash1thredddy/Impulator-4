@@ -614,22 +614,37 @@ def _build_component_scores(row: pd.Series) -> dict:
     Weights are computed from the module-level constants (WEIGHT_*_RAW) rather
     than being hardcoded, ensuring consistency with the actual scoring calculations.
 
+    Automatically detects Phase 1 vs Phase 2 results by checking for PDB_Score:
+    - Phase 1 (no PDB): Weights normalize to 53.33%, 20%, 26.67%
+    - Phase 2 (with PDB): Weights normalize to 50%, 18.75%, 25%, 6.25%
+
     Args:
         row: A pandas Series containing OQPLA score columns
 
     Returns:
         dict with component score details including derived weights
     """
-    # Calculate total weight and normalized weights from config constants
-    total_weight = WEIGHT_EFFICIENCY_RAW + WEIGHT_ANGLE_RAW + WEIGHT_DISTANCE_RAW + WEIGHT_PDB_RAW
+    # Detect if PDB was used (Phase 2) or not (Phase 1)
+    # Phase 1 doesn't create PDB_Score column; Phase 2 always does (even if use_pdb=False, it sets 0.5)
+    pdb_score = row.get('PDB_Score')
+    has_pdb = pdb_score is not None and not (isinstance(pdb_score, float) and np.isnan(pdb_score))
+
+    # Calculate total weight and normalized weights based on which phase was used
+    if has_pdb:
+        # Phase 2: includes PDB weight
+        total_weight = WEIGHT_EFFICIENCY_RAW + WEIGHT_ANGLE_RAW + WEIGHT_DISTANCE_RAW + WEIGHT_PDB_RAW
+        pdb_norm = WEIGHT_PDB_RAW / total_weight
+    else:
+        # Phase 1: no PDB weight
+        total_weight = WEIGHT_EFFICIENCY_RAW + WEIGHT_ANGLE_RAW + WEIGHT_DISTANCE_RAW
+        pdb_norm = 0.0
 
     # Derive normalized weights (percentages)
     eff_norm = WEIGHT_EFFICIENCY_RAW / total_weight
     angle_norm = WEIGHT_ANGLE_RAW / total_weight
     dist_norm = WEIGHT_DISTANCE_RAW / total_weight
-    pdb_norm = WEIGHT_PDB_RAW / total_weight
 
-    return {
+    result = {
         'efficiency': {
             'value': row.get('Efficiency_Score'),
             'weight_raw': f'{WEIGHT_EFFICIENCY_RAW * 100:.0f}%',
@@ -651,14 +666,19 @@ def _build_component_scores(row: pd.Series) -> dict:
             'contribution': row.get('Distance_Contribution'),
             'description': 'Proximity to best-in-class compound (highest modulus)'
         },
-        'pdb': {
-            'value': row.get('PDB_Score'),
+    }
+
+    # Only include PDB if it was used
+    if has_pdb:
+        result['pdb'] = {
+            'value': pdb_score,
             'weight_raw': f'{WEIGHT_PDB_RAW * 100:.0f}%',
             'weight_normalized': f'{pdb_norm * 100:.2f}%',
             'contribution': row.get('PDB_Contribution'),
             'description': 'Structural validation from RCSB PDB'
-        },
-    }
+        }
+
+    return result
 
 
 def get_oqpla_score_breakdown(row: pd.Series) -> dict:

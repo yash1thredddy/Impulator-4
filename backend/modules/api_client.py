@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # Configuration constants
 CACHE_SIZE = 2000
 MAX_BATCH_SIZE = 50
+MAX_IDS_PER_REQUEST = 50  # Max ChEMBL IDs per REST API request (prevents URL length violations)
 MAX_RETRIES = 3
 RETRY_BACKOFF_FACTOR = 0.5
 RETRY_STATUS_CODES = [500, 502, 503, 504]
@@ -340,10 +341,12 @@ def rest_api_fetch_activities(
     progress_callback: Optional[ProgressCallback] = None
 ) -> List[Dict]:
     """
-    Fetch activities using direct REST API with large page size.
+    Fetch activities using direct REST API with large page size and chunking.
 
     This is a fallback when the library fails, and provides better control
     over pagination (limit=1000 vs library default of 20).
+
+    Automatically chunks large ID lists to avoid URL length violations.
 
     Args:
         chembl_ids: List of ChEMBL IDs to fetch activities for
@@ -360,53 +363,61 @@ def rest_api_fetch_activities(
         activity_types = DEFAULT_ACTIVITY_TYPES
 
     activity_types_set = set(activity_types)
-    ids_param = ",".join(chembl_ids)
     fields = "molecule_chembl_id,standard_type,standard_value,standard_units,target_chembl_id"
 
     all_activities = []
-    offset = 0
     request_count = 0
+    total_ids = len(chembl_ids)
+
+    # Chunk IDs to avoid URL length violations
+    id_chunks = [
+        chembl_ids[i:i + MAX_IDS_PER_REQUEST]
+        for i in range(0, total_ids, MAX_IDS_PER_REQUEST)
+    ]
+    total_chunks = len(id_chunks)
 
     if progress_callback:
-        progress_callback(0.1, f"Fetching activities via REST API for {len(chembl_ids)} compounds...")
+        progress_callback(0.1, f"Fetching activities for {total_ids} compounds in {total_chunks} chunks...")
 
-    while True:
-        params = {
-            "molecule_chembl_id__in": ids_param,
-            "only": fields,
-            "limit": CHEMBL_MAX_LIMIT,
-            "offset": offset
-        }
+    for chunk_idx, chunk_ids in enumerate(id_chunks):
+        ids_param = ",".join(chunk_ids)
+        offset = 0
 
-        data = _rest_api_get("activity", params, timeout=CHEMBL_API_TIMEOUT)
-        request_count += 1
+        while True:
+            params = {
+                "molecule_chembl_id__in": ids_param,
+                "only": fields,
+                "limit": CHEMBL_MAX_LIMIT,
+                "offset": offset
+            }
 
-        if data is None:
-            logger.error(f"REST API activity fetch failed at offset {offset}")
-            break
+            data = _rest_api_get("activity", params, timeout=CHEMBL_API_TIMEOUT)
+            request_count += 1
 
-        activities = _get_response_data(data, 'activity')
-        if not activities:
-            break
+            if data is None:
+                logger.error(f"REST API activity fetch failed at chunk {chunk_idx}, offset {offset}")
+                break
 
-        # Filter by activity type locally
-        filtered = [a for a in activities if a.get('standard_type') in activity_types_set]
-        all_activities.extend(filtered)
+            activities = _get_response_data(data, 'activity')
+            if not activities:
+                break
+
+            # Filter by activity type locally
+            filtered = [a for a in activities if a.get('standard_type') in activity_types_set]
+            all_activities.extend(filtered)
+
+            if len(activities) < CHEMBL_MAX_LIMIT:
+                break
+            offset += CHEMBL_MAX_LIMIT
 
         if progress_callback:
-            total = data.get('page_meta', {}).get('total_count', 0)
-            if total > 0:
-                progress = min(0.9, 0.1 + 0.8 * (offset + len(activities)) / total)
-                progress_callback(progress, f"Fetched {offset + len(activities)}/{total} activities...")
-
-        if len(activities) < CHEMBL_MAX_LIMIT:
-            break
-        offset += CHEMBL_MAX_LIMIT
+            progress = 0.1 + 0.8 * ((chunk_idx + 1) / total_chunks)
+            progress_callback(progress, f"Processed chunk {chunk_idx + 1}/{total_chunks}...")
 
     if progress_callback:
         progress_callback(1.0, f"REST API: fetched {len(all_activities)} activities in {request_count} requests")
 
-    logger.info(f"REST API activity fetch: {len(all_activities)} activities in {request_count} requests")
+    logger.info(f"REST API activity fetch: {len(all_activities)} activities in {request_count} requests ({total_chunks} chunks)")
     return all_activities
 
 
@@ -507,7 +518,9 @@ def rest_api_fetch_molecules_batch(
     progress_callback: Optional[ProgressCallback] = None
 ) -> Dict[str, Dict]:
     """
-    Fetch molecule data for multiple ChEMBL IDs using REST API batch query.
+    Fetch molecule data for multiple ChEMBL IDs using REST API batch query with chunking.
+
+    Automatically chunks large ID lists to avoid URL length violations.
 
     Args:
         chembl_ids: List of ChEMBL IDs
@@ -519,42 +532,50 @@ def rest_api_fetch_molecules_batch(
     if not chembl_ids:
         return {}
 
-    ids_param = ",".join(chembl_ids)
     all_molecules = []
-    offset = 0
+    total_ids = len(chembl_ids)
+
+    # Chunk IDs to avoid URL length violations
+    id_chunks = [
+        chembl_ids[i:i + MAX_IDS_PER_REQUEST]
+        for i in range(0, total_ids, MAX_IDS_PER_REQUEST)
+    ]
+    total_chunks = len(id_chunks)
 
     if progress_callback:
-        progress_callback(0.1, f"Fetching molecules via REST API batch...")
+        progress_callback(0.1, f"Fetching molecules for {total_ids} compounds in {total_chunks} chunks...")
 
-    while True:
-        params = {
-            "molecule_chembl_id__in": ids_param,
-            "only": "molecule_chembl_id,pref_name,molecule_properties,molecule_structures",
-            "limit": CHEMBL_MAX_LIMIT,
-            "offset": offset
-        }
+    for chunk_idx, chunk_ids in enumerate(id_chunks):
+        ids_param = ",".join(chunk_ids)
+        offset = 0
 
-        data = _rest_api_get("molecule", params, timeout=CHEMBL_API_TIMEOUT)
+        while True:
+            params = {
+                "molecule_chembl_id__in": ids_param,
+                "only": "molecule_chembl_id,pref_name,molecule_properties,molecule_structures",
+                "limit": CHEMBL_MAX_LIMIT,
+                "offset": offset
+            }
 
-        if data is None:
-            logger.error(f"REST API molecule batch fetch failed at offset {offset}")
-            break
+            data = _rest_api_get("molecule", params, timeout=CHEMBL_API_TIMEOUT)
 
-        molecules = _get_response_data(data, 'molecule')
-        if not molecules:
-            break
+            if data is None:
+                logger.error(f"REST API molecule batch fetch failed at chunk {chunk_idx}, offset {offset}")
+                break
 
-        all_molecules.extend(molecules)
+            molecules = _get_response_data(data, 'molecule')
+            if not molecules:
+                break
+
+            all_molecules.extend(molecules)
+
+            if len(molecules) < CHEMBL_MAX_LIMIT:
+                break
+            offset += CHEMBL_MAX_LIMIT
 
         if progress_callback:
-            total = data.get('page_meta', {}).get('total_count', 0)
-            if total > 0:
-                progress = min(0.9, 0.1 + 0.8 * (offset + len(molecules)) / total)
-                progress_callback(progress, f"Fetched {len(all_molecules)}/{total} molecules...")
-
-        if len(molecules) < CHEMBL_MAX_LIMIT:
-            break
-        offset += CHEMBL_MAX_LIMIT
+            progress = 0.1 + 0.8 * ((chunk_idx + 1) / total_chunks)
+            progress_callback(progress, f"Processed chunk {chunk_idx + 1}/{total_chunks}...")
 
     # Convert to dict keyed by ChEMBL ID
     result = {}
@@ -566,7 +587,7 @@ def rest_api_fetch_molecules_batch(
     if progress_callback:
         progress_callback(1.0, f"REST API batch: fetched {len(result)} molecules")
 
-    logger.info(f"REST API batch molecule fetch: {len(result)} molecules for {len(chembl_ids)} IDs")
+    logger.info(f"REST API batch molecule fetch: {len(result)} molecules for {total_ids} IDs ({total_chunks} chunks)")
     return result
 
 
@@ -602,7 +623,9 @@ def rest_api_fetch_targets_batch(
     progress_callback: Optional[ProgressCallback] = None
 ) -> Dict[str, str]:
     """
-    Fetch target names for multiple ChEMBL Target IDs using REST API batch query.
+    Fetch target names for multiple ChEMBL Target IDs using REST API batch query with chunking.
+
+    Automatically chunks large ID lists to avoid URL length violations.
 
     Args:
         target_chembl_ids: List of ChEMBL Target IDs
@@ -616,42 +639,51 @@ def rest_api_fetch_targets_batch(
 
     # Remove duplicates
     unique_ids = list(dict.fromkeys(target_chembl_ids))
-    ids_param = ",".join(unique_ids)
+    total_ids = len(unique_ids)
+
+    # Chunk IDs to avoid URL length violations
+    id_chunks = [
+        unique_ids[i:i + MAX_IDS_PER_REQUEST]
+        for i in range(0, total_ids, MAX_IDS_PER_REQUEST)
+    ]
+    total_chunks = len(id_chunks)
+
     all_targets = []
-    offset = 0
 
     if progress_callback:
-        progress_callback(0.1, f"Fetching targets via REST API batch...")
+        progress_callback(0.1, f"Fetching targets for {total_ids} IDs in {total_chunks} chunks...")
 
-    while True:
-        params = {
-            "target_chembl_id__in": ids_param,
-            "only": "target_chembl_id,pref_name",
-            "limit": CHEMBL_MAX_LIMIT,
-            "offset": offset
-        }
+    for chunk_idx, chunk_ids in enumerate(id_chunks):
+        ids_param = ",".join(chunk_ids)
+        offset = 0
 
-        data = _rest_api_get("target", params, timeout=CHEMBL_API_TIMEOUT)
+        while True:
+            params = {
+                "target_chembl_id__in": ids_param,
+                "only": "target_chembl_id,pref_name",
+                "limit": CHEMBL_MAX_LIMIT,
+                "offset": offset
+            }
 
-        if data is None:
-            logger.error(f"REST API target batch fetch failed at offset {offset}")
-            break
+            data = _rest_api_get("target", params, timeout=CHEMBL_API_TIMEOUT)
 
-        targets = _get_response_data(data, 'target')
-        if not targets:
-            break
+            if data is None:
+                logger.error(f"REST API target batch fetch failed at chunk {chunk_idx}, offset {offset}")
+                break
 
-        all_targets.extend(targets)
+            targets = _get_response_data(data, 'target')
+            if not targets:
+                break
+
+            all_targets.extend(targets)
+
+            if len(targets) < CHEMBL_MAX_LIMIT:
+                break
+            offset += CHEMBL_MAX_LIMIT
 
         if progress_callback:
-            total = data.get('page_meta', {}).get('total_count', 0)
-            if total > 0:
-                progress = min(0.9, 0.1 + 0.8 * (offset + len(targets)) / total)
-                progress_callback(progress, f"Fetched {len(all_targets)}/{total} targets...")
-
-        if len(targets) < CHEMBL_MAX_LIMIT:
-            break
-        offset += CHEMBL_MAX_LIMIT
+            progress = 0.1 + 0.8 * ((chunk_idx + 1) / total_chunks)
+            progress_callback(progress, f"Processed chunk {chunk_idx + 1}/{total_chunks}...")
 
     # Convert to dict keyed by Target ChEMBL ID
     result = {}
@@ -663,7 +695,7 @@ def rest_api_fetch_targets_batch(
     if progress_callback:
         progress_callback(1.0, f"REST API batch: fetched {len(result)} targets")
 
-    logger.info(f"REST API batch target fetch: {len(result)} targets for {len(unique_ids)} IDs")
+    logger.info(f"REST API batch target fetch: {len(result)} targets for {total_ids} IDs ({total_chunks} chunks)")
     return result
 
 
@@ -672,10 +704,12 @@ def rest_api_fetch_drug_indications_batch(
     progress_callback: Optional[ProgressCallback] = None
 ) -> List[Dict]:
     """
-    Fetch drug indications using batch REST API query.
+    Fetch drug indications using batch REST API query with chunking.
 
     This is 13.7x FASTER than sequential library calls (0.59s vs 8.10s for 9 IDs).
     Uses molecule_chembl_id__in parameter for batch query.
+
+    Automatically chunks large ID lists to avoid URL length violations.
 
     Args:
         chembl_ids: List of ChEMBL IDs
@@ -687,46 +721,57 @@ def rest_api_fetch_drug_indications_batch(
     if not chembl_ids:
         return []
 
-    ids_param = ",".join(chembl_ids)
     all_indications = []
-    offset = 0
+    total_ids = len(chembl_ids)
+    chunks_processed = 0
+
+    # Chunk IDs to avoid URL length violations
+    id_chunks = [
+        chembl_ids[i:i + MAX_IDS_PER_REQUEST]
+        for i in range(0, total_ids, MAX_IDS_PER_REQUEST)
+    ]
+    total_chunks = len(id_chunks)
 
     if progress_callback:
-        progress_callback(0.1, f"Fetching drug indications via REST API batch...")
+        progress_callback(0.1, f"Fetching drug indications for {total_ids} compounds in {total_chunks} chunks...")
 
-    while True:
-        params = {
-            "molecule_chembl_id__in": ids_param,
-            "limit": CHEMBL_MAX_LIMIT,
-            "offset": offset
-        }
+    for chunk_idx, chunk_ids in enumerate(id_chunks):
+        ids_param = ",".join(chunk_ids)
+        offset = 0
 
-        data = _rest_api_get("drug_indication", params, timeout=CHEMBL_API_TIMEOUT)
+        while True:
+            params = {
+                "molecule_chembl_id__in": ids_param,
+                "limit": CHEMBL_MAX_LIMIT,
+                "offset": offset
+            }
 
-        if data is None:
-            logger.error(f"REST API drug_indication batch fetch failed at offset {offset}")
-            break
+            data = _rest_api_get("drug_indication", params, timeout=CHEMBL_API_TIMEOUT)
 
-        indications = _get_response_data(data, 'drug_indication')
-        if not indications:
-            break
+            if data is None:
+                logger.error(f"REST API drug_indication batch fetch failed at chunk {chunk_idx}, offset {offset}")
+                break
 
-        all_indications.extend(indications)
+            indications = _get_response_data(data, 'drug_indication')
+            if not indications:
+                break
+
+            all_indications.extend(indications)
+
+            if len(indications) < CHEMBL_MAX_LIMIT:
+                break
+            offset += CHEMBL_MAX_LIMIT
+
+        chunks_processed += 1
 
         if progress_callback:
-            total = data.get('page_meta', {}).get('total_count', 0)
-            if total > 0:
-                progress = min(0.9, 0.1 + 0.8 * (offset + len(indications)) / total)
-                progress_callback(progress, f"Fetched {offset + len(indications)}/{total} indications...")
-
-        if len(indications) < CHEMBL_MAX_LIMIT:
-            break
-        offset += CHEMBL_MAX_LIMIT
+            progress = 0.1 + 0.8 * (chunks_processed / total_chunks)
+            progress_callback(progress, f"Processed chunk {chunks_processed}/{total_chunks}...")
 
     if progress_callback:
         progress_callback(1.0, f"REST API batch: fetched {len(all_indications)} drug indications")
 
-    logger.info(f"REST API batch drug_indication fetch: {len(all_indications)} indications for {len(chembl_ids)} compounds")
+    logger.info(f"REST API batch drug_indication fetch: {len(all_indications)} indications for {total_ids} compounds ({total_chunks} chunks)")
     return all_indications
 
 
@@ -1090,7 +1135,7 @@ def get_chembl_ids(smiles: str, similarity_threshold: int = 90, max_retries: int
                 _similarity_search_with_timeout, smiles, similarity_threshold
             )
             result = future.result(timeout=SIMILARITY_SEARCH_TIMEOUT)
-            if result:  # Library succeeded
+            if result is not None:  # Library succeeded (empty list is valid - no similar compounds)
                 return result
 
         except FuturesTimeoutError:
@@ -1114,7 +1159,7 @@ def get_chembl_ids(smiles: str, similarity_threshold: int = 90, max_retries: int
     logger.info("Library similarity search failed, trying REST API fallback...")
     try:
         result = rest_api_similarity_search(smiles, similarity_threshold)
-        if result:
+        if result is not None:  # Empty list is valid - no similar compounds found
             logger.info(f"REST API similarity search successful: {len(result)} compounds found")
             return result
     except Exception as e:

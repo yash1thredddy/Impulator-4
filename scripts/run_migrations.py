@@ -51,14 +51,25 @@ def run_migrations(skip_sync: bool = False, sync_only: bool = False) -> bool:
     settings.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Download latest database from Azure first (if configured)
+    # CRITICAL: If download fails, we must not proceed to avoid data loss
     if is_azure_configured() and not sync_only:
         print("📥 Downloading database from Azure...")
         try:
-            download_db_from_azure()
-            print("✓ Database downloaded from Azure")
+            download_success = download_db_from_azure()
+            if download_success:
+                print("✓ Database downloaded from Azure")
+            else:
+                # download_db_from_azure returns False on actual errors (not "blob not found")
+                # Proceeding would risk overwriting production data with a stale/empty database
+                print("✗ Failed to download database from Azure")
+                print("  Aborting to prevent potential data loss.")
+                print("  If this is a fresh deployment, use --no-sync to skip Azure download.")
+                return False
         except Exception as e:
-            print(f"⚠️ Warning: Could not download from Azure: {e}")
-            # Continue anyway - might be first deployment
+            print(f"✗ Azure download error: {e}")
+            print("  Aborting to prevent potential data loss.")
+            print("  If this is a fresh deployment, use --no-sync to skip Azure download.")
+            return False
 
     # Run migrations (unless sync_only)
     if not sync_only:

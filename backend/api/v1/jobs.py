@@ -114,6 +114,77 @@ def get_next_version_name(db: Session, base_name: str) -> str:
     return f"{true_base}_v{next_version}"
 
 
+def get_next_version_names_bulk(db: Session, compound_names: List[str]) -> Dict[str, str]:
+    """
+    Calculate next available version names for multiple compounds in a single query.
+
+    This is the bulk-optimized version of get_next_version_name() that avoids
+    N+1 query issues. For 1000 compounds, this performs 1 query instead of 1000.
+
+    Args:
+        db: Database session
+        compound_names: List of compound names to get versions for
+
+    Returns:
+        Dict mapping original compound name to its next version name
+    """
+    import re
+    from sqlalchemy import or_
+
+    if not compound_names:
+        return {}
+
+    # Extract true base names (strip any existing _vN suffix)
+    version_pattern = re.compile(r'^(.+?)(_v(\d+))?$')
+    name_to_base = {}  # original_name -> true_base
+
+    for name in compound_names:
+        match = version_pattern.match(name)
+        true_base = match.group(1) if match else name
+        name_to_base[name] = true_base
+
+    # Get unique base names
+    unique_bases = list(set(name_to_base.values()))
+
+    # Build OR conditions for all base names (single query)
+    # Using LIKE for each base to catch versioned names
+    like_conditions = [Compound.compound_name.like(f"{base}%") for base in unique_bases]
+
+    # Single query to get all matching compound names
+    all_existing = db.query(Compound.compound_name).filter(
+        or_(*like_conditions)
+    ).all()
+
+    existing_names = {row[0] for row in all_existing}
+
+    # Compute max version for each base name
+    base_max_versions = {base: 1 for base in unique_bases}  # Default to 1
+
+    for base in unique_bases:
+        suffix_pattern = re.compile(rf'^{re.escape(base)}(_v(\d+))?$')
+
+        for name in existing_names:
+            match = suffix_pattern.match(name)
+            if match:
+                if match.group(2):
+                    # Has version suffix like _v2, _v3
+                    version = int(match.group(2))
+                    base_max_versions[base] = max(base_max_versions[base], version)
+                else:
+                    # Original name (no suffix) counts as version 1
+                    base_max_versions[base] = max(base_max_versions[base], 1)
+
+    # Build result dict
+    result = {}
+    for original_name in compound_names:
+        true_base = name_to_base[original_name]
+        next_version = base_max_versions[true_base] + 1
+        result[original_name] = f"{true_base}_v{next_version}"
+
+    logger.debug(f"Bulk version names: computed {len(result)} versions in 1 query")
+    return result
+
+
 # Rate limiting configuration
 RATE_LIMIT_WINDOW_SECONDS = 60  # 1 minute window
 RATE_LIMIT_MAX_JOBS = 10  # Max 10 single jobs per minute per session
@@ -637,10 +708,8 @@ async def check_duplicates(
         f"{len(structure_matches)} structure matches, {len(new)} new"
     )
 
-    # Compute suggested version names for existing compounds (from full database state)
-    suggested_versions = {}
-    for compound_name in existing:
-        suggested_versions[compound_name] = get_next_version_name(db, compound_name)
+    # Compute suggested version names for existing compounds (bulk query - avoids N+1)
+    suggested_versions = get_next_version_names_bulk(db, existing) if existing else {}
 
     return CheckDuplicatesResponse(
         existing=existing,
@@ -777,28 +846,39 @@ async def create_batch_job(
             jobs.append(_job_to_response(job))
 
             # Job creation succeeded - NOW safe to delete old data for replace action
+            # Cleanup failures are warnings, not job creation failures
             if pending_deletion:
                 old_entry_id = pending_deletion['entry_id']
                 existing_compound = pending_deletion['compound']
 
-                # Delete from Azure (UUID-based storage only)
-                if old_entry_id:
-                    delete_result_from_azure_by_entry_id(old_entry_id)
+                try:
+                    # Delete from Azure (UUID-based storage only)
+                    if old_entry_id:
+                        delete_result_from_azure_by_entry_id(old_entry_id)
 
-                    # Delete local ZIP if exists (UUID-based path)
-                    prefix = old_entry_id[:2].lower()
-                    local_zip = settings.RESULTS_DIR / prefix / f"{old_entry_id}.zip"
-                    if local_zip.exists():
-                        try:
-                            local_zip.unlink()
-                            logger.debug(f"Deleted local result for batch replace: {local_zip}")
-                        except Exception as e:
-                            logger.warning(f"Failed to delete local result: {e}")
+                        # Delete local ZIP if exists (UUID-based path)
+                        prefix = old_entry_id[:2].lower()
+                        local_zip = settings.RESULTS_DIR / prefix / f"{old_entry_id}.zip"
+                        if local_zip.exists():
+                            try:
+                                local_zip.unlink()
+                                logger.debug(f"Deleted local result for batch replace: {local_zip}")
+                            except Exception as e:
+                                logger.warning(f"Failed to delete local result: {e}")
 
-                # Delete from database
-                db.delete(existing_compound)
-                db.commit()
-                logger.info(f"Batch replace: deleted existing compound '{compound_name}' (entry_id={old_entry_id})")
+                    # Delete from database
+                    db.delete(existing_compound)
+                    db.commit()
+                    logger.info(f"Batch replace: deleted existing compound '{compound_name}' (entry_id={old_entry_id})")
+                except Exception as cleanup_err:
+                    # Job was created successfully - cleanup failure is a warning, not a job failure
+                    # The new job will process correctly; old data may remain as orphan
+                    logger.warning(
+                        f"Batch replace cleanup failed for '{compound_name}' (job created successfully): {cleanup_err}"
+                    )
+                    db.rollback()  # Rollback the failed deletion transaction
+
+                # Always count as replaced since job was created
                 replaced.append(compound_name)
 
         except Exception as e:

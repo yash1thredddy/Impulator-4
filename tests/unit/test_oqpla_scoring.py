@@ -328,8 +328,8 @@ class TestOQPLAPhase2NewWeights:
         assert abs(total_weight - 1.0) < 0.001, f"Weights should sum to 1.0, got {total_weight}"
 
         # Verify OQPLA scores are in valid range [0, 1]
-        for i, score in enumerate(result['OQPLA_Score']):
-            assert 0.0 <= score <= 1.0, f"Row {i}: OQPLA_Score should be in [0,1], got {score}"
+        for i, score in enumerate(result['OQPLA_Final_Score']):
+            assert 0.0 <= score <= 1.0, f"Row {i}: OQPLA_Final_Score should be in [0,1], got {score}"
 
 
 class TestQEDMultiplierNewFormula:

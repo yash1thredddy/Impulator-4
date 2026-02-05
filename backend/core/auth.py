@@ -1,15 +1,23 @@
-"""Session validation for API endpoints.
+"""Session and admin authentication for API endpoints.
 
-Provides session ID validation to ensure only valid UUID-formatted
-session IDs are accepted, preventing injection attacks.
+Provides:
+- Session ID validation to ensure only valid UUID-formatted session IDs are accepted
+- Admin API key authentication for sensitive endpoints (migrations, etc.)
 """
 import re
 import uuid
+import hmac
 import logging
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Security
+from fastapi.security import APIKeyHeader
 from typing import Optional
 
+from backend.config import settings
+
 logger = logging.getLogger(__name__)
+
+# Admin API key header
+admin_api_key_header = APIKeyHeader(name="X-Admin-API-Key", auto_error=False)
 
 # Valid session ID format: UUID v4
 SESSION_ID_PATTERN = re.compile(
@@ -64,3 +72,50 @@ def truncate_session_id(session_id: Optional[str]) -> str:
     if not session_id:
         return "unknown"
     return f"{session_id[:8]}..."
+
+
+def verify_admin_api_key(
+    api_key: Optional[str] = Security(admin_api_key_header)
+) -> bool:
+    """Verify admin API key for protected endpoints.
+
+    This dependency should be used on sensitive admin endpoints like
+    database migrations, cache clearing, etc.
+
+    Args:
+        api_key: API key from X-Admin-API-Key header
+
+    Returns:
+        True if valid
+
+    Raises:
+        HTTPException: If API key is missing, not configured, or invalid
+    """
+    configured_key = settings.ADMIN_API_KEY
+
+    # Check if admin key is configured
+    if not configured_key:
+        logger.error("Admin API key not configured - admin endpoints disabled")
+        raise HTTPException(
+            status_code=503,
+            detail="Admin endpoints are disabled. Configure ADMIN_API_KEY to enable."
+        )
+
+    # Check if key was provided
+    if not api_key:
+        logger.warning("Admin endpoint accessed without API key")
+        raise HTTPException(
+            status_code=401,
+            detail="Admin API key required. Provide X-Admin-API-Key header."
+        )
+
+    # Constant-time comparison to prevent timing attacks
+    if not hmac.compare_digest(api_key, configured_key):
+        logger.warning("Invalid admin API key attempted")
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid admin API key."
+        )
+
+    logger.info("Admin API key verified successfully")
+    return True

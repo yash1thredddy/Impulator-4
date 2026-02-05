@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     REQUIRE_SESSION_VALIDATION: bool = True  # Validate session IDs
     SESSION_TOKEN_EXPIRY: int = 86400  # 24 hours
     MAX_CONCURRENT_SESSIONS: int = 10000  # Rate limiter max sessions
+    ADMIN_API_KEY: str = ""  # Required for admin endpoints (migrate, etc.)
 
     # Rate limiting
     RATE_LIMIT_ENABLED: bool = True

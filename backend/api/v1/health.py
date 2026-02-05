@@ -22,6 +22,7 @@ from backend.core.database import get_db
 from backend.core.executor import job_executor
 from backend.core.azure_sync import is_azure_configured
 from backend.core.metrics import metrics
+from backend.core.auth import verify_admin_api_key
 from backend.models.schemas import HealthResponse, ExecutorStats
 
 logger = logging.getLogger(__name__)
@@ -197,9 +198,14 @@ async def get_metrics() -> Dict[str, Any]:
 
 
 @router.post("/migrate")
-async def run_migrations(db: Session = Depends(get_db)) -> Dict[str, Any]:
+async def run_migrations(
+    db: Session = Depends(get_db),
+    _admin: bool = Depends(verify_admin_api_key)
+) -> Dict[str, Any]:
     """
     Run database migrations and sync to Azure.
+
+    **Requires admin authentication via X-Admin-API-Key header.**
 
     This endpoint:
     1. Runs pending database migrations
