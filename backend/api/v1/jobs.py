@@ -15,7 +15,7 @@ import logging
 import time
 import threading
 from collections import defaultdict
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Header
 from sqlalchemy.orm import Session
