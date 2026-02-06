@@ -156,8 +156,8 @@ COLOR_SCALES = [
     'Spectral',
 ]
 
-# O[Q/P/L]A Score classifications
-OQPLA_CLASSIFICATIONS = {
+# IMP Score classifications
+IMP_SCORE_CLASSIFICATIONS = {
     'Exceptional IMP': (0.9, 1.0),
     'Strong IMP': (0.7, 0.9),
     'Moderate IMP': (0.5, 0.7),

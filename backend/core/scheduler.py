@@ -182,6 +182,7 @@ class JobScheduler:
                         smiles=smiles,
                         similarity_threshold=params.get('similarity_threshold', 90),
                         activity_types=params.get('activity_types', []),
+                        author_name=params.get('author_name'),
                     )
                     logger.info(f"Scheduler claimed and submitted job {job_id}")
                     work_done = True

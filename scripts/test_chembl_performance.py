@@ -28,7 +28,7 @@ Run: python scripts/test_chembl_performance.py
 import time
 import logging
 import sys
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
 

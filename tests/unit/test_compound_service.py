@@ -132,7 +132,8 @@ class TestProcessCompoundJobWrapper:
                 compound_name="Aspirin",
                 smiles="CC(=O)OC1=CC=CC=C1C(=O)O",
                 similarity_threshold=90,
-                activity_types=['IC50', 'Ki']
+                activity_types=['IC50', 'Ki'],
+                author_name=None
             )
 
             mock_method.assert_called_once_with(
@@ -140,5 +141,6 @@ class TestProcessCompoundJobWrapper:
                 compound_name="Aspirin",
                 smiles="CC(=O)OC1=CC=CC=C1C(=O)O",
                 similarity_threshold=90,
-                activity_types=['IC50', 'Ki']
+                activity_types=['IC50', 'Ki'],
+                author_name=None
             )

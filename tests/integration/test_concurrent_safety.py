@@ -61,8 +61,11 @@ def client_with_db(test_engine, mock_azure):
             session.close()
 
     app.dependency_overrides[get_db] = override_get_db
-    client = TestClient(app)
-    yield client
+
+    # Mock the scheduler to prevent background job processing after test teardown
+    with patch('backend.core.scheduler.job_scheduler.trigger'):
+        client = TestClient(app)
+        yield client
 
     app.dependency_overrides.clear()
     db_module.engine = original_engine
@@ -101,6 +104,9 @@ class TestConcurrentJobCreation:
         app.dependency_overrides[get_db] = override_get_db
 
         try:
+            # Mock the scheduler to prevent background job processing after test teardown
+            scheduler_patch = patch('backend.core.scheduler.job_scheduler.trigger')
+            scheduler_patch.start()
             client = TestClient(app)
             results = []
             job_ids = []
@@ -112,6 +118,7 @@ class TestConcurrentJobCreation:
                         "/api/v1/jobs",
                         json={
                             "compound_name": f"TestCompound{i}",
+                            "author_name": "Test Author",
                             "smiles": "CCO",
                             "similarity_threshold": 90
                         },
@@ -155,6 +162,7 @@ class TestConcurrentJobCreation:
                 session.close()
 
         finally:
+            scheduler_patch.stop()
             app.dependency_overrides.clear()
             db_module.engine = original_engine
             db_module.SessionLocal = original_session_local
@@ -235,6 +243,7 @@ class TestRateLimiterUnderLoad:
                 "/api/v1/jobs",
                 json={
                     "compound_name": f"BurstTest{i}",
+                    "author_name": "Test Author",
                     "smiles": "CCO",
                     "similarity_threshold": 90
                 },
@@ -262,6 +271,7 @@ class TestRateLimiterUnderLoad:
                 "/api/v1/jobs",
                 json={
                     "compound_name": f"Session1Test{i}",
+                    "author_name": "Test Author",
                     "smiles": "CCO",
                     "similarity_threshold": 90
                 },
@@ -275,6 +285,7 @@ class TestRateLimiterUnderLoad:
                 "/api/v1/jobs",
                 json={
                     "compound_name": f"Session2Test{i}",
+                    "author_name": "Test Author",
                     "smiles": "CCO",
                     "similarity_threshold": 90
                 },

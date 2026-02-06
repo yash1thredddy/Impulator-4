@@ -48,6 +48,7 @@ from backend.models.schemas import (
 )
 from backend.services.job_service import job_service, generate_inchikey
 from backend.models.database import Compound, DeletedCompound, Job
+from backend.api.v1.compounds import _handle_children_before_delete
 from backend.core.azure_sync import delete_result_from_azure_by_entry_id
 from backend.core.audit import (
     log_rate_limit_exceeded,
@@ -57,6 +58,48 @@ from backend.core.audit import (
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Default activity types (matches compound_service.py defaults)
+_DEFAULT_ACTIVITY_TYPES = "EC50,IC50,Kd,Ki"
+
+
+def _normalize_activity_types(activity_types: Optional[List[str]]) -> str:
+    """Normalize a list of activity types to sorted comma-separated string for comparison."""
+    if not activity_types:
+        return _DEFAULT_ACTIVITY_TYPES
+    return ",".join(sorted(at.strip() for at in activity_types))
+
+
+def _normalize_activity_types_str(stored: Optional[str]) -> str:
+    """Normalize a stored comma-separated activity_types string for comparison."""
+    if not stored:
+        return _DEFAULT_ACTIVITY_TYPES
+    return ",".join(sorted(at.strip() for at in stored.split(",")))
+
+
+def _compute_config_match(
+    existing: Compound,
+    submitted_threshold: int,
+    submitted_activity_types: str,
+) -> str:
+    """Compare existing compound's config with submitted config.
+
+    Returns one of:
+    - 'identical': Same threshold AND same activity types
+    - 'different_threshold': Different threshold, same activity types
+    - 'different_activities': Same threshold, different activity types
+    - 'different_both': Different threshold AND different activity types
+    """
+    threshold_same = (existing.similarity_threshold or 90) == submitted_threshold
+    at_same = _normalize_activity_types_str(existing.activity_types) == submitted_activity_types
+
+    if threshold_same and at_same:
+        return "identical"
+    elif not threshold_same and at_same:
+        return "different_threshold"
+    elif threshold_same and not at_same:
+        return "different_activities"
+    return "different_both"
 
 
 def get_next_version_name(db: Session, base_name: str) -> str:
@@ -411,43 +454,103 @@ async def create_job(
     # Generate InChIKey for duplicate detection
     inchikey = generate_inchikey(request.smiles) if request.smiles else None
 
-    # Helper function to build duplicate response
-    def _build_duplicate_response(existing_compound: Compound) -> DuplicateFoundResponse:
+    # Pre-compute submitted config for comparison
+    submitted_threshold = request.similarity_threshold or 90
+    submitted_at = _normalize_activity_types(request.activity_types)
+
+    # Helper function to build duplicate response with config comparison
+    def _build_duplicate_response(
+        existing_compound: Compound,
+        config_match: str,
+    ) -> DuplicateFoundResponse:
         name_matches = existing_compound.compound_name.lower().strip() == request.compound_name.lower().strip()
         duplicate_type = "exact" if name_matches else "structure_only"
 
         # Calculate the next available version name for duplicates
-        # e.g., if 'Quercetin' and 'Quercetin_v2' exist, suggest 'Quercetin_v3'
         suggested_name = get_next_version_name(db, existing_compound.compound_name)
 
-        logger.info(f"Duplicate found: {request.compound_name} matches {existing_compound.compound_name} (InChIKey: {inchikey[:14]}...), suggested: {suggested_name}")
+        # Build config diff for non-identical configs
+        config_diff = None
+        if config_match != "identical":
+            config_diff = {
+                "similarity_threshold": {
+                    "existing": existing_compound.similarity_threshold or 90,
+                    "submitted": submitted_threshold,
+                },
+                "activity_types": {
+                    "existing": _normalize_activity_types_str(existing_compound.activity_types),
+                    "submitted": submitted_at,
+                },
+            }
+
+        logger.info(
+            f"Duplicate found: {request.compound_name} matches "
+            f"{existing_compound.compound_name} (InChIKey: {inchikey[:14]}..., "
+            f"config: {config_match}), suggested: {suggested_name}"
+        )
 
         return DuplicateFoundResponse(
             status="duplicate_found",
             duplicate_type=duplicate_type,
+            config_match=config_match,
             existing_compound=ExistingCompoundInfo(
                 entry_id=existing_compound.entry_id,
                 compound_name=existing_compound.compound_name,
                 inchikey=existing_compound.inchikey,
                 processed_at=existing_compound.processed_at.isoformat() if existing_compound.processed_at else None,
+                similarity_threshold=existing_compound.similarity_threshold,
+                activity_types=_normalize_activity_types_str(existing_compound.activity_types),
             ),
             submitted={
                 "compound_name": request.compound_name,
                 "inchikey": inchikey,
                 "smiles": request.smiles,
+                "similarity_threshold": submitted_threshold,
+                "activity_types": submitted_at,
             },
             suggested_name=suggested_name,
+            config_diff=config_diff,
         )
+
+    def _find_best_duplicate_match() -> Optional[DuplicateFoundResponse]:
+        """Find the best matching existing compound for duplicate detection.
+
+        Prioritizes: exact config match > first non-duplicate > any match.
+        """
+        if not inchikey:
+            return None
+
+        existing_compounds = db.query(Compound).filter(
+            Compound.inchikey == inchikey
+        ).all()
+
+        if not existing_compounds:
+            return None
+
+        # Find best match: exact config > first non-duplicate > first overall
+        exact_config_match = None
+        first_non_duplicate = None
+
+        for comp in existing_compounds:
+            config = _compute_config_match(comp, submitted_threshold, submitted_at)
+            if config == "identical":
+                exact_config_match = comp
+                break
+            if not comp.is_duplicate and first_non_duplicate is None:
+                first_non_duplicate = comp
+
+        match_compound = exact_config_match or first_non_duplicate or existing_compounds[0]
+        config_match = _compute_config_match(match_compound, submitted_threshold, submitted_at)
+        return _build_duplicate_response(match_compound, config_match)
 
     # Atomic check-and-create with retry for race condition handling
     # SQLite doesn't support FOR UPDATE, so we use retry logic instead
     max_retries = 3
     for attempt in range(max_retries):
-        # Check for duplicate by InChIKey
-        if inchikey:
-            existing = db.query(Compound).filter(Compound.inchikey == inchikey).first()
-            if existing:
-                return _build_duplicate_response(existing)
+        # Check for duplicate by InChIKey with config comparison
+        dup_response = _find_best_duplicate_match()
+        if dup_response:
+            return dup_response
 
         try:
             # No duplicate found - create job
@@ -473,10 +576,9 @@ async def create_job(
                 continue
 
             # On final attempt, check if duplicate was created
-            if inchikey:
-                existing = db.query(Compound).filter(Compound.inchikey == inchikey).first()
-                if existing:
-                    return _build_duplicate_response(existing)
+            dup_response = _find_best_duplicate_match()
+            if dup_response:
+                return dup_response
 
             # Re-raise if we still can't handle it
             logger.error(f"Failed to create job for {request.compound_name} after {max_retries} retries")
@@ -525,47 +627,63 @@ async def resolve_duplicate(
             compound_name=request.compound_name,
         )
 
-    # Handle REPLACE action - delete existing and create new
+    # Handle REPLACE action - defer deletion until job COMPLETES (prevents data loss if job fails)
     if request.action == DuplicateAction.REPLACE:
+        inherit_children_from = None
+        replace_entry_id = None
         if request.existing_entry_id:
             existing = db.query(Compound).filter(Compound.entry_id == request.existing_entry_id).first()
             if existing:
                 old_name = existing.compound_name
                 old_entry_id = existing.entry_id
+                replace_entry_id = old_entry_id
 
-                # Delete from Azure (UUID-based storage only)
-                if old_entry_id:
-                    delete_result_from_azure_by_entry_id(old_entry_id)
+                # Check if this main compound has children that need to be inherited
+                children = db.query(Compound).filter(
+                    Compound.duplicate_of == old_entry_id
+                ).all()
+                if children:
+                    inherit_children_from = old_entry_id
+                    logger.info(
+                        f"Compound '{old_name}' has {len(children)} children - "
+                        f"will inherit after replacement completes"
+                    )
 
-                # Delete local ZIP if exists (UUID-based path)
-                if old_entry_id:
-                    prefix = old_entry_id[:2].lower()
-                    local_zip = settings.RESULTS_DIR / prefix / f"{old_entry_id}.zip"
-                    if local_zip.exists():
-                        try:
-                            local_zip.unlink()
-                            logger.info(f"Deleted local result for replacement: {local_zip}")
-                        except Exception as e:
-                            logger.warning(f"Failed to delete local result: {e}")
+                logger.info(
+                    f"Replacement requested for '{old_name}' (entry_id={old_entry_id}) "
+                    f"with '{request.compound_name}' - deletion deferred until job completes"
+                )
 
-                # Delete from database
-                db.delete(existing)
-                db.commit()
-                logger.info(f"Deleted existing compound '{old_name}' (entry_id={old_entry_id}) for replacement with '{request.compound_name}'")
+        # Inherit the replaced compound's name (not the user-entered name)
+        # so "Replace Quercetin_v2" creates a new "Quercetin_v2", not "Quercetin"
+        if replace_entry_id and old_name:
+            compound_name = request.new_compound_name or old_name
+        else:
+            compound_name = request.new_compound_name or request.compound_name
 
-        # Use new_compound_name if provided (for exact duplicates where user wants to change name)
-        compound_name = request.new_compound_name or request.compound_name
+        # Create new job - store replace_entry_id so deletion happens on job completion
+        # If the job fails, the old compound remains intact
+        job_params = {
+            "compound_name": compound_name,
+            "author_name": request.author_name,
+            "smiles": request.smiles,
+            "similarity_threshold": request.similarity_threshold,
+            "activity_types": request.activity_types,
+        }
+        if inherit_children_from:
+            job_params["inherit_children_from"] = inherit_children_from
+        if replace_entry_id:
+            job_params["replace_entry_id"] = replace_entry_id
+            # Inherit duplicate metadata from the old compound so the replacement
+            # retains its duplicate status and parent link
+            if existing and existing.is_duplicate:
+                job_params["is_duplicate"] = True
+                job_params["duplicate_of"] = existing.duplicate_of
 
-        # Create new job
         job = job_service.create_job(
             db,
             JobType.SINGLE,
-            {
-                "compound_name": compound_name,
-                "smiles": request.smiles,
-                "similarity_threshold": request.similarity_threshold,
-                "activity_types": request.activity_types,
-            },
+            job_params,
             session_id=session_id,
         )
 
@@ -575,6 +693,23 @@ async def resolve_duplicate(
 
     # Handle DUPLICATE action - create with duplicate tag
     if request.action == DuplicateAction.DUPLICATE:
+        # Block duplicate action for identical configs (server-side validation)
+        if request.existing_entry_id:
+            existing = db.query(Compound).filter(
+                Compound.entry_id == request.existing_entry_id
+            ).first()
+            if existing:
+                submitted_at = _normalize_activity_types(request.activity_types)
+                config = _compute_config_match(
+                    existing, request.similarity_threshold or 90, submitted_at
+                )
+                if config == "identical":
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Cannot create duplicate with identical configuration. "
+                               "Use 'replace' to reprocess or 'skip' to keep existing.",
+                    )
+
         # Use new_compound_name if provided (for exact duplicates where user changes name)
         compound_name = request.new_compound_name or request.compound_name
 
@@ -584,6 +719,7 @@ async def resolve_duplicate(
             JobType.SINGLE,
             {
                 "compound_name": compound_name,
+                "author_name": request.author_name,
                 "smiles": request.smiles,
                 "similarity_threshold": request.similarity_threshold,
                 "activity_types": request.activity_types,
@@ -809,23 +945,40 @@ async def create_batch_job(
                 skipped_existing.append(compound_name)
                 continue
 
-            # Track data to delete AFTER successful job creation (prevents data loss on failure)
-            pending_deletion = None
+            # Defer deletion until job COMPLETES (not just creation) to prevent data loss
+            replace_entry_id = None
+            inherit_children_from = None
 
-            # If action is 'replace', prepare deletion but defer execution
+            # If action is 'replace', store reference for deferred deletion on job completion
             if compound_action == 'replace':
                 # Find existing compound to replace
                 existing = db.query(Compound).filter(Compound.compound_name == compound_name).first()
                 if existing:
-                    # Store deletion info - will execute AFTER job creation succeeds
-                    pending_deletion = {
-                        'entry_id': existing.entry_id,
-                        'compound': existing,
-                        'compound_name': compound_name
-                    }
+                    replace_entry_id = existing.entry_id
 
-            # Build job params - include duplicate metadata if marking as duplicate
+                    # Check if this main compound has children that need to be inherited
+                    if not existing.is_duplicate:
+                        children = db.query(Compound).filter(
+                            Compound.duplicate_of == existing.entry_id
+                        ).all()
+                        if children:
+                            inherit_children_from = existing.entry_id
+
+                    logger.info(
+                        f"Batch replace: deletion of '{compound_name}' (entry_id={replace_entry_id}) "
+                        f"deferred until replacement job completes"
+                    )
+
+            # Build job params - include duplicate/replace metadata
             job_params = compound.model_dump(exclude={"session_id", "duplicate_action", "original_compound_name"})
+            if inherit_children_from:
+                job_params["inherit_children_from"] = inherit_children_from
+            if replace_entry_id:
+                job_params["replace_entry_id"] = replace_entry_id
+                # Inherit duplicate metadata so replacement retains duplicate status
+                if existing and existing.is_duplicate:
+                    job_params["is_duplicate"] = True
+                    job_params["duplicate_of"] = existing.duplicate_of
             if compound_action == 'duplicate':
                 # Find existing compound to reference - use original_compound_name if provided
                 # (frontend sends new name in compound_name, original in original_compound_name)
@@ -845,40 +998,9 @@ async def create_batch_job(
             )
             jobs.append(_job_to_response(job))
 
-            # Job creation succeeded - NOW safe to delete old data for replace action
-            # Cleanup failures are warnings, not job creation failures
-            if pending_deletion:
-                old_entry_id = pending_deletion['entry_id']
-                existing_compound = pending_deletion['compound']
-
-                try:
-                    # Delete from Azure (UUID-based storage only)
-                    if old_entry_id:
-                        delete_result_from_azure_by_entry_id(old_entry_id)
-
-                        # Delete local ZIP if exists (UUID-based path)
-                        prefix = old_entry_id[:2].lower()
-                        local_zip = settings.RESULTS_DIR / prefix / f"{old_entry_id}.zip"
-                        if local_zip.exists():
-                            try:
-                                local_zip.unlink()
-                                logger.debug(f"Deleted local result for batch replace: {local_zip}")
-                            except Exception as e:
-                                logger.warning(f"Failed to delete local result: {e}")
-
-                    # Delete from database
-                    db.delete(existing_compound)
-                    db.commit()
-                    logger.info(f"Batch replace: deleted existing compound '{compound_name}' (entry_id={old_entry_id})")
-                except Exception as cleanup_err:
-                    # Job was created successfully - cleanup failure is a warning, not a job failure
-                    # The new job will process correctly; old data may remain as orphan
-                    logger.warning(
-                        f"Batch replace cleanup failed for '{compound_name}' (job created successfully): {cleanup_err}"
-                    )
-                    db.rollback()  # Rollback the failed deletion transaction
-
-                # Always count as replaced since job was created
+            # Deletion is deferred to job completion via replace_entry_id in job_params
+            # If the job fails, the old compound remains intact (no data loss)
+            if replace_entry_id:
                 replaced.append(compound_name)
 
         except Exception as e:

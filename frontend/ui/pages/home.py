@@ -7,6 +7,7 @@ Data flow:
 - Falls back to local/Azure storage for legacy compatibility
 """
 
+import html
 import logging
 from typing import Optional, List, Dict, Any
 
@@ -100,6 +101,8 @@ def render_compound_browser() -> None:
         # Sort by created_at descending (newest first)
         compounds = sorted(compounds, key=lambda x: x.get('created_at', ''), reverse=True)
 
+    select_mode = SessionState.get('compound_select_mode', False)
+
     # Show count
     st.caption(f"Showing {len(compounds)} compound(s)")
 
@@ -110,22 +113,134 @@ def render_compound_browser() -> None:
             st.info("No compounds yet. Click '+ New Analysis' to get started.")
         return
 
+    # Selection action bar (when in select mode)
+    if select_mode:
+        _render_selection_action_bar(compounds)
+
     # Render based on view mode
     view_mode = SessionState.get('compound_view_mode', 'Grid')
 
     if view_mode == "Grid":
-        clicked = render_compound_grid(compounds, columns=3)  # 3 columns for better sizing
+        clicked = render_compound_grid(compounds, columns=3, select_mode=select_mode)
     else:
-        clicked = render_compound_list(compounds)
+        clicked = render_compound_list(compounds, select_mode=select_mode)
 
-    # Handle navigation
-    if clicked:
+    # Handle navigation (only when not in select mode)
+    if clicked and not select_mode:
         SessionState.navigate_to_compound(
             clicked.get('compound_name'),
             entry_id=clicked.get('entry_id'),
             storage_path=clicked.get('storage_path')
         )
         st.rerun()
+
+
+def _render_selection_action_bar(compounds: List[Dict[str, Any]]) -> None:
+    """Render the selection action bar with Select All, Deselect All, and Delete Selected."""
+    # Collect entry_ids of all visible compounds
+    all_entry_ids = [c.get('entry_id') for c in compounds if c.get('entry_id')]
+
+    # Count currently selected compounds (from live checkbox state)
+    selected_ids = _get_selected_entry_ids(all_entry_ids)
+    selected_count = len(selected_ids)
+
+    # Check if we're in the confirmation stage
+    confirm_delete = SessionState.get('confirm_batch_delete', False)
+
+    if confirm_delete:
+        # Read from snapshot saved when "Delete Selected" was clicked
+        # (checkbox widget state may be lost across st.rerun())
+        snapshot_ids = SessionState.get('batch_delete_ids', [])
+        snapshot_names = SessionState.get('batch_delete_names', [])
+        snapshot_count = len(snapshot_ids)
+
+        st.warning(f"Are you sure you want to delete {snapshot_count} compound(s)? This cannot be undone.")
+
+        # List compound names being deleted
+        names_display = ", ".join(html.escape(n) for n in snapshot_names[:10])
+        if len(snapshot_names) > 10:
+            names_display += f" and {len(snapshot_names) - 10} more..."
+        st.markdown(f"**Compounds:** {names_display}", unsafe_allow_html=True)
+
+        confirm_col1, confirm_col2, _ = st.columns([1, 1, 3])
+        with confirm_col1:
+            if st.button("Confirm Delete", type="primary", use_container_width=True):
+                _execute_batch_delete(snapshot_ids)
+        with confirm_col2:
+            if st.button("Cancel Delete", use_container_width=True):
+                SessionState.set('confirm_batch_delete', False)
+                SessionState.set('batch_delete_ids', [])
+                SessionState.set('batch_delete_names', [])
+                st.rerun()
+    else:
+        # Show action bar
+        act_col1, act_col2, act_col3, act_col4 = st.columns([1, 1, 1, 2])
+
+        with act_col1:
+            if st.button("Select All", use_container_width=True):
+                for eid in all_entry_ids:
+                    st.session_state[f"select_{eid}"] = True
+                st.rerun()
+
+        with act_col2:
+            if st.button("Deselect All", use_container_width=True):
+                for eid in all_entry_ids:
+                    st.session_state[f"select_{eid}"] = False
+                st.rerun()
+
+        with act_col3:
+            delete_label = f"Delete Selected ({selected_count})"
+            if st.button(delete_label, type="primary", disabled=(selected_count == 0), use_container_width=True):
+                # Snapshot selected IDs and names before rerun
+                # (checkbox widget state doesn't survive st.rerun reliably)
+                selected_names = []
+                for c in compounds:
+                    if c.get('entry_id') in selected_ids:
+                        selected_names.append(c.get('compound_name', 'Unknown'))
+                SessionState.set('batch_delete_ids', list(selected_ids))
+                SessionState.set('batch_delete_names', selected_names)
+                SessionState.set('confirm_batch_delete', True)
+                st.rerun()
+
+        with act_col4:
+            if selected_count > 0:
+                st.caption(f"{selected_count} of {len(all_entry_ids)} selected")
+
+
+def _get_selected_entry_ids(all_entry_ids: List[str]) -> set:
+    """Get the set of currently selected entry IDs from session state."""
+    selected = set()
+    for eid in all_entry_ids:
+        if st.session_state.get(f"select_{eid}", False):
+            selected.add(eid)
+    return selected
+
+
+def _execute_batch_delete(entry_ids: List[str]) -> None:
+    """Execute batch deletion and show result."""
+    api_client = get_api_client()
+    result = api_client.delete_compounds_batch(entry_ids)
+
+    if result.success:
+        total_deleted = result.data.get('total_deleted', len(entry_ids)) if result.data else len(entry_ids)
+        st.success(f"Successfully deleted {total_deleted} compound(s)")
+        _exit_select_mode()
+        st.rerun()
+    else:
+        st.error(f"Failed to delete compounds: {result.error}")
+        SessionState.set('confirm_batch_delete', False)
+
+
+def _exit_select_mode() -> None:
+    """Exit selection mode and clear all selection state."""
+    SessionState.set('compound_select_mode', False)
+    SessionState.set('confirm_batch_delete', False)
+    SessionState.set('batch_delete_ids', [])
+    SessionState.set('batch_delete_names', [])
+    # Clear all selection checkboxes
+    keys_to_clear = [k for k in st.session_state if k.startswith("select_")]
+    for k in keys_to_clear:
+        del st.session_state[k]
 
 
 def _fetch_compounds() -> Optional[List[Dict[str, Any]]]:
@@ -159,7 +274,7 @@ def _fetch_compounds() -> Optional[List[Dict[str, Any]]]:
                     "total_activities": compound.get("total_activities", 0) or 0,
                     "num_outliers": compound.get("num_outliers", 0) or 0,
                     "qed": compound.get("qed", 0.0) or 0.0,
-                    "avg_oqpla_score": compound.get("avg_oqpla_score"),
+                    "imp_score": compound.get("imp_score"),
                     "is_duplicate": compound.get("is_duplicate", False),
                     "duplicate_of": compound.get("duplicate_of"),
                 })

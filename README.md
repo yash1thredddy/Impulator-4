@@ -1,15 +1,13 @@
 ---
 title: IMPs Navigator
-emoji: 🔬
-colorFrom: blue
-colorTo: blue
 sdk: docker
 app_port: 7860
-pinned: false
-license: mit
+license: other
 ---
 
 # 🔬 IMPs Navigator (Impulator 3)
+
+[![CI](https://github.com/yash1thredddy/Impulator-4/actions/workflows/ci.yml/badge.svg)](https://github.com/yash1thredddy/Impulator-4/actions/workflows/ci.yml) ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue) ![License](https://img.shields.io/badge/license-Proprietary-red)
 
 **Compound Library & Analysis Tool for better Insights**
 
@@ -35,7 +33,7 @@ streamlit run app.py
 ## 🧪 Key Features
 *   **Compound Analysis**: Automated retrieval of bioactivity data.
 *   **Efficiency Metrics**: Calculate SEI, BEI, NSEI, NBEI.
-*   **O[Q/P/L]A Scoring**: Multi-component scoring system for compound prioritization.
+*   **IMP Scoring**: Multi-component scoring system for compound prioritization.
 *   **Assay Interference Detection**: PAINS, aggregation, redox, fluorescence, thiol reactivity filters.
 *   **PDB Structural Evidence**: Integration with RCSB Protein Data Bank for validation.
 *   **Visualizations**: Interactive Plotly charts and 3D molecule viewing.

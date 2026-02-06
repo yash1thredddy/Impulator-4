@@ -92,10 +92,12 @@ def rebuild_compounds_table():
             duplicate_of VARCHAR(36),
             total_activities INTEGER DEFAULT 0,
             imp_candidates INTEGER DEFAULT 0,
-            avg_oqpla_score REAL,
+            imp_score REAL,
             similarity_threshold INTEGER DEFAULT 90,
             qed REAL,
             num_outliers INTEGER DEFAULT 0,
+            author_name VARCHAR(100),
+            activity_types TEXT,
             storage_path VARCHAR(500),
             processed_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
@@ -109,8 +111,9 @@ def rebuild_compounds_table():
         columns_to_copy = [
             'id', 'entry_id', 'compound_name', 'chembl_id', 'smiles',
             'inchikey', 'canonical_smiles', 'is_duplicate', 'duplicate_of',
-            'total_activities', 'imp_candidates', 'avg_oqpla_score',
+            'total_activities', 'imp_candidates', 'imp_score',
             'similarity_threshold', 'qed', 'num_outliers',
+            'author_name', 'activity_types',
             'storage_path', 'processed_at'
         ]
 

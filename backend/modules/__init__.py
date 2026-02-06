@@ -44,13 +44,13 @@ from backend.modules.outlier_detection import (
     filter_outliers,
 )
 
-# O[Q/P/L]A Scoring
-from backend.modules.oqpla_scoring import (
-    calculate_oqpla_phase1,
-    calculate_oqpla_phase2,
-    interpret_oqpla_score,
-    add_oqpla_interpretation,
-    get_oqpla_summary,
+# IMP Scoring
+from backend.modules.imp_scoring import (
+    calculate_imp_score_phase1,
+    calculate_imp_score_phase2,
+    interpret_imp_score,
+    add_imp_score_interpretation,
+    get_imp_score_summary,
     create_pdb_summary,
     create_detailed_pdb_summary,
 )
@@ -63,16 +63,25 @@ from backend.modules.config import (
     MAX_WORKERS,
 )
 
-# Assay Interference Filter (PAINS, etc.)
+# Assay Interference Filter (PAINS, BRENK, NIH, etc.)
 from backend.modules.assay_interference_filter import (
-    get_all_interference_flags,
+    InterferenceFlags,
+    calculate_interference_flags,
+    get_interference_flags_from_smiles,
+    get_interference_summary,
     check_pains_violations,
+    check_brenk_alerts,
+    check_nih_alerts,
     check_aggregator_risk,
-    check_redox_reactive,
-    check_fluorescence_interference,
     check_thiol_reactive,
-    get_detailed_interference_report,
-    calculate_assay_quality_score,
+    check_redox_active,
+    check_fluorescence_interference,
+    get_all_filter_matches,
+    FLAG_DESCRIPTIONS,
+    METHODOLOGY_REFERENCES,
+    get_methodology_citation,
+    get_methodology_doi,
+    get_all_methodology_references,
 )
 
 # Chemical Classifier
@@ -118,12 +127,12 @@ __all__ = [
     "get_outlier_summary",
     "calculate_z_scores",
     "filter_outliers",
-    # O[Q/P/L]A Scoring
-    "calculate_oqpla_phase1",
-    "calculate_oqpla_phase2",
-    "interpret_oqpla_score",
-    "add_oqpla_interpretation",
-    "get_oqpla_summary",
+    # IMP Scoring
+    "calculate_imp_score_phase1",
+    "calculate_imp_score_phase2",
+    "interpret_imp_score",
+    "add_imp_score_interpretation",
+    "get_imp_score_summary",
     "create_pdb_summary",
     "create_detailed_pdb_summary",
     # Configuration
@@ -132,14 +141,23 @@ __all__ = [
     "MAX_BATCH_SIZE",
     "MAX_WORKERS",
     # Assay Interference Filter
-    "get_all_interference_flags",
+    "InterferenceFlags",
+    "calculate_interference_flags",
+    "get_interference_flags_from_smiles",
+    "get_interference_summary",
     "check_pains_violations",
+    "check_brenk_alerts",
+    "check_nih_alerts",
     "check_aggregator_risk",
-    "check_redox_reactive",
-    "check_fluorescence_interference",
     "check_thiol_reactive",
-    "get_detailed_interference_report",
-    "calculate_assay_quality_score",
+    "check_redox_active",
+    "check_fluorescence_interference",
+    "get_all_filter_matches",
+    "FLAG_DESCRIPTIONS",
+    "METHODOLOGY_REFERENCES",
+    "get_methodology_citation",
+    "get_methodology_doi",
+    "get_all_methodology_references",
     # Chemical Classifier
     "get_complete_classification",
     "get_classyfire_classification",

@@ -77,6 +77,9 @@ def rebuild_compound_from_summary(db, entry_id: str, storage_path: str, summary:
     # Check if compound already exists
     existing = db.query(Compound).filter(Compound.entry_id == entry_id).first()
 
+    author_name = summary.get('author_name')
+    activity_types = summary.get('activity_types')
+
     if existing:
         # Update existing
         existing.compound_name = compound_name
@@ -86,10 +89,12 @@ def rebuild_compound_from_summary(db, entry_id: str, storage_path: str, summary:
         existing.chembl_id = summary.get('chembl_id', '')
         existing.total_activities = summary.get('total_activities', 0)
         existing.imp_candidates = summary.get('imp_candidates', 0)
-        existing.avg_oqpla_score = summary.get('avg_oqpla_score')
+        existing.imp_score = summary.get('imp_score')
         existing.similarity_threshold = similarity_threshold
         existing.qed = qed
         existing.num_outliers = num_outliers
+        existing.author_name = author_name
+        existing.activity_types = activity_types
         existing.storage_path = storage_path
         existing.processed_at = datetime.now(timezone.utc)
         logger.info(f"Updated: {compound_name} ({entry_id}) [threshold={similarity_threshold}%, qed={qed:.2f}, outliers={num_outliers}]")
@@ -104,10 +109,12 @@ def rebuild_compound_from_summary(db, entry_id: str, storage_path: str, summary:
             chembl_id=summary.get('chembl_id', ''),
             total_activities=summary.get('total_activities', 0),
             imp_candidates=summary.get('imp_candidates', 0),
-            avg_oqpla_score=summary.get('avg_oqpla_score'),
+            imp_score=summary.get('imp_score'),
             similarity_threshold=similarity_threshold,
             qed=qed,
             num_outliers=num_outliers,
+            author_name=author_name,
+            activity_types=activity_types,
             storage_path=storage_path,
             is_duplicate=False,
             duplicate_of=None,

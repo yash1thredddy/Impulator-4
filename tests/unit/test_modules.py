@@ -137,12 +137,12 @@ class TestOutlierDetection:
         assert 'Is_Efficiency_Outlier' in result.columns
 
 
-class TestOQPLAScoring:
-    """Tests for O[Q/P/L]A scoring."""
+class TestIMPScoring:
+    """Tests for IMP scoring."""
 
     def test_calculate_efficiency_outlier_score(self):
         """Test efficiency outlier score calculation."""
-        from backend.modules.oqpla_scoring import calculate_efficiency_outlier_score
+        from backend.modules.imp_scoring import calculate_efficiency_outlier_score
 
         df = pd.DataFrame({
             'SEI': [10.0, 15.0, 20.0],
@@ -157,7 +157,7 @@ class TestOQPLAScoring:
 
     def test_calculate_angle_score(self):
         """Test angle score calculation."""
-        from backend.modules.oqpla_scoring import calculate_angle_score
+        from backend.modules.imp_scoring import calculate_angle_score
 
         angles = pd.Series([45.0, 30.0, 60.0, 0.0, 90.0])
         scores = calculate_angle_score(angles)
@@ -168,22 +168,22 @@ class TestOQPLAScoring:
         assert scores.iloc[3] == 0.0
         assert scores.iloc[4] == 0.0
 
-    def test_interpret_oqpla_score(self):
-        """Test O[Q/P/L]A score interpretation."""
-        from backend.modules.oqpla_scoring import interpret_oqpla_score
+    def test_interpret_imp_score(self):
+        """Test IMP score interpretation."""
+        from backend.modules.imp_scoring import interpret_imp_score
 
         # Exceptional IMP
-        result = interpret_oqpla_score(0.95)
+        result = interpret_imp_score(0.95)
         assert result['classification'] == 'Exceptional IMP'
         assert result['priority'] == 1
 
         # Strong IMP
-        result = interpret_oqpla_score(0.75)
+        result = interpret_imp_score(0.75)
         assert result['classification'] == 'Strong IMP'
         assert result['priority'] == 2
 
         # Not IMP
-        result = interpret_oqpla_score(0.2)
+        result = interpret_imp_score(0.2)
         assert result['classification'] == 'Not IMP'
         assert result['priority'] is None
 
@@ -231,11 +231,11 @@ class TestModuleImports:
         assert hasattr(efficiency_metrics, 'calculate_sei')
         assert hasattr(efficiency_metrics, 'calculate_bei')
 
-    def test_import_oqpla_scoring(self):
-        """Test oqpla_scoring module imports."""
-        from backend.modules import oqpla_scoring
-        assert hasattr(oqpla_scoring, 'calculate_oqpla_phase1')
-        assert hasattr(oqpla_scoring, 'interpret_oqpla_score')
+    def test_import_imp_scoring(self):
+        """Test imp_scoring module imports."""
+        from backend.modules import imp_scoring
+        assert hasattr(imp_scoring, 'calculate_imp_score_phase1')
+        assert hasattr(imp_scoring, 'interpret_imp_score')
 
     def test_import_config(self):
         """Test config module imports."""

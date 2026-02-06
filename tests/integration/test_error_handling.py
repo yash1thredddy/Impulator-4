@@ -72,8 +72,11 @@ def client_with_db(test_engine, mock_azure):
             session.close()
 
     app.dependency_overrides[get_db] = override_get_db
-    client = TestClient(app)
-    yield client
+
+    # Mock the scheduler to prevent background job processing after test teardown
+    with patch('backend.core.scheduler.job_scheduler.trigger'):
+        client = TestClient(app)
+        yield client
 
     # Restore original values
     app.dependency_overrides.clear()
@@ -90,6 +93,7 @@ class TestInvalidInputHandling:
             "/api/v1/jobs",
             json={
                 "compound_name": "TestCompound",
+                "author_name": "Test Author",
                 "smiles": "invalid_smiles_XYZ123",
                 "similarity_threshold": 90
             }
@@ -105,6 +109,7 @@ class TestInvalidInputHandling:
             "/api/v1/jobs",
             json={
                 "compound_name": "",
+                "author_name": "Test Author",
                 "smiles": "CCO",
                 "similarity_threshold": 90
             }
@@ -131,6 +136,7 @@ class TestInvalidInputHandling:
             "/api/v1/jobs",
             json={
                 "compound_name": "Test",
+                "author_name": "Test Author",
                 "smiles": "CCO",
                 "similarity_threshold": 150  # Should be 0-100
             }
@@ -144,6 +150,7 @@ class TestInvalidInputHandling:
             "/api/v1/jobs",
             json={
                 "compound_name": "Test",
+                "author_name": "Test Author",
                 "smiles": "CCO",
                 "similarity_threshold": -10
             }
@@ -159,6 +166,7 @@ class TestInvalidInputHandling:
             "/api/v1/jobs",
             json={
                 "compound_name": long_name,
+                "author_name": "Test Author",
                 "smiles": "CCO",
                 "similarity_threshold": 90
             }
@@ -173,6 +181,7 @@ class TestInvalidInputHandling:
             "/api/v1/jobs",
             json={
                 "compound_name": "Test<script>alert('xss')</script>",
+                "author_name": "Test Author",
                 "smiles": "CCO",
                 "similarity_threshold": 90
             }
@@ -219,6 +228,7 @@ class TestAPIResponseCodes:
             "/api/v1/jobs",
             json={
                 "compound_name": "Test",
+                "author_name": "Test Author",
                 "smiles": "CCO",
                 "similarity_threshold": 90
             }
@@ -268,6 +278,7 @@ class TestMalformedRequests:
             "/api/v1/jobs",
             json={
                 "compound_name": "Test",
+                "author_name": "Test Author",
                 "smiles": "CCO",
                 "similarity_threshold": 90,
                 "unknown_field": "value",
@@ -404,6 +415,7 @@ class TestConcurrentRequests:
                     "/api/v1/jobs",
                     json={
                         "compound_name": f"Compound{i}",
+                        "author_name": "Test Author",
                         "smiles": "CCO",
                         "similarity_threshold": 90
                     },

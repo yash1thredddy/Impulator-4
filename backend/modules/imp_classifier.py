@@ -5,10 +5,10 @@ This module implements the logic for classifying compounds as IMP vs Non-IMP can
 
 Classification criteria:
 - IMP Candidate: Outlier_Count >= 2 (at least 2 efficiency metrics are outliers)
-- Confidence Level: Based on O[Q/P/L]A score
-  - High: OQPLA_Score > 0.7
-  - Medium: OQPLA_Score > 0.5
-  - Low: OQPLA_Score <= 0.5
+- Confidence Level: Based on IMP Score
+  - High: IMP_Score > 0.7
+  - Medium: IMP_Score > 0.5
+  - Low: IMP_Score <= 0.5
 """
 
 import numpy as np
@@ -22,19 +22,19 @@ logger = logging.getLogger(__name__)
 def classify_imp_candidates(
     df: pd.DataFrame,
     min_outlier_count: int = 2,
-    use_oqpla: bool = True
+    use_imp_score: bool = True
 ) -> pd.DataFrame:
     """
     Classify compounds as IMP vs Non-IMP candidates.
 
     Classification logic:
     1. Check outlier count (Outlier_Count >= min_outlier_count)
-    2. If IMP candidate, assign confidence level based on O[Q/P/L]A score
+    2. If IMP candidate, assign confidence level based on IMP score
 
     Args:
-        df: DataFrame with outlier flags and O[Q/P/L]A scores
+        df: DataFrame with outlier flags and IMP scores
         min_outlier_count: Minimum outliers required for IMP candidate (default: 2)
-        use_oqpla: Use O[Q/P/L]A score for confidence levels (default: True)
+        use_imp_score: Use IMP score for confidence levels (default: True)
 
     Returns:
         pd.DataFrame: Input DataFrame with added columns:
@@ -58,12 +58,12 @@ def classify_imp_candidates(
     df['Is_IMP_Candidate'] = df['Outlier_Count'] >= min_outlier_count
 
     # Assign confidence levels
-    if use_oqpla and 'OQPLA_Final_Score' in df.columns:
-        # Use O[Q/P/L]A score for confidence
+    if use_imp_score and 'IMP_Final_Score' in df.columns:
+        # Use IMP score for confidence
         df['IMP_Confidence'] = df.apply(
-            lambda row: _assign_confidence_oqpla(
+            lambda row: _assign_confidence_imp_score(
                 row['Is_IMP_Candidate'],
-                row['OQPLA_Final_Score']
+                row['IMP_Final_Score']
             ),
             axis=1
         )
@@ -80,13 +80,13 @@ def classify_imp_candidates(
     return df
 
 
-def _assign_confidence_oqpla(is_imp: bool, oqpla_score: float) -> str:
+def _assign_confidence_imp_score(is_imp: bool, imp_final_score: float) -> str:
     """
-    Assign confidence level based on O[Q/P/L]A score.
+    Assign confidence level based on IMP score.
 
     Args:
         is_imp: Whether compound is IMP candidate
-        oqpla_score: O[Q/P/L]A final score
+        imp_final_score: IMP final score
 
     Returns:
         str: Confidence level
@@ -94,12 +94,12 @@ def _assign_confidence_oqpla(is_imp: bool, oqpla_score: float) -> str:
     if not is_imp:
         return 'Not IMP'
 
-    if np.isnan(oqpla_score):
+    if np.isnan(imp_final_score):
         return 'Unknown'
 
-    if oqpla_score > 0.7:
+    if imp_final_score > 0.7:
         return 'High'
-    elif oqpla_score > 0.5:
+    elif imp_final_score > 0.5:
         return 'Medium'
     else:
         return 'Low'
@@ -109,7 +109,7 @@ def _assign_confidence_simple(is_imp: bool, outlier_count: int) -> str:
     """
     Assign confidence level based on outlier count only.
 
-    Simple fallback if O[Q/P/L]A scores not available.
+    Simple fallback if IMP scores not available.
 
     Args:
         is_imp: Whether compound is IMP candidate
@@ -172,7 +172,7 @@ def get_imp_summary(df: pd.DataFrame) -> Dict:
 def filter_imp_candidates(
     df: pd.DataFrame,
     min_confidence: str = None,
-    min_oqpla_score: float = None
+    min_imp_final_score: float = None
 ) -> pd.DataFrame:
     """
     Filter DataFrame to return only IMP candidates meeting specified criteria.
@@ -180,7 +180,7 @@ def filter_imp_candidates(
     Args:
         df: DataFrame with IMP classification
         min_confidence: Minimum confidence level ("Low", "Medium", "High")
-        min_oqpla_score: Minimum O[Q/P/L]A score (0-1)
+        min_imp_final_score: Minimum IMP score (0-1)
 
     Returns:
         pd.DataFrame: Filtered DataFrame
@@ -189,7 +189,7 @@ def filter_imp_candidates(
         >>> high_priority_imps = filter_imp_candidates(
         ...     df,
         ...     min_confidence="High",
-        ...     min_oqpla_score=0.7
+        ...     min_imp_final_score=0.7
         ... )
     """
     if 'Is_IMP_Candidate' not in df.columns:
@@ -212,17 +212,17 @@ def filter_imp_candidates(
                 filtered_df['IMP_Confidence'].map(confidence_order).fillna(0) >= min_level
             ]
 
-    # Filter by O[Q/P/L]A score
-    if min_oqpla_score is not None:
-        if 'OQPLA_Final_Score' in filtered_df.columns:
-            filtered_df = filtered_df[filtered_df['OQPLA_Final_Score'] >= min_oqpla_score]
+    # Filter by IMP score
+    if min_imp_final_score is not None:
+        if 'IMP_Final_Score' in filtered_df.columns:
+            filtered_df = filtered_df[filtered_df['IMP_Final_Score'] >= min_imp_final_score]
 
     return filtered_df
 
 
 def rank_imp_candidates(
     df: pd.DataFrame,
-    rank_by: str = 'OQPLA_Final_Score',
+    rank_by: str = 'IMP_Final_Score',
     ascending: bool = False
 ) -> pd.DataFrame:
     """
@@ -230,14 +230,14 @@ def rank_imp_candidates(
 
     Args:
         df: DataFrame with IMP candidates
-        rank_by: Column to rank by (default: 'OQPLA_Final_Score')
+        rank_by: Column to rank by (default: 'IMP_Final_Score')
         ascending: Sort order (default: False = highest first)
 
     Returns:
         pd.DataFrame: Sorted DataFrame with added Rank column
 
     Example:
-        >>> ranked_imps = rank_imp_candidates(df, rank_by='OQPLA_Final_Score')
+        >>> ranked_imps = rank_imp_candidates(df, rank_by='IMP_Final_Score')
         >>> top_10 = ranked_imps.head(10)
     """
     if rank_by not in df.columns:
@@ -260,7 +260,7 @@ def compare_imp_vs_non_imp(df: pd.DataFrame, metrics: List[str] = None) -> pd.Da
 
     Args:
         df: DataFrame with IMP classification and efficiency metrics
-        metrics: List of metrics to compare (default: efficiency metrics + O[Q/P/L]A)
+        metrics: List of metrics to compare (default: efficiency metrics + IMP)
 
     Returns:
         pd.DataFrame: Comparison table with mean/median/std for each group
@@ -276,7 +276,7 @@ def compare_imp_vs_non_imp(df: pd.DataFrame, metrics: List[str] = None) -> pd.Da
         metrics = [
             'SEI', 'BEI', 'NSEI', 'NBEI',
             'Modulus_SEI_BEI', 'Angle_SEI_BEI',
-            'OQPLA_Final_Score', 'QED'
+            'IMP_Final_Score', 'QED'
         ]
 
     # Filter available metrics
@@ -353,23 +353,23 @@ def generate_imp_report(df: pd.DataFrame, compound_name: str = "Query Compound")
         report_lines.append("")
 
     # Top candidates
-    if 'OQPLA_Final_Score' in df.columns:
-        top_imps = df[df['Is_IMP_Candidate']].nlargest(5, 'OQPLA_Final_Score')
+    if 'IMP_Final_Score' in df.columns:
+        top_imps = df[df['Is_IMP_Candidate']].nlargest(5, 'IMP_Final_Score')
 
         if len(top_imps) > 0:
-            report_lines.append("TOP 5 IMP CANDIDATES (by O[Q/P/L]A score)")
+            report_lines.append("TOP 5 IMP CANDIDATES (by IMP score)")
             report_lines.append("-" * 70)
 
             for idx, row in top_imps.iterrows():
                 chembl_id = row.get('ChEMBL_ID', 'Unknown')
                 molecule_name = row.get('Molecule_Name', 'Unknown')
-                oqpla = row['OQPLA_Final_Score']
+                score = row['IMP_Final_Score']
                 confidence = row.get('IMP_Confidence', 'Unknown')
                 outlier_count = row.get('Outlier_Count', 0)
 
                 report_lines.append(
                     f"{chembl_id} ({molecule_name}): "
-                    f"O[Q/P/L]A = {oqpla:.3f}, "
+                    f"IMP Score = {score:.3f}, "
                     f"Confidence = {confidence}, "
                     f"Outliers = {outlier_count}"
                 )

@@ -602,6 +602,8 @@ class JobService:
                 result_path,
                 is_duplicate=job_params.get('is_duplicate', False),
                 duplicate_of=job_params.get('duplicate_of'),
+                inherit_children_from=job_params.get('inherit_children_from'),
+                replace_entry_id=job_params.get('replace_entry_id'),
             )
 
             db.commit()
@@ -620,6 +622,8 @@ class JobService:
         result_path: str,
         is_duplicate: bool = False,
         duplicate_of: Optional[str] = None,
+        inherit_children_from: Optional[str] = None,
+        replace_entry_id: Optional[str] = None,
     ) -> None:
         """
         Create or update Compound entry in local database.
@@ -633,6 +637,8 @@ class JobService:
             result_path: Path to result file
             is_duplicate: Whether this compound is a tagged duplicate
             duplicate_of: Entry ID of the original compound (if duplicate)
+            inherit_children_from: Entry ID of old compound whose children should be re-pointed
+            replace_entry_id: Entry ID of old compound to delete after successful replacement
         """
         from backend.models.database import Compound
         import uuid
@@ -664,6 +670,7 @@ class JobService:
         try:
             # Extract additional summary fields for home page display
             similarity_threshold = result_summary.get('similarity_threshold', 90)
+            activity_types = result_summary.get('activity_types')
             qed = result_summary.get('qed', 0.0)
             num_outliers = result_summary.get('num_outliers', 0)
 
@@ -680,10 +687,12 @@ class JobService:
                     chembl_id=result_summary.get('chembl_id', ''),
                     total_activities=result_summary.get('total_activities', 0),
                     imp_candidates=result_summary.get('imp_candidates', 0),
-                    avg_oqpla_score=result_summary.get('avg_oqpla_score'),
+                    imp_score=result_summary.get('imp_score'),
                     similarity_threshold=similarity_threshold,
+                    activity_types=activity_types,
                     qed=qed,
                     num_outliers=num_outliers,
+                    author_name=result_summary.get('author_name'),
                     storage_path=storage_path,
                     is_duplicate=True,
                     duplicate_of=duplicate_of,
@@ -694,19 +703,22 @@ class JobService:
                 return
 
             # Check if compound exists, preferring InChIKey match over name
+            # When replacing, ALWAYS create a fresh entry — never update another
+            # compound that happens to share the InChIKey or name. The old compound
+            # (replace_entry_id) will be deleted after this new one is saved.
             existing = None
-            if inchikey:
-                # InChIKey match is reliable - use it
-                existing = db.query(Compound).filter(Compound.inchikey == inchikey).first()
+            if not replace_entry_id:
+                if inchikey:
+                    existing = db.query(Compound).filter(Compound.inchikey == inchikey).first()
 
-            # Only fall back to exact name match if:
-            # 1. No InChIKey provided for the new compound, AND
-            # 2. The existing record has no InChIKey (to avoid false matches)
-            if not existing and not inchikey:
-                existing = db.query(Compound).filter(
-                    Compound.compound_name == compound_name,
-                    Compound.inchikey.is_(None)
-                ).first()
+                # Only fall back to exact name match if:
+                # 1. No InChIKey provided for the new compound, AND
+                # 2. The existing record has no InChIKey (to avoid false matches)
+                if not existing and not inchikey:
+                    existing = db.query(Compound).filter(
+                        Compound.compound_name == compound_name,
+                        Compound.inchikey.is_(None)
+                    ).first()
 
             if existing:
                 # Update existing entry
@@ -716,10 +728,12 @@ class JobService:
                 existing.chembl_id = result_summary.get('chembl_id', '')
                 existing.total_activities = result_summary.get('total_activities', 0)
                 existing.imp_candidates = result_summary.get('imp_candidates', 0)
-                existing.avg_oqpla_score = result_summary.get('avg_oqpla_score')
+                existing.imp_score = result_summary.get('imp_score')
                 existing.similarity_threshold = similarity_threshold
+                existing.activity_types = activity_types
                 existing.qed = qed
                 existing.num_outliers = num_outliers
+                existing.author_name = result_summary.get('author_name')
                 existing.storage_path = storage_path
                 existing.processed_at = datetime.now(timezone.utc)  # Update timestamp
                 # Update entry_id if missing (for older records) or use the new one
@@ -738,17 +752,87 @@ class JobService:
                     chembl_id=result_summary.get('chembl_id', ''),
                     total_activities=result_summary.get('total_activities', 0),
                     imp_candidates=result_summary.get('imp_candidates', 0),
-                    avg_oqpla_score=result_summary.get('avg_oqpla_score'),
+                    imp_score=result_summary.get('imp_score'),
                     similarity_threshold=similarity_threshold,
+                    activity_types=activity_types,
                     qed=qed,
                     num_outliers=num_outliers,
+                    author_name=result_summary.get('author_name'),
                     storage_path=storage_path,
-                    is_duplicate=False,
-                    duplicate_of=None,
+                    is_duplicate=is_duplicate,
+                    duplicate_of=duplicate_of,
                     processed_at=datetime.now(timezone.utc),
                 )
                 db.add(compound)
                 logger.info(f"Created Compound entry: {compound_name} -> {entry_id}")
+
+            # Re-point orphaned children from a replaced compound to this new one
+            if inherit_children_from and not is_duplicate:
+                # Determine the entry_id of the newly created/updated compound
+                if existing:
+                    new_entry_id = existing.entry_id
+                else:
+                    new_entry_id = entry_id  # Set in the "else" branch above
+                children = db.query(Compound).filter(
+                    Compound.duplicate_of == inherit_children_from
+                ).all()
+                for child in children:
+                    child.duplicate_of = new_entry_id
+                    logger.info(
+                        f"Re-pointed child '{child.compound_name}' ({child.entry_id}) "
+                        f"duplicate_of: {inherit_children_from} -> {new_entry_id}"
+                    )
+                if children:
+                    logger.info(f"Inherited {len(children)} children from {inherit_children_from}")
+
+            # Delete old compound AFTER replacement succeeds (deferred from job creation)
+            # This prevents data loss: if the job had failed, the old compound would remain
+            if replace_entry_id:
+                old_compound = db.query(Compound).filter(
+                    Compound.entry_id == replace_entry_id
+                ).first()
+                if old_compound:
+                    from backend.core.azure_sync import delete_result_from_azure_by_entry_id
+                    from backend.config import settings
+
+                    old_name = old_compound.compound_name
+
+                    # Promote children before deleting (prevents orphans)
+                    if not old_compound.is_duplicate:
+                        # Re-point any remaining children to the new compound
+                        remaining_children = db.query(Compound).filter(
+                            Compound.duplicate_of == replace_entry_id
+                        ).all()
+                        new_id = existing.entry_id if existing else entry_id
+                        for child in remaining_children:
+                            child.duplicate_of = new_id
+                            logger.info(
+                                f"Re-pointed child '{child.compound_name}' from replaced "
+                                f"compound to new entry {new_id}"
+                            )
+
+                    # Delete from Azure
+                    try:
+                        delete_result_from_azure_by_entry_id(replace_entry_id)
+                    except Exception as e:
+                        logger.warning(f"Failed to delete Azure result for replaced compound: {e}")
+
+                    # Delete local ZIP
+                    try:
+                        prefix = replace_entry_id[:2].lower()
+                        local_zip = settings.RESULTS_DIR / prefix / f"{replace_entry_id}.zip"
+                        if local_zip.exists():
+                            local_zip.unlink()
+                            logger.debug(f"Deleted local result for replaced compound: {local_zip}")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete local result for replaced compound: {e}")
+
+                    # Delete from database
+                    db.delete(old_compound)
+                    logger.info(
+                        f"Replacement complete: deleted old compound '{old_name}' "
+                        f"(entry_id={replace_entry_id}) after successful replacement"
+                    )
 
         except Exception as e:
             logger.error(f"Failed to update Compound entry for {compound_name}: {e}")

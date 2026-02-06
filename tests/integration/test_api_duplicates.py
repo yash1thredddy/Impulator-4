@@ -75,8 +75,11 @@ def client_with_db(test_engine, mock_azure):
             session.close()
 
     app.dependency_overrides[get_db] = override_get_db
-    client = TestClient(app)
-    yield client
+
+    # Mock the scheduler to prevent background job processing after test teardown
+    with patch('backend.core.scheduler.job_scheduler.trigger'):
+        client = TestClient(app)
+        yield client
 
     # Restore original values
     app.dependency_overrides.clear()
@@ -93,6 +96,7 @@ class TestDuplicateDetection:
             "/api/v1/jobs",
             json={
                 "compound_name": "TestCompound",
+                "author_name": "Test Author",
                 "smiles": "CCO",
                 "similarity_threshold": 90
             }
@@ -130,6 +134,7 @@ class TestDuplicateDetection:
             "/api/v1/jobs",
             json={
                 "compound_name": "Aspirin",
+                "author_name": "Test Author",
                 "smiles": smiles,
                 "similarity_threshold": 90
             }
@@ -169,6 +174,7 @@ class TestDuplicateDetection:
             "/api/v1/jobs",
             json={
                 "compound_name": "Acetylsalicylic Acid",  # Different name
+                "author_name": "Test Author",
                 "smiles": smiles,  # Same SMILES
                 "similarity_threshold": 90
             }
@@ -190,7 +196,8 @@ class TestResolveDuplicate:
             json={
                 "action": "skip",
                 "smiles": "CCO",
-                "compound_name": "Ethanol"
+                "compound_name": "Ethanol",
+                "author_name": "Test Author"
             }
         )
 
@@ -226,6 +233,7 @@ class TestResolveDuplicate:
                 "action": "replace",
                 "smiles": smiles,
                 "compound_name": "Ethanol",
+                "author_name": "Test Author",
                 "existing_entry_id": "existing-entry-id-12345"
             }
         )
@@ -244,7 +252,7 @@ class TestResolveDuplicate:
         check_session.close()
 
     def test_resolve_duplicate_as_duplicate(self, test_engine, client_with_db):
-        """Test saving as a duplicate (keeping both)."""
+        """Test saving as a duplicate (keeping both) with different config."""
         from backend.models.database import Compound
         from backend.services.job_service import generate_inchikey
 
@@ -258,7 +266,9 @@ class TestResolveDuplicate:
             entry_id="original-entry-id-12345",
             compound_name="Ethanol",
             smiles=smiles,
-            inchikey=inchikey
+            inchikey=inchikey,
+            similarity_threshold=90,
+            activity_types="IC50,Ki",  # Different from default so config isn't "identical"
         )
         session.add(existing_compound)
         session.commit()
@@ -270,7 +280,9 @@ class TestResolveDuplicate:
                 "action": "duplicate",
                 "smiles": smiles,
                 "compound_name": "Ethanol_v2",
-                "existing_entry_id": "original-entry-id-12345"
+                "author_name": "Test Author",
+                "existing_entry_id": "original-entry-id-12345",
+                "activity_types": ["EC50", "IC50", "Kd", "Ki"],  # Different config
             }
         )
 
@@ -286,6 +298,48 @@ class TestResolveDuplicate:
         ).first()
         assert original is not None
         check_session.close()
+
+    def test_resolve_duplicate_identical_config_blocked(self, test_engine, client_with_db):
+        """Test that DUPLICATE action is blocked when config is identical."""
+        from backend.models.database import Compound
+        from backend.services.job_service import generate_inchikey
+
+        Session = sessionmaker(bind=test_engine)
+
+        smiles = "CCO"
+        inchikey = generate_inchikey(smiles)
+
+        session = Session()
+        existing_compound = Compound(
+            entry_id="identical-config-entry-12345",
+            compound_name="Ethanol",
+            smiles=smiles,
+            inchikey=inchikey,
+            similarity_threshold=90,
+            activity_types="EC50,IC50,Kd,Ki",
+        )
+        session.add(existing_compound)
+        session.commit()
+        session.close()
+
+        # Try to duplicate with identical config (same threshold + same activity_types)
+        response = client_with_db.post(
+            "/api/v1/jobs/resolve-duplicate",
+            json={
+                "action": "duplicate",
+                "smiles": smiles,
+                "compound_name": "Ethanol_v2",
+                "author_name": "Test Author",
+                "existing_entry_id": "identical-config-entry-12345",
+                "similarity_threshold": 90,
+                "activity_types": ["EC50", "IC50", "Kd", "Ki"],
+            }
+        )
+
+        # Should be blocked with 422
+        assert response.status_code == 422
+        data = response.json()
+        assert "identical configuration" in data["detail"].lower()
 
 
 class TestCheckDuplicates:
@@ -349,7 +403,8 @@ class TestDuplicateActionValidation:
             json={
                 "action": "invalid_action",
                 "smiles": "CCO",
-                "compound_name": "Ethanol"
+                "compound_name": "Ethanol",
+                "author_name": "Test Author"
             }
         )
 

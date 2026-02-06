@@ -13,6 +13,7 @@ class TestJobCreateSchema:
         from backend.models.schemas import JobCreate
         job = JobCreate(
             compound_name="Aspirin",
+            author_name="Test Author",
             smiles="CC(=O)OC1=CC=CC=C1C(=O)O",
             similarity_threshold=90
         )
@@ -24,6 +25,7 @@ class TestJobCreateSchema:
         from backend.models.schemas import JobCreate
         job = JobCreate(
             compound_name="Test",
+            author_name="Test Author",
             smiles="CCO"
         )
         assert job.similarity_threshold == 90  # Default
@@ -34,6 +36,7 @@ class TestJobCreateSchema:
         with pytest.raises(ValidationError):
             JobCreate(
                 compound_name="Test",
+                author_name="Test Author",
                 smiles="CCO",
                 similarity_threshold=150
             )
@@ -44,6 +47,7 @@ class TestJobCreateSchema:
         with pytest.raises(ValidationError):
             JobCreate(
                 compound_name="Test",
+                author_name="Test Author",
                 smiles="CCO",
                 similarity_threshold=-10
             )
@@ -54,6 +58,7 @@ class TestJobCreateSchema:
         with pytest.raises(ValidationError):
             JobCreate(
                 compound_name="",
+                author_name="Test Author",
                 smiles="CCO"
             )
 
@@ -63,6 +68,7 @@ class TestJobCreateSchema:
         with pytest.raises(ValidationError):
             JobCreate(
                 compound_name="Test",
+                author_name="Test Author",
                 smiles=""
             )
 
@@ -71,6 +77,7 @@ class TestJobCreateSchema:
         from backend.models.schemas import JobCreate
         job = JobCreate(
             compound_name="Test",
+            author_name="Test Author",
             smiles="CCO"
         )
         assert job.activity_types is None
@@ -130,7 +137,7 @@ class TestSMILESValidation:
         ]
 
         for smiles in valid_smiles:
-            job = JobCreate(compound_name="Test", smiles=smiles)
+            job = JobCreate(compound_name="Test", author_name="Test Author", smiles=smiles)
             assert job.smiles == smiles
 
     def test_smiles_too_long_rejected(self):
@@ -139,7 +146,7 @@ class TestSMILESValidation:
 
         long_smiles = "C" * 2001
         with pytest.raises(ValidationError) as exc_info:
-            JobCreate(compound_name="Test", smiles=long_smiles)
+            JobCreate(compound_name="Test", author_name="Test Author", smiles=long_smiles)
         assert "too long" in str(exc_info.value).lower()
 
     def test_smiles_injection_characters_rejected(self):
@@ -156,13 +163,13 @@ class TestSMILESValidation:
 
         for smiles in malicious_smiles:
             with pytest.raises(ValidationError):
-                JobCreate(compound_name="Test", smiles=smiles)
+                JobCreate(compound_name="Test", author_name="Test Author", smiles=smiles)
 
     def test_smiles_whitespace_stripped(self):
         """Test SMILES whitespace is stripped."""
         from backend.models.schemas import JobCreate
 
-        job = JobCreate(compound_name="Test", smiles="  CCO  ")
+        job = JobCreate(compound_name="Test", author_name="Test Author", smiles="  CCO  ")
         assert job.smiles == "CCO"
 
     def test_smiles_special_valid_characters(self):
@@ -180,7 +187,7 @@ class TestSMILESValidation:
         ]
 
         for smiles in special_smiles:
-            job = JobCreate(compound_name="Test", smiles=smiles)
+            job = JobCreate(compound_name="Test", author_name="Test Author", smiles=smiles)
             assert job.smiles == smiles
 
 
@@ -202,7 +209,7 @@ class TestCompoundNameValidation:
         ]
 
         for name in valid_names:
-            job = JobCreate(compound_name=name, smiles="CCO")
+            job = JobCreate(compound_name=name, author_name="Test Author", smiles="CCO")
             assert job.compound_name == name
 
     def test_compound_name_too_long_rejected(self):
@@ -211,7 +218,7 @@ class TestCompoundNameValidation:
 
         long_name = "A" * 101
         with pytest.raises(ValidationError) as exc_info:
-            JobCreate(compound_name=long_name, smiles="CCO")
+            JobCreate(compound_name=long_name, author_name="Test Author", smiles="CCO")
         # Pydantic error message says "should have at most 100 characters"
         assert "100 characters" in str(exc_info.value).lower()
 
@@ -228,14 +235,14 @@ class TestCompoundNameValidation:
 
         for name in path_traversal_names:
             with pytest.raises(ValidationError):
-                JobCreate(compound_name=name, smiles="CCO")
+                JobCreate(compound_name=name, author_name="Test Author", smiles="CCO")
 
     def test_compound_name_null_byte_rejected(self):
         """Test null byte injection is rejected."""
         from backend.models.schemas import JobCreate
 
         with pytest.raises(ValidationError):
-            JobCreate(compound_name="test\x00malicious", smiles="CCO")
+            JobCreate(compound_name="test\x00malicious", author_name="Test Author", smiles="CCO")
 
     def test_compound_name_html_injection_rejected(self):
         """Test HTML/script injection is rejected."""
@@ -249,13 +256,13 @@ class TestCompoundNameValidation:
 
         for name in html_names:
             with pytest.raises(ValidationError):
-                JobCreate(compound_name=name, smiles="CCO")
+                JobCreate(compound_name=name, author_name="Test Author", smiles="CCO")
 
     def test_compound_name_whitespace_stripped(self):
         """Test compound name whitespace is stripped."""
         from backend.models.schemas import JobCreate
 
-        job = JobCreate(compound_name="  Aspirin  ", smiles="CCO")
+        job = JobCreate(compound_name="  Aspirin  ", author_name="Test Author", smiles="CCO")
         assert job.compound_name == "Aspirin"
 
 

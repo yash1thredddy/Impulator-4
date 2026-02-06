@@ -111,12 +111,16 @@ class Compound(Base):
     # Summary statistics
     total_activities = Column(Integer, default=0)
     imp_candidates = Column(Integer, default=0)
-    avg_oqpla_score = Column(Float, nullable=True)
+    imp_score = Column(Float, nullable=True)
 
     # Additional summary fields (for home page display without ZIP download)
     similarity_threshold = Column(Integer, default=90)  # Similarity threshold % used for search
+    activity_types = Column(Text, nullable=True)  # Comma-separated activity types: "IC50,Ki,Kd,EC50"
     qed = Column(Float, nullable=True)  # Average QED score
     num_outliers = Column(Integer, default=0)  # Number of outliers detected
+
+    # Author attribution
+    author_name = Column(String(100), nullable=True)
 
     # Storage location
     storage_path = Column(String(500), nullable=True)
@@ -142,10 +146,12 @@ class Compound(Base):
             "duplicate_of": self.duplicate_of,
             "total_activities": self.total_activities,
             "imp_candidates": self.imp_candidates,
-            "avg_oqpla_score": self.avg_oqpla_score,
+            "imp_score": self.imp_score,
             "similarity_threshold": self.similarity_threshold,
+            "activity_types": self.activity_types,
             "qed": self.qed,
             "num_outliers": self.num_outliers,
+            "author_name": self.author_name,
             "storage_path": self.storage_path,
             "processed_at": self.processed_at.isoformat() if self.processed_at else None,
         }
@@ -171,10 +177,14 @@ class DeletedCompound(Base):
     chembl_id = Column(String(50), nullable=True)
     smiles = Column(Text, nullable=True)
     inchikey = Column(String(27), nullable=True)
+    author_name = Column(String(100), nullable=True)
 
     # Duplicate info
     is_duplicate = Column(Boolean, default=False)
     duplicate_of = Column(String(36), nullable=True)
+
+    # Analysis config (for audit trail)
+    activity_types = Column(Text, nullable=True)
 
     # Storage info (for cleanup verification)
     storage_path = Column(String(500), nullable=True)
@@ -198,8 +208,10 @@ class DeletedCompound(Base):
             "chembl_id": self.chembl_id,
             "smiles": self.smiles,
             "inchikey": self.inchikey,
+            "author_name": self.author_name,
             "is_duplicate": self.is_duplicate,
             "duplicate_of": self.duplicate_of,
+            "activity_types": self.activity_types,
             "storage_path": self.storage_path,
             "deleted_at": self.deleted_at.isoformat() if self.deleted_at else None,
             "deleted_by_session": self.deleted_by_session,

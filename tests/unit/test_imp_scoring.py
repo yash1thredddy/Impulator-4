@@ -1,5 +1,5 @@
 """
-Tests for oqpla_scoring module.
+Tests for imp_scoring module.
 
 Tests the following fixes:
 - 3.2: Sigmoid Z-score normalization (preserves ranking for exceptional compounds)
@@ -14,13 +14,20 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from backend.modules.oqpla_scoring import (
+from backend.modules.imp_scoring import (
     calculate_efficiency_outlier_score,
     calculate_angle_score,
     calculate_distance_to_best_score,
-    interpret_oqpla_score,
-    calculate_oqpla_phase1,
-    calculate_oqpla_phase2,
+    calculate_interference_score,
+    interpret_imp_score,
+    calculate_imp_score,
+    calculate_imp_score_phase1,
+    calculate_imp_score_phase2,
+    WEIGHT_EFFICIENCY,
+    WEIGHT_DISTANCE,
+    WEIGHT_ANGLE,
+    WEIGHT_INTERFERENCE,
+    WEIGHT_PDB,
 )
 
 
@@ -230,106 +237,87 @@ class TestDistanceScore:
 
 
 class TestInterpretScore:
-    """Tests for interpret_oqpla_score function."""
+    """Tests for interpret_imp_score function."""
 
     def test_exceptional_imp(self):
         """Test exceptional IMP classification (0.9-1.0)."""
-        result = interpret_oqpla_score(0.95)
+        result = interpret_imp_score(0.95)
         assert result['classification'] == 'Exceptional IMP'
         assert result['priority'] == 1
 
     def test_strong_imp(self):
         """Test strong IMP classification (0.7-0.9)."""
-        result = interpret_oqpla_score(0.8)
+        result = interpret_imp_score(0.8)
         assert result['classification'] == 'Strong IMP'
         assert result['priority'] == 2
 
     def test_moderate_imp(self):
         """Test moderate IMP classification (0.5-0.7)."""
-        result = interpret_oqpla_score(0.6)
+        result = interpret_imp_score(0.6)
         assert result['classification'] == 'Moderate IMP'
         assert result['priority'] == 3
 
     def test_weak_imp(self):
         """Test weak IMP classification (0.3-0.5)."""
-        result = interpret_oqpla_score(0.4)
+        result = interpret_imp_score(0.4)
         assert result['classification'] == 'Weak IMP'
         assert result['priority'] == 4
 
     def test_not_imp(self):
         """Test not IMP classification (<0.3)."""
-        result = interpret_oqpla_score(0.2)
+        result = interpret_imp_score(0.2)
         assert result['classification'] == 'Not IMP'
         assert result['priority'] is None
 
     def test_nan_score(self):
         """Test handling of NaN score."""
-        result = interpret_oqpla_score(np.nan)
+        result = interpret_imp_score(np.nan)
         assert result['classification'] == 'Invalid'
         assert result['priority'] is None
 
 
-class TestOQPLAPhase2NewWeights:
-    """Tests for updated OQPLA Phase 2 weight ratios."""
+class TestIMPScoreNewWeights:
+    """Tests for new IMP Score weight system (5 components, direct percentages)."""
 
-    def test_oqpla_phase2_new_weights(self):
-        """
-        Verify Phase 2 weight ratios are correctly normalized:
-        - Efficiency: 40% raw -> 50% normalized
-        - Angle: 15% raw -> 18.75% normalized (was 10%)
-        - Distance: 20% raw -> 25% normalized (was 15%)
-        - PDB: 5% raw -> 6.25% normalized (was 15%)
-
-        Total raw = 40 + 15 + 20 + 5 = 80%
-        """
-        # Create test dataframe with VARIED values to avoid std=0 issue
-        # Different SEI/BEI values ensure Efficiency_Score is non-zero
+    def test_imp_score_new_weights(self):
+        """Verify new weight system: 45/20/15/15/5, no normalization."""
         df = pd.DataFrame({
-            'SEI': [5.0, 10.0, 15.0],  # Varied values -> std != 0
-            'BEI': [20.0, 25.0, 30.0],  # Varied values -> std != 0
+            'SEI': [5.0, 10.0, 15.0],
+            'BEI': [20.0, 25.0, 30.0],
             'NSEI': [1.0, 2.0, 3.0],
             'NBEI': [0.25, 0.35, 0.45],
-            'Angle_SEI_BEI': [45.0, 45.0, 45.0],  # Optimal angle -> score = 1.0
-            'Modulus_SEI_BEI': [20.0, 30.0, 40.0],  # Varied for distance scoring
-            'QED': [1.0, 1.0, 1.0],  # Max QED so multiplier = 1.0
-            'SMILES': ['CCO', 'CCCO', 'CCCCO']
+            'Angle_SEI_BEI': [45.0, 45.0, 45.0],
+            'Modulus_SEI_BEI': [20.0, 30.0, 40.0],
+            'QED': [1.0, 1.0, 1.0],
+            'SMILES': ['CCO', 'CCCO', 'CCCCO'],
+            'PAINS_Violation': [0, 0, 0],
+            'Aggregator_Risk': [0, 0, 0],
+            'Redox_Reactive': [0, 0, 0],
+            'Fluorescence_Interference': [0, 0, 0],
+            'Thiol_Reactive': [0, 0, 0],
         })
 
-        # Calculate Phase 2 scores without PDB (use_pdb=False)
-        result = calculate_oqpla_phase2(df, use_pdb=False)
+        result = calculate_imp_score(df, use_pdb=False)
 
-        # Verify that result columns were created
-        assert 'Angle_Score' in result.columns, "Angle_Score column should exist"
-        assert 'Angle_Contribution' in result.columns, "Angle_Contribution column should exist"
-        assert 'Distance_Contribution' in result.columns, "Distance_Contribution column should exist"
-        assert 'OQPLA_Final_Score' in result.columns, "OQPLA_Final_Score column should exist"
+        assert 'Interference_Score' in result.columns
+        assert 'Interference_Contribution' in result.columns
+        assert 'IMP_Final_Score' in result.columns
 
-        # Since Angle is optimal (45°), Angle_Score should be 1.0 for all rows
-        for i, score in enumerate(result['Angle_Score']):
-            assert abs(score - 1.0) < 0.01, f"Row {i}: Angle_Score should be ~1.0 for 45° angle, got {score}"
-
-        # Verify Angle_Contribution uses the correct weight (18.75%)
-        # Angle_Contribution = Angle_Score * 0.1875 = 1.0 * 0.1875 = 0.1875
-        expected_angle_contribution = 0.1875
+        # Angle is optimal (45 deg) -> Angle_Score = 1.0
+        # Angle_Contribution = 0.15 * 1.0 * 1.0 (QED=1) = 0.15
         for i, contrib in enumerate(result['Angle_Contribution']):
-            assert abs(contrib - expected_angle_contribution) < 0.01, \
-                f"Row {i}: Angle_Contribution should be ~{expected_angle_contribution}, got {contrib}"
+            assert abs(contrib - 0.15) < 0.01, \
+                f"Row {i}: Angle_Contribution should be ~0.15, got {contrib}"
 
-        # Verify expected weight ratios (these are constants in the algorithm)
-        total_raw_weight = 0.40 + 0.15 + 0.20 + 0.05  # 0.80
-        expected_efficiency_weight = 0.40 / total_raw_weight  # 0.50
-        expected_angle_weight = 0.15 / total_raw_weight  # 0.1875
-        expected_distance_weight = 0.20 / total_raw_weight  # 0.25
-        expected_pdb_weight = 0.05 / total_raw_weight  # 0.0625
+        # Interference is clean -> Interference_Score = 0.0
+        # Interference_Contribution = 0.15 * 0.0 * 1.0 = 0.0
+        for i, contrib in enumerate(result['Interference_Contribution']):
+            assert abs(contrib - 0.0) < 0.01, \
+                f"Row {i}: Interference_Contribution should be ~0.0, got {contrib}"
 
-        # Verify the weights sum to 1.0
-        total_weight = (expected_efficiency_weight + expected_angle_weight +
-                       expected_distance_weight + expected_pdb_weight)
-        assert abs(total_weight - 1.0) < 0.001, f"Weights should sum to 1.0, got {total_weight}"
-
-        # Verify OQPLA scores are in valid range [0, 1]
-        for i, score in enumerate(result['OQPLA_Final_Score']):
-            assert 0.0 <= score <= 1.0, f"Row {i}: OQPLA_Final_Score should be in [0,1], got {score}"
+        # All scores in valid range
+        for score in result['IMP_Final_Score']:
+            assert 0.0 <= score <= 1.0
 
 
 class TestQEDMultiplierNewFormula:
@@ -348,7 +336,7 @@ class TestQEDMultiplierNewFormula:
             'SMILES': ['CCO']
         })
 
-        result = calculate_oqpla_phase1(df)
+        result = calculate_imp_score_phase1(df)
 
         # QED multiplier should be 0.75 when QED = 0
         assert abs(result['QED_Multiplier'].iloc[0] - 0.75) < 0.001, \
@@ -367,7 +355,7 @@ class TestQEDMultiplierNewFormula:
             'SMILES': ['CCO']
         })
 
-        result = calculate_oqpla_phase1(df)
+        result = calculate_imp_score_phase1(df)
 
         # QED multiplier should be 1.0 when QED = 1
         assert abs(result['QED_Multiplier'].iloc[0] - 1.0) < 0.001, \
@@ -386,7 +374,7 @@ class TestQEDMultiplierNewFormula:
             'SMILES': ['CCO']
         })
 
-        result = calculate_oqpla_phase1(df)
+        result = calculate_imp_score_phase1(df)
 
         # QED multiplier should be 0.875 when QED = 0.5
         # Formula: 0.75 + 0.25 * 0.5 = 0.75 + 0.125 = 0.875
@@ -406,7 +394,7 @@ class TestQEDMultiplierNewFormula:
             'SMILES': ['CCO', 'CCO', 'CCO']
         })
 
-        result = calculate_oqpla_phase1(df)
+        result = calculate_imp_score_phase1(df)
 
         # Verify the formula: 0.75 + 0.25 * QED
         expected_multipliers = [0.75, 0.875, 1.0]
@@ -469,7 +457,7 @@ class TestEfficiencyScoreUsesSEIBEIOnly:
             assert abs(scores_default.iloc[i] - scores_explicit.iloc[i]) < 0.001, \
                 f"Default should use SEI/BEI only at index {i}"
 
-    def test_nsei_nbei_still_calculated_in_oqpla(self):
+    def test_nsei_nbei_still_calculated_in_imp_score(self):
         """Verify that NSEI and NBEI are still calculated and stored but not used in efficiency score."""
         df = pd.DataFrame({
             'SEI': [10.0],
@@ -482,7 +470,7 @@ class TestEfficiencyScoreUsesSEIBEIOnly:
             'SMILES': ['CCO']
         })
 
-        result = calculate_oqpla_phase1(df)
+        result = calculate_imp_score_phase1(df)
 
         # NSEI and NBEI should still exist in the result dataframe
         assert 'NSEI' in result.columns, "NSEI should still be in the dataframe"
@@ -490,6 +478,197 @@ class TestEfficiencyScoreUsesSEIBEIOnly:
 
         # But they should not affect the efficiency score (verified in other tests)
         assert 'Efficiency_Score' in result.columns, "Efficiency_Score should be calculated"
+
+
+class TestInterferenceScore:
+    """Tests for calculate_interference_score function."""
+
+    def test_all_scored_flags_triggered(self):
+        """All 5 scored flags -> score = 1.0 (BRENK/NIH ignored)."""
+        df = pd.DataFrame({
+            'PAINS_Violation': [1],
+            'Aggregator_Risk': [1],
+            'Redox_Reactive': [1],
+            'Fluorescence_Interference': [1],
+            'Thiol_Reactive': [1],
+            'BRENK_Alerts': [1],  # display-only, not counted
+            'NIH_Alerts': [1],    # display-only, not counted
+        })
+        result = calculate_interference_score(df)
+        assert abs(result['Interference_Score'].iloc[0] - 1.0) < 0.001
+
+    def test_no_flags(self):
+        """No flags -> score = 0.0."""
+        df = pd.DataFrame({
+            'PAINS_Violation': [0],
+            'Aggregator_Risk': [0],
+            'Redox_Reactive': [0],
+            'Fluorescence_Interference': [0],
+            'Thiol_Reactive': [0],
+            'BRENK_Alerts': [0],
+            'NIH_Alerts': [0],
+        })
+        result = calculate_interference_score(df)
+        assert abs(result['Interference_Score'].iloc[0] - 0.0) < 0.001
+
+    def test_two_flags(self):
+        """2 of 5 scored flags -> score = 2/5 = 0.4."""
+        df = pd.DataFrame({
+            'PAINS_Violation': [1],
+            'Aggregator_Risk': [1],
+            'Redox_Reactive': [0],
+            'Fluorescence_Interference': [0],
+            'Thiol_Reactive': [0],
+        })
+        result = calculate_interference_score(df)
+        assert abs(result['Interference_Score'].iloc[0] - 2.0/5.0) < 0.001
+
+    def test_brenk_nih_not_counted(self):
+        """BRENK and NIH should NOT affect interference score."""
+        df_without = pd.DataFrame({
+            'PAINS_Violation': [1],
+            'Aggregator_Risk': [0],
+            'Redox_Reactive': [0],
+            'Fluorescence_Interference': [0],
+            'Thiol_Reactive': [0],
+            'BRENK_Alerts': [0],
+            'NIH_Alerts': [0],
+        })
+        df_with = pd.DataFrame({
+            'PAINS_Violation': [1],
+            'Aggregator_Risk': [0],
+            'Redox_Reactive': [0],
+            'Fluorescence_Interference': [0],
+            'Thiol_Reactive': [0],
+            'BRENK_Alerts': [1],  # should not matter
+            'NIH_Alerts': [1],    # should not matter
+        })
+        result_without = calculate_interference_score(df_without)
+        result_with = calculate_interference_score(df_with)
+        assert abs(result_without['Interference_Score'].iloc[0] - result_with['Interference_Score'].iloc[0]) < 0.001
+
+    def test_missing_columns_defaults_to_zero(self):
+        """Missing interference columns -> score = 0.0."""
+        df = pd.DataFrame({'some_col': [1, 2, 3]})
+        result = calculate_interference_score(df)
+        assert all(result['Interference_Score'] == 0.0)
+
+    def test_multiple_rows(self):
+        """Test vectorized calculation across multiple rows."""
+        df = pd.DataFrame({
+            'PAINS_Violation': [1, 0, 1],
+            'Aggregator_Risk': [0, 0, 1],
+            'Redox_Reactive': [0, 0, 1],
+            'Fluorescence_Interference': [0, 0, 1],
+            'Thiol_Reactive': [0, 0, 1],
+        })
+        result = calculate_interference_score(df)
+        assert abs(result['Interference_Score'].iloc[0] - 1.0/5.0) < 0.001  # 1 of 5
+        assert abs(result['Interference_Score'].iloc[1] - 0.0) < 0.001      # 0 of 5
+        assert abs(result['Interference_Score'].iloc[2] - 1.0) < 0.001      # 5 of 5
+
+
+class TestNewWeights:
+    """Tests for new weight system (5 components, no normalization)."""
+
+    def test_weights_sum_to_100(self):
+        """All 5 weights must sum to exactly 1.0."""
+        total = WEIGHT_EFFICIENCY + WEIGHT_DISTANCE + WEIGHT_ANGLE + WEIGHT_INTERFERENCE + WEIGHT_PDB
+        assert abs(total - 1.0) < 0.001, f"Weights sum to {total}, expected 1.0"
+
+    def test_individual_weights(self):
+        """Verify each weight value."""
+        assert abs(WEIGHT_EFFICIENCY - 0.45) < 0.001
+        assert abs(WEIGHT_DISTANCE - 0.20) < 0.001
+        assert abs(WEIGHT_ANGLE - 0.15) < 0.001
+        assert abs(WEIGHT_INTERFERENCE - 0.15) < 0.001
+        assert abs(WEIGHT_PDB - 0.05) < 0.001
+
+
+class TestCalculateImpScore:
+    """Tests for unified calculate_imp_score function."""
+
+    def _make_test_df(self, interference_flags=None):
+        """Helper to create test DataFrame with all required columns."""
+        data = {
+            'SEI': [5.0, 10.0, 15.0],
+            'BEI': [20.0, 25.0, 30.0],
+            'NSEI': [1.0, 2.0, 3.0],
+            'NBEI': [0.25, 0.35, 0.45],
+            'Angle_SEI_BEI': [45.0, 45.0, 45.0],
+            'Modulus_SEI_BEI': [20.0, 30.0, 40.0],
+            'QED': [1.0, 1.0, 1.0],
+            'SMILES': ['CCO', 'CCCO', 'CCCCO'],
+        }
+        if interference_flags:
+            data.update(interference_flags)
+        else:
+            for col in ['PAINS_Violation', 'Aggregator_Risk', 'Redox_Reactive',
+                        'Fluorescence_Interference', 'Thiol_Reactive']:
+                data[col] = [0, 0, 0]
+        return pd.DataFrame(data)
+
+    def test_has_interference_contribution(self):
+        """New function should produce Interference_Score and Interference_Contribution columns."""
+        df = self._make_test_df()
+        result = calculate_imp_score(df, use_pdb=False)
+        assert 'Interference_Score' in result.columns
+        assert 'Interference_Contribution' in result.columns
+
+    def test_interference_affects_final_score(self):
+        """Compounds with interference flags should have higher IMP scores than clean ones."""
+        df_clean = self._make_test_df()
+        df_flagged = self._make_test_df(interference_flags={
+            'PAINS_Violation': [1, 1, 1],
+            'Aggregator_Risk': [1, 1, 1],
+            'Redox_Reactive': [1, 1, 1],
+            'Fluorescence_Interference': [0, 0, 0],
+            'Thiol_Reactive': [0, 0, 0],
+        })
+        result_clean = calculate_imp_score(df_clean, use_pdb=False)
+        result_flagged = calculate_imp_score(df_flagged, use_pdb=False)
+
+        for i in range(len(result_clean)):
+            assert result_flagged['IMP_Final_Score'].iloc[i] > result_clean['IMP_Final_Score'].iloc[i]
+
+    def test_no_pdb_sets_pdb_zero(self):
+        """With use_pdb=False, PDB_Score and PDB_Contribution should be 0."""
+        df = self._make_test_df()
+        result = calculate_imp_score(df, use_pdb=False)
+        assert all(result['PDB_Score'] == 0.0)
+        assert all(result['PDB_Contribution'] == 0.0)
+
+    def test_scores_in_valid_range(self):
+        """All final scores should be in [0, 1]."""
+        df = self._make_test_df()
+        result = calculate_imp_score(df, use_pdb=False)
+        assert all(result['IMP_Final_Score'] >= 0.0)
+        assert all(result['IMP_Final_Score'] <= 1.0)
+
+    def test_qed_multiplier_still_works(self):
+        """QED multiplier formula should still be 0.75 + 0.25 * QED."""
+        df = self._make_test_df()
+        df['QED'] = [0.0, 0.5, 1.0]
+        result = calculate_imp_score(df, use_pdb=False)
+        assert abs(result['QED_Multiplier'].iloc[0] - 0.75) < 0.001
+        assert abs(result['QED_Multiplier'].iloc[1] - 0.875) < 0.001
+        assert abs(result['QED_Multiplier'].iloc[2] - 1.0) < 0.001
+
+    def test_base_score_formula(self):
+        """Base score should equal sum of weighted components (verifiable with known inputs)."""
+        df = self._make_test_df()
+        df['QED'] = [1.0, 1.0, 1.0]
+        result = calculate_imp_score(df, use_pdb=False)
+
+        for i in range(len(result)):
+            expected = (
+                0.45 * result['Efficiency_Score'].iloc[i] +
+                0.20 * result['Distance_Score'].iloc[i] +
+                0.15 * result['Angle_Score'].iloc[i] +
+                0.15 * result['Interference_Score'].iloc[i] +
+                0.05 * result['PDB_Score'].iloc[i]
+            )
+            assert abs(result['IMP_Base_Score'].iloc[i] - expected) < 0.001
 
 
 if __name__ == "__main__":

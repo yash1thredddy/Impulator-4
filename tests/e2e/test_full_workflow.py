@@ -49,7 +49,13 @@ def mock_azure():
 
 @pytest.fixture
 def client_with_db(test_engine, mock_azure):
-    """Create a test client with properly configured database."""
+    """Create a test client with properly configured database.
+
+    Mocks the scheduler to prevent background job processing during tests.
+    Without this, the scheduler picks up jobs and submits them to the
+    ThreadPoolExecutor, which then tries to query the database after
+    the test fixture has already restored the original engine.
+    """
     from backend.main import app
     from backend.core import database as db_module
     from backend.core.database import get_db
@@ -69,8 +75,13 @@ def client_with_db(test_engine, mock_azure):
             session.close()
 
     app.dependency_overrides[get_db] = override_get_db
-    client = TestClient(app)
-    yield client
+
+    # Mock the scheduler trigger to prevent background job processing.
+    # Without this, the executor spawns threads that outlive the test,
+    # causing "no such table" errors when the original engine is restored.
+    with patch('backend.core.scheduler.job_scheduler.trigger'):
+        client = TestClient(app)
+        yield client
 
     app.dependency_overrides.clear()
     db_module.engine = original_engine
@@ -87,6 +98,7 @@ class TestJobSubmissionWorkflow:
             "/api/v1/jobs",
             json={
                 "compound_name": "Ethanol",
+                "author_name": "Test Author",
                 "smiles": "CCO",
                 "similarity_threshold": 90
             },
@@ -119,9 +131,9 @@ class TestJobSubmissionWorkflow:
             "/api/v1/jobs/batch",
             json={
                 "compounds": [
-                    {"compound_name": "Ethanol", "smiles": "CCO"},
-                    {"compound_name": "Methanol", "smiles": "CO"},
-                    {"compound_name": "Propanol", "smiles": "CCCO"},
+                    {"compound_name": "Ethanol", "author_name": "Test Author", "smiles": "CCO"},
+                    {"compound_name": "Methanol", "author_name": "Test Author", "smiles": "CO"},
+                    {"compound_name": "Propanol", "author_name": "Test Author", "smiles": "CCCO"},
                 ],
                 "similarity_threshold": 90
             },
@@ -181,6 +193,7 @@ class TestDuplicateDetectionWorkflow:
             "/api/v1/jobs",
             json={
                 "compound_name": "Ethanol",
+                "author_name": "Test Author",
                 "smiles": "CCO",
                 "similarity_threshold": 90
             },
@@ -209,6 +222,7 @@ class TestJobCancellationWorkflow:
             "/api/v1/jobs",
             json={
                 "compound_name": "Test",
+                "author_name": "Test Author",
                 "smiles": "CCO",
                 "similarity_threshold": 90
             },
@@ -234,8 +248,8 @@ class TestJobCancellationWorkflow:
             "/api/v1/jobs/batch",
             json={
                 "compounds": [
-                    {"compound_name": "Test1", "smiles": "CCO"},
-                    {"compound_name": "Test2", "smiles": "CO"},
+                    {"compound_name": "Test1", "author_name": "Test Author", "smiles": "CCO"},
+                    {"compound_name": "Test2", "author_name": "Test Author", "smiles": "CO"},
                 ],
                 "similarity_threshold": 90
             },
@@ -314,6 +328,7 @@ class TestSessionIsolation:
                 "/api/v1/jobs",
                 json={
                     "compound_name": f"Session1Job{i}",
+                    "author_name": "Test Author",
                     "smiles": "CCO",
                     "similarity_threshold": 90
                 },
@@ -329,6 +344,7 @@ class TestSessionIsolation:
                 "/api/v1/jobs",
                 json={
                     "compound_name": f"Session2Job{i}",
+                    "author_name": "Test Author",
                     "smiles": "CCO",
                     "similarity_threshold": 90
                 },
@@ -373,6 +389,7 @@ class TestInputValidation:
             "/api/v1/jobs",
             json={
                 "compound_name": "Invalid",
+                "author_name": "Test Author",
                 "smiles": "not_a_valid_smiles!!!",
                 "similarity_threshold": 90
             },
@@ -388,6 +405,7 @@ class TestInputValidation:
             "/api/v1/jobs",
             json={
                 "compound_name": "Test",
+                "author_name": "Test Author",
                 "smiles": "CCO",
                 "similarity_threshold": 90
             },
@@ -401,7 +419,7 @@ class TestInputValidation:
         """Test that batch size is limited."""
         # Create a batch exceeding the limit
         compounds = [
-            {"compound_name": f"Compound{i}", "smiles": "CCO"}
+            {"compound_name": f"Compound{i}", "author_name": "Test Author", "smiles": "CCO"}
             for i in range(1001)  # Over the 1000 limit
         ]
 

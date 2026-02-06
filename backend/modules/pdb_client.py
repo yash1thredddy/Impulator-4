@@ -2,7 +2,7 @@
 RCSB PDB Client Module
 Provides integration with RCSB Protein Data Bank for structural evidence scoring.
 
-Component 4 of O[Q/P/L]A scoring: PDB Structural Evidence Score (15% weight)
+Component 4 of IMP scoring: PDB Structural Evidence Score (15% weight)
 - Query PDB for compound or close analogs
 - Extract resolution data (X-ray crystallography quality)
 - Count structures with binding affinity data
@@ -521,7 +521,7 @@ def get_pdb_evidence_score(
     similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD
 ) -> Dict[str, any]:
     """
-    Calculate PDB Structural Evidence Score (Component 4 of O[Q/P/L]A).
+    Calculate PDB Structural Evidence Score (Component 4 of IMP scoring).
 
     Args:
         smiles: SMILES string of query compound

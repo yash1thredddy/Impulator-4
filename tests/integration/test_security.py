@@ -82,6 +82,7 @@ class TestSessionValidation:
             "/api/v1/jobs",
             json={
                 "compound_name": "TestCompound",
+                "author_name": "Test Author",
                 "smiles": "CCO",
                 "similarity_threshold": 90,
             },
@@ -97,6 +98,7 @@ class TestSessionValidation:
             "/api/v1/jobs",
             json={
                 "compound_name": "TestCompound",
+                "author_name": "Test Author",
                 "smiles": "CCO",
                 "similarity_threshold": 90,
             },
@@ -112,6 +114,7 @@ class TestSessionValidation:
             "/api/v1/jobs",
             json={
                 "compound_name": "TestCompound",
+                "author_name": "Test Author",
                 "smiles": "CCO",
                 "similarity_threshold": 90,
             }
@@ -132,6 +135,7 @@ class TestOwnershipChecks:
             "/api/v1/jobs",
             json={
                 "compound_name": "OwnedCompound",
+                "author_name": "Test Author",
                 "smiles": "CCCO",
                 "similarity_threshold": 90,
             },
@@ -157,6 +161,7 @@ class TestOwnershipChecks:
             "/api/v1/jobs",
             json={
                 "compound_name": "OtherOwnedCompound",
+                "author_name": "Test Author",
                 "smiles": "CCCCO",
                 "similarity_threshold": 90,
             },
@@ -183,6 +188,7 @@ class TestOwnershipChecks:
             "/api/v1/jobs",
             json={
                 "compound_name": "DeleteTestCompound",
+                "author_name": "Test Author",
                 "smiles": "CCCCCO",
                 "similarity_threshold": 90,
             },
@@ -251,6 +257,7 @@ class TestInputValidation:
                 "/api/v1/jobs",
                 json={
                     "compound_name": "Test",
+                    "author_name": "Test Author",
                     "smiles": smiles,
                     "similarity_threshold": 90,
                 },
@@ -265,6 +272,7 @@ class TestInputValidation:
             "/api/v1/jobs",
             json={
                 "compound_name": "../../../etc/passwd",
+                "author_name": "Test Author",
                 "smiles": "CCO",
                 "similarity_threshold": 90,
             },
@@ -277,7 +285,7 @@ class TestInputValidation:
         """Test that batch size limit is enforced."""
         # Create a batch with too many compounds (over 1000)
         compounds = [
-            {"compound_name": f"Compound{i}", "smiles": "CCO", "similarity_threshold": 90}
+            {"compound_name": f"Compound{i}", "author_name": "Test Author", "smiles": "CCO", "similarity_threshold": 90}
             for i in range(1001)
         ]
 
@@ -304,6 +312,7 @@ class TestHTTPStatusCodes:
             "/api/v1/jobs",
             json={
                 "compound_name": "StatusTestCompound",
+                "author_name": "Test Author",
                 "smiles": "CCCCCCO",
                 "similarity_threshold": 90,
             },

@@ -119,10 +119,10 @@ def backfill_compound(db, compound: Compound) -> bool:
         compound.imp_candidates = imp_candidates
         updated = True
 
-    # Average OQPLA score
-    avg_oqpla = summary.get('avg_oqpla_score')
-    if avg_oqpla is not None and compound.avg_oqpla_score is None:
-        compound.avg_oqpla_score = avg_oqpla
+    # Average IMP score
+    avg_imp = summary.get('imp_score')
+    if avg_imp is not None and compound.imp_score is None:
+        compound.imp_score = avg_imp
         updated = True
 
     # Clean up temp file if we downloaded from Azure
@@ -134,7 +134,7 @@ def backfill_compound(db, compound: Compound) -> bool:
 
     if updated:
         logger.info(f"Updated {compound_name}: smiles={bool(smiles)}, chembl_id={chembl_id}, "
-                   f"activities={total_activities}, imps={imp_candidates}, oqpla={avg_oqpla}")
+                   f"activities={total_activities}, imps={imp_candidates}, imp_score={avg_imp}")
     else:
         logger.info(f"No updates needed for {compound_name}")
 
