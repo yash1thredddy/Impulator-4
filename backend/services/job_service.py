@@ -604,6 +604,8 @@ class JobService:
                 duplicate_of=job_params.get('duplicate_of'),
                 inherit_children_from=job_params.get('inherit_children_from'),
                 replace_entry_id=job_params.get('replace_entry_id'),
+                session_id=job.session_id,
+                job_id=job_id,
             )
 
             db.commit()
@@ -645,6 +647,8 @@ class JobService:
         duplicate_of: Optional[str] = None,
         inherit_children_from: Optional[str] = None,
         replace_entry_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        job_id: Optional[str] = None,
     ) -> None:
         """
         Create or update Compound entry in local database.
@@ -660,8 +664,10 @@ class JobService:
             duplicate_of: Entry ID of the original compound (if duplicate)
             inherit_children_from: Entry ID of old compound whose children should be re-pointed
             replace_entry_id: Entry ID of old compound to delete after successful replacement
+            session_id: Session ID for audit trail
+            job_id: Job ID for audit trail
         """
-        from backend.models.database import Compound
+        from backend.models.database import Compound, DeletedCompound
         import uuid
 
         # Validate result_summary before accessing
@@ -831,10 +837,30 @@ class JobService:
                                 f"compound to new entry {new_id}"
                             )
 
+                    # Archive to deleted_compounds table before deletion (audit trail)
+                    deleted_record = DeletedCompound(
+                        original_id=old_compound.id,
+                        entry_id=old_compound.entry_id,
+                        compound_name=old_compound.compound_name,
+                        chembl_id=old_compound.chembl_id,
+                        smiles=old_compound.smiles,
+                        inchikey=old_compound.inchikey,
+                        author_name=old_compound.author_name,
+                        is_duplicate=old_compound.is_duplicate,
+                        duplicate_of=old_compound.duplicate_of,
+                        activity_types=old_compound.activity_types,
+                        storage_path=old_compound.storage_path,
+                        deleted_by_session=session_id,
+                        deleted_by_job_id=job_id,
+                        deletion_reason="replaced",
+                        original_processed_at=old_compound.processed_at,
+                    )
+                    db.add(deleted_record)
+
                     # Delete from database (DB operation - safe inside lock)
                     db.delete(old_compound)
                     logger.info(
-                        f"Replacement complete: deleted old compound '{old_name}' "
+                        f"Replacement complete: archived and deleted old compound '{old_name}' "
                         f"(entry_id={replace_entry_id}) after successful replacement"
                     )
 
