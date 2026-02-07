@@ -101,7 +101,7 @@ def timed_request(method: str, url: str, **kwargs) -> Tuple[Optional[requests.Re
 #  1. ChEMBL REST API
 # ═══════════════════════════════════════════════════════════════════════════
 
-def test_chembl_rest_similarity() -> TestResult:
+def check_chembl_rest_similarity() -> TestResult:
     """ChEMBL REST: Similarity search for Aspirin."""
     t = TestResult("Similarity Search", "ChEMBL REST")
     url = f"{CHEMBL_REST_BASE}/similarity/{ASPIRIN_SMILES}/90.json"
@@ -117,7 +117,7 @@ def test_chembl_rest_similarity() -> TestResult:
     return t
 
 
-def test_chembl_rest_molecule() -> TestResult:
+def check_chembl_rest_molecule() -> TestResult:
     """ChEMBL REST: Fetch molecule data for Aspirin."""
     t = TestResult("Molecule Data", "ChEMBL REST")
     url = f"{CHEMBL_REST_BASE}/molecule/{ASPIRIN_CHEMBL_ID}.json"
@@ -133,7 +133,7 @@ def test_chembl_rest_molecule() -> TestResult:
     return t
 
 
-def test_chembl_rest_activities() -> TestResult:
+def check_chembl_rest_activities() -> TestResult:
     """ChEMBL REST: Fetch activities for Aspirin."""
     t = TestResult("Activities", "ChEMBL REST")
     url = f"{CHEMBL_REST_BASE}/activity.json?molecule_chembl_id={ASPIRIN_CHEMBL_ID}&limit=5"
@@ -149,7 +149,7 @@ def test_chembl_rest_activities() -> TestResult:
     return t
 
 
-def test_chembl_rest_target() -> TestResult:
+def check_chembl_rest_target() -> TestResult:
     """ChEMBL REST: Fetch target info (COX-2)."""
     t = TestResult("Target Info", "ChEMBL REST")
     url = f"{CHEMBL_REST_BASE}/target/CHEMBL230.json"
@@ -165,7 +165,7 @@ def test_chembl_rest_target() -> TestResult:
     return t
 
 
-def test_chembl_rest_drug_indication() -> TestResult:
+def check_chembl_rest_drug_indication() -> TestResult:
     """ChEMBL REST: Fetch drug indications for Aspirin."""
     t = TestResult("Drug Indications", "ChEMBL REST")
     url = f"{CHEMBL_REST_BASE}/drug_indication.json?molecule_chembl_id={ASPIRIN_CHEMBL_ID}&limit=5"
@@ -185,7 +185,7 @@ def test_chembl_rest_drug_indication() -> TestResult:
 #  2. ChEMBL Python Client
 # ═══════════════════════════════════════════════════════════════════════════
 
-def test_chembl_client_similarity() -> TestResult:
+def check_chembl_client_similarity() -> TestResult:
     """ChEMBL Client: Similarity search via chembl_webresource_client."""
     t = TestResult("Client Similarity", "ChEMBL Client")
     try:
@@ -204,7 +204,7 @@ def test_chembl_client_similarity() -> TestResult:
     return t
 
 
-def test_chembl_client_molecule() -> TestResult:
+def check_chembl_client_molecule() -> TestResult:
     """ChEMBL Client: Molecule lookup via chembl_webresource_client."""
     t = TestResult("Client Molecule", "ChEMBL Client")
     try:
@@ -227,7 +227,7 @@ def test_chembl_client_molecule() -> TestResult:
 #  3. RCSB PDB Search API
 # ═══════════════════════════════════════════════════════════════════════════
 
-def test_pdb_search_chemical() -> TestResult:
+def check_pdb_search_chemical() -> TestResult:
     """PDB Search: Chemical similarity search for Aspirin."""
     t = TestResult("Chemical Search", "PDB Search")
     query = {
@@ -259,7 +259,7 @@ def test_pdb_search_chemical() -> TestResult:
     return t
 
 
-def test_pdb_data_entry() -> TestResult:
+def check_pdb_data_entry() -> TestResult:
     """PDB Data: Fetch entry metadata for a known structure."""
     t = TestResult("Entry Metadata", "PDB Data")
     url = f"{PDB_DATA_URL}/entry/{KNOWN_PDB_ID}"
@@ -275,7 +275,7 @@ def test_pdb_data_entry() -> TestResult:
     return t
 
 
-def test_pdb_graphql_resolution() -> TestResult:
+def check_pdb_graphql_resolution() -> TestResult:
     """PDB GraphQL: Batch resolution fetch."""
     t = TestResult("GraphQL Resolution", "PDB GraphQL")
     query = """
@@ -312,7 +312,7 @@ def test_pdb_graphql_resolution() -> TestResult:
 #  4. ClassyFire
 # ═══════════════════════════════════════════════════════════════════════════
 
-def test_classyfire() -> TestResult:
+def check_classyfire() -> TestResult:
     """ClassyFire: Chemical classification for Aspirin."""
     t = TestResult("Classification", "ClassyFire")
     url = f"{CLASSYFIRE_URL}/{ASPIRIN_INCHIKEY}.json"
@@ -331,7 +331,7 @@ def test_classyfire() -> TestResult:
     return t
 
 
-def test_classyfire_quercetin() -> TestResult:
+def check_classyfire_quercetin() -> TestResult:
     """ClassyFire: Classification for Quercetin (natural product)."""
     t = TestResult("Quercetin Classification", "ClassyFire")
     url = f"{CLASSYFIRE_URL}/{QUERCETIN_INCHIKEY}.json"
@@ -353,7 +353,7 @@ def test_classyfire_quercetin() -> TestResult:
 #  5. NPClassifier
 # ═══════════════════════════════════════════════════════════════════════════
 
-def test_npclassifier() -> TestResult:
+def check_npclassifier() -> TestResult:
     """NPClassifier: Natural product classification for Quercetin."""
     t = TestResult("NP Classification", "NPClassifier")
     resp, ms, err = timed_request("GET", NPCLASSIFIER_URL, params={"smiles": QUERCETIN_SMILES})
@@ -373,7 +373,7 @@ def test_npclassifier() -> TestResult:
     return t
 
 
-def test_npclassifier_aspirin() -> TestResult:
+def check_npclassifier_aspirin() -> TestResult:
     """NPClassifier: Classification for Aspirin (synthetic drug)."""
     t = TestResult("Aspirin NP Class", "NPClassifier")
     resp, ms, err = timed_request("GET", NPCLASSIFIER_URL, params={"smiles": ASPIRIN_SMILES})
@@ -392,7 +392,7 @@ def test_npclassifier_aspirin() -> TestResult:
 #  6. HTTPS Verification
 # ═══════════════════════════════════════════════════════════════════════════
 
-def test_https_tls_chembl() -> TestResult:
+def check_https_tls_chembl() -> TestResult:
     """TLS: Verify HTTPS certificate for ChEMBL."""
     t = TestResult("TLS Certificate", "ChEMBL HTTPS")
     try:
@@ -407,7 +407,7 @@ def test_https_tls_chembl() -> TestResult:
     return t
 
 
-def test_https_tls_pdb() -> TestResult:
+def check_https_tls_pdb() -> TestResult:
     """TLS: Verify HTTPS certificate for RCSB PDB."""
     t = TestResult("TLS Certificate", "PDB HTTPS")
     try:
@@ -422,7 +422,7 @@ def test_https_tls_pdb() -> TestResult:
     return t
 
 
-def test_http_classyfire() -> TestResult:
+def check_http_classyfire() -> TestResult:
     """HTTP: Verify ClassyFire is reachable over HTTP (no TLS support)."""
     t = TestResult("HTTP Reachability", "ClassyFire HTTP")
     try:
@@ -441,31 +441,31 @@ def test_http_classyfire() -> TestResult:
 
 ALL_TESTS = {
     "chembl": [
-        test_chembl_rest_similarity,
-        test_chembl_rest_molecule,
-        test_chembl_rest_activities,
-        test_chembl_rest_target,
-        test_chembl_rest_drug_indication,
-        test_chembl_client_similarity,
-        test_chembl_client_molecule,
+        check_chembl_rest_similarity,
+        check_chembl_rest_molecule,
+        check_chembl_rest_activities,
+        check_chembl_rest_target,
+        check_chembl_rest_drug_indication,
+        check_chembl_client_similarity,
+        check_chembl_client_molecule,
     ],
     "pdb": [
-        test_pdb_search_chemical,
-        test_pdb_data_entry,
-        test_pdb_graphql_resolution,
+        check_pdb_search_chemical,
+        check_pdb_data_entry,
+        check_pdb_graphql_resolution,
     ],
     "classyfire": [
-        test_classyfire,
-        test_classyfire_quercetin,
+        check_classyfire,
+        check_classyfire_quercetin,
     ],
     "npclassifier": [
-        test_npclassifier,
-        test_npclassifier_aspirin,
+        check_npclassifier,
+        check_npclassifier_aspirin,
     ],
     "https": [
-        test_https_tls_chembl,
-        test_https_tls_pdb,
-        test_http_classyfire,
+        check_https_tls_chembl,
+        check_https_tls_pdb,
+        check_http_classyfire,
     ],
 }
 

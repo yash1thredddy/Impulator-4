@@ -157,6 +157,7 @@ class TestMetricsLockReentrancy:
             t.start()
         for t in threads:
             t.join(timeout=5)
+            assert not t.is_alive(), f"Thread {t.name} still alive after 5s — possible deadlock"
 
         assert not errors, f"Concurrent metrics access failed: {errors}"
         assert m.api_calls_total == 200

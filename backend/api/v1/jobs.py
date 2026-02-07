@@ -633,16 +633,17 @@ async def resolve_duplicate(
                 old_entry_id = existing.entry_id
                 replace_entry_id = old_entry_id
 
-                # Check if this main compound has children that need to be inherited
-                children = db.query(Compound).filter(
-                    Compound.duplicate_of == old_entry_id
-                ).all()
-                if children:
-                    inherit_children_from = old_entry_id
-                    logger.info(
-                        f"Compound '{old_name}' has {len(children)} children - "
-                        f"will inherit after replacement completes"
-                    )
+                # Only reparent children if the replaced compound is canonical (not a duplicate itself)
+                if not existing.is_duplicate:
+                    children = db.query(Compound).filter(
+                        Compound.duplicate_of == old_entry_id
+                    ).all()
+                    if children:
+                        inherit_children_from = old_entry_id
+                        logger.info(
+                            f"Compound '{old_name}' has {len(children)} children - "
+                            f"will inherit after replacement completes"
+                        )
 
                 logger.info(
                     f"Replacement requested for '{old_name}' (entry_id={old_entry_id}) "
@@ -948,7 +949,12 @@ async def create_batch_job(
                 existing = None
                 compound_inchikey = generate_inchikey(compound.smiles) if compound.smiles else None
                 if compound_inchikey:
-                    existing = db.query(Compound).filter(Compound.inchikey == compound_inchikey).first()
+                    # Prefer canonical (non-duplicate) compound over arbitrary match
+                    candidates = db.query(Compound).filter(Compound.inchikey == compound_inchikey).all()
+                    existing = next(
+                        (c for c in candidates if not c.is_duplicate),
+                        candidates[0] if candidates else None
+                    )
                 if existing:
                     replace_entry_id = existing.entry_id
 

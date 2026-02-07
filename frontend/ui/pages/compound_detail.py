@@ -1020,8 +1020,17 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
 
             # Make Target_ChEMBL_ID a clickable link to ChEMBL
             if 'Target_ChEMBL_ID' in target_metrics_df.columns:
+                def _to_chembl_target_link(value):
+                    """Build safe ChEMBL target URL, skipping missing IDs."""
+                    if pd.isna(value):
+                        return ""
+                    chembl_id = str(value).strip()
+                    if not chembl_id or chembl_id.lower() == "nan":
+                        return ""
+                    return f"https://www.ebi.ac.uk/chembl/explore/target/{chembl_id}"
+
                 target_metrics_df['Target_ChEMBL_ID'] = target_metrics_df['Target_ChEMBL_ID'].apply(
-                    lambda x: f"https://www.ebi.ac.uk/chembl/explore/target/{x}" if x else ""
+                    _to_chembl_target_link
                 )
                 col_config = {
                     "Target_ChEMBL_ID": st.column_config.LinkColumn(
@@ -3076,8 +3085,8 @@ def _load_compound_data(
                 if mol:
                     inchi = MolToInchi(mol)
                     inchikey = MolToInchiKey(mol)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"InChI/InChIKey conversion failed for '{display_name}' (SMILES={smiles[:50]}): {e}")
 
         return {
             'compound_name': display_name,
