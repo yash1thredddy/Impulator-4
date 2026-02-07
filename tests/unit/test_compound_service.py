@@ -65,13 +65,15 @@ class TestCompoundServiceProgressCallbacks:
 
     def test_update_progress(self, mock_db):
         """Test progress update calls job_service."""
+        import sys
         from backend.services.compound_service import CompoundService
         from backend.models.database import JobStatus
 
         service = CompoundService()
+        js_mod = sys.modules['backend.services.job_service']
 
         mock_js = MagicMock()
-        with patch('backend.services.job_service.job_service', mock_js, create=True):
+        with patch.object(js_mod, 'job_service', mock_js):
             service._update_progress(
                 mock_db,
                 "test-job-id",
@@ -90,12 +92,14 @@ class TestCompoundServiceProgressCallbacks:
 
     def test_complete_job(self, mock_db):
         """Test job completion calls job_service."""
+        import sys
         from backend.services.compound_service import CompoundService
 
         service = CompoundService()
+        js_mod = sys.modules['backend.services.job_service']
 
         mock_js = MagicMock()
-        with patch('backend.services.job_service.job_service', mock_js, create=True):
+        with patch.object(js_mod, 'job_service', mock_js):
             service._complete_job(
                 mock_db,
                 "test-job-id",
@@ -107,12 +111,14 @@ class TestCompoundServiceProgressCallbacks:
 
     def test_fail_job(self, mock_db):
         """Test job failure calls job_service."""
+        import sys
         from backend.services.compound_service import CompoundService
 
         service = CompoundService()
+        js_mod = sys.modules['backend.services.job_service']
 
         mock_js = MagicMock()
-        with patch('backend.services.job_service.job_service', mock_js, create=True):
+        with patch.object(js_mod, 'job_service', mock_js):
             service._fail_job(mock_db, "test-job-id", "Test error")
 
             mock_js.fail_job.assert_called_once_with(
