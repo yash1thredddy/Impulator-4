@@ -61,8 +61,11 @@ def client_with_db(test_engine, mock_azure):
             session.close()
 
     app.dependency_overrides[get_db] = override_get_db
-    client = TestClient(app)
-    yield client
+
+    # Mock the scheduler to prevent background job processing after test teardown
+    with patch('backend.core.scheduler.job_scheduler.trigger'):
+        client = TestClient(app)
+        yield client
 
     app.dependency_overrides.clear()
     db_module.engine = original_engine
@@ -101,6 +104,9 @@ class TestConcurrentJobCreation:
         app.dependency_overrides[get_db] = override_get_db
 
         try:
+            # Mock the scheduler to prevent background job processing after test teardown
+            scheduler_patch = patch('backend.core.scheduler.job_scheduler.trigger')
+            scheduler_patch.start()
             client = TestClient(app)
             results = []
             job_ids = []
@@ -112,6 +118,7 @@ class TestConcurrentJobCreation:
                         "/api/v1/jobs",
                         json={
                             "compound_name": f"TestCompound{i}",
+                            "author_name": "Test Author",
                             "smiles": "CCO",
                             "similarity_threshold": 90
                         },
@@ -125,14 +132,18 @@ class TestConcurrentJobCreation:
                     with lock:
                         results.append(f"error: {e}")
 
-            # Create jobs in parallel (reduced to 5 for SQLite compatibility)
-            with ThreadPoolExecutor(max_workers=5) as executor:
-                executor.map(create_job, range(5))
+            # Submit jobs with limited parallelism (2 workers max)
+            # SQLite in-memory with StaticPool shares a single connection,
+            # so high concurrency causes cursor reset errors
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [executor.submit(create_job, i) for i in range(3)]
+                for f in futures:
+                    f.result()  # Wait for all to complete
 
             # Count successes - SQLite may have some failures due to locking
             successes = [r for r in results if r == 201]
 
-            # At least some jobs should succeed
+            # At least one job should succeed even under contention
             assert len(successes) >= 1, f"Too few successes: {results}"
 
             # Verify no duplicate job IDs among returned IDs
@@ -155,6 +166,7 @@ class TestConcurrentJobCreation:
                 session.close()
 
         finally:
+            scheduler_patch.stop()
             app.dependency_overrides.clear()
             db_module.engine = original_engine
             db_module.SessionLocal = original_session_local
@@ -235,6 +247,7 @@ class TestRateLimiterUnderLoad:
                 "/api/v1/jobs",
                 json={
                     "compound_name": f"BurstTest{i}",
+                    "author_name": "Test Author",
                     "smiles": "CCO",
                     "similarity_threshold": 90
                 },
@@ -262,6 +275,7 @@ class TestRateLimiterUnderLoad:
                 "/api/v1/jobs",
                 json={
                     "compound_name": f"Session1Test{i}",
+                    "author_name": "Test Author",
                     "smiles": "CCO",
                     "similarity_threshold": 90
                 },
@@ -275,6 +289,7 @@ class TestRateLimiterUnderLoad:
                 "/api/v1/jobs",
                 json={
                     "compound_name": f"Session2Test{i}",
+                    "author_name": "Test Author",
                     "smiles": "CCO",
                     "similarity_threshold": 90
                 },

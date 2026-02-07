@@ -131,7 +131,7 @@ async def detailed_health_check(db: Session = Depends(get_db)) -> Dict[str, Any]
         "status": "healthy" if executor_stats.get("max_workers", 0) > 0 else "degraded",
         "active_jobs": executor_stats.get("active_jobs", 0),
         "max_workers": executor_stats.get("max_workers", 0),
-        "pending_jobs": executor_stats.get("pending_jobs", 0),
+        "has_capacity": executor_stats.get("has_capacity", False),
     }
 
     # Azure configuration

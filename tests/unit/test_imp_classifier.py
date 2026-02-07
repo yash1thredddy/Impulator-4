@@ -3,7 +3,7 @@ Unit tests for IMP Classification Module.
 
 Tests the core IMP vs Non-IMP classification logic including:
 - Classification based on outlier count
-- Confidence level assignment (OQPLA-based and simple)
+- Confidence level assignment (IMP score-based and simple)
 - Summary generation
 - Filtering and ranking
 - Edge cases and error handling
@@ -16,14 +16,14 @@ import numpy as np
 class TestClassifyIMPCandidates:
     """Tests for classify_imp_candidates function."""
 
-    def test_classify_with_oqpla_high_confidence(self):
-        """Test classification with high OQPLA score gives High confidence."""
+    def test_classify_with_imp_score_high_confidence(self):
+        """Test classification with high IMP score gives High confidence."""
         from backend.modules.imp_classifier import classify_imp_candidates
 
         df = pd.DataFrame({
             'ChEMBL_ID': ['CHEMBL1', 'CHEMBL2'],
             'Outlier_Count': [3, 1],
-            'OQPLA_Final_Score': [0.85, 0.3]
+            'IMP_Final_Score': [0.85, 0.3]
         })
 
         result = classify_imp_candidates(df)
@@ -33,13 +33,13 @@ class TestClassifyIMPCandidates:
         assert not result.loc[1, 'Is_IMP_Candidate']
         assert result.loc[1, 'IMP_Confidence'] == 'Not IMP'
 
-    def test_classify_with_oqpla_medium_confidence(self):
-        """Test classification with medium OQPLA score gives Medium confidence."""
+    def test_classify_with_imp_score_medium_confidence(self):
+        """Test classification with medium IMP score gives Medium confidence."""
         from backend.modules.imp_classifier import classify_imp_candidates
 
         df = pd.DataFrame({
             'Outlier_Count': [2],
-            'OQPLA_Final_Score': [0.6]
+            'IMP_Final_Score': [0.6]
         })
 
         result = classify_imp_candidates(df)
@@ -47,13 +47,13 @@ class TestClassifyIMPCandidates:
         assert result.loc[0, 'Is_IMP_Candidate']
         assert result.loc[0, 'IMP_Confidence'] == 'Medium'
 
-    def test_classify_with_oqpla_low_confidence(self):
-        """Test classification with low OQPLA score gives Low confidence."""
+    def test_classify_with_imp_score_low_confidence(self):
+        """Test classification with low IMP score gives Low confidence."""
         from backend.modules.imp_classifier import classify_imp_candidates
 
         df = pd.DataFrame({
             'Outlier_Count': [2],
-            'OQPLA_Final_Score': [0.4]
+            'IMP_Final_Score': [0.4]
         })
 
         result = classify_imp_candidates(df)
@@ -61,15 +61,15 @@ class TestClassifyIMPCandidates:
         assert result.loc[0, 'Is_IMP_Candidate']
         assert result.loc[0, 'IMP_Confidence'] == 'Low'
 
-    def test_classify_without_oqpla_simple_confidence(self):
-        """Test simple confidence assignment when OQPLA not available."""
+    def test_classify_without_imp_score_simple_confidence(self):
+        """Test simple confidence assignment when IMP score not available."""
         from backend.modules.imp_classifier import classify_imp_candidates
 
         df = pd.DataFrame({
             'Outlier_Count': [4, 3, 2, 1]
         })
 
-        result = classify_imp_candidates(df, use_oqpla=False)
+        result = classify_imp_candidates(df, use_imp_score=False)
 
         assert result.loc[0, 'IMP_Confidence'] == 'High'  # 4 outliers
         assert result.loc[1, 'IMP_Confidence'] == 'Medium'  # 3 outliers
@@ -82,7 +82,7 @@ class TestClassifyIMPCandidates:
 
         df = pd.DataFrame({
             'Outlier_Count': [3, 2, 1],
-            'OQPLA_Final_Score': [0.8, 0.8, 0.8]
+            'IMP_Final_Score': [0.8, 0.8, 0.8]
         })
 
         result = classify_imp_candidates(df, min_outlier_count=3)
@@ -97,19 +97,19 @@ class TestClassifyIMPCandidates:
 
         df = pd.DataFrame({
             'ChEMBL_ID': ['CHEMBL1'],
-            'OQPLA_Final_Score': [0.8]
+            'IMP_Final_Score': [0.8]
         })
 
         with pytest.raises(ValueError, match="Outlier_Count column not found"):
             classify_imp_candidates(df)
 
-    def test_classify_with_nan_oqpla(self):
-        """Test classification handles NaN OQPLA scores."""
+    def test_classify_with_nan_imp_score(self):
+        """Test classification handles NaN IMP score."""
         from backend.modules.imp_classifier import classify_imp_candidates
 
         df = pd.DataFrame({
             'Outlier_Count': [3],
-            'OQPLA_Final_Score': [np.nan]
+            'IMP_Final_Score': [np.nan]
         })
 
         result = classify_imp_candidates(df)
@@ -123,7 +123,7 @@ class TestClassifyIMPCandidates:
 
         df = pd.DataFrame({
             'Outlier_Count': [],
-            'OQPLA_Final_Score': []
+            'IMP_Final_Score': []
         })
 
         result = classify_imp_candidates(df)
@@ -202,7 +202,7 @@ class TestFilterIMPCandidates:
         df = pd.DataFrame({
             'Is_IMP_Candidate': [True, True, True, False],
             'IMP_Confidence': ['High', 'Medium', 'Low', 'Not IMP'],
-            'OQPLA_Final_Score': [0.9, 0.6, 0.4, 0.3]
+            'IMP_Final_Score': [0.9, 0.6, 0.4, 0.3]
         })
 
         result = filter_imp_candidates(df, min_confidence='High')
@@ -217,7 +217,7 @@ class TestFilterIMPCandidates:
         df = pd.DataFrame({
             'Is_IMP_Candidate': [True, True, True, False],
             'IMP_Confidence': ['High', 'Medium', 'Low', 'Not IMP'],
-            'OQPLA_Final_Score': [0.9, 0.6, 0.4, 0.3]
+            'IMP_Final_Score': [0.9, 0.6, 0.4, 0.3]
         })
 
         result = filter_imp_candidates(df, min_confidence='Medium')
@@ -225,35 +225,35 @@ class TestFilterIMPCandidates:
         assert len(result) == 2
         assert set(result['IMP_Confidence']) == {'High', 'Medium'}
 
-    def test_filter_by_min_oqpla_score(self):
-        """Test filtering by minimum OQPLA score."""
+    def test_filter_by_min_imp_score(self):
+        """Test filtering by minimum IMP score."""
         from backend.modules.imp_classifier import filter_imp_candidates
 
         df = pd.DataFrame({
             'Is_IMP_Candidate': [True, True, True],
             'IMP_Confidence': ['High', 'Medium', 'Low'],
-            'OQPLA_Final_Score': [0.9, 0.6, 0.4]
+            'IMP_Final_Score': [0.9, 0.6, 0.4]
         })
 
-        result = filter_imp_candidates(df, min_oqpla_score=0.65)
+        result = filter_imp_candidates(df, min_imp_final_score=0.65)
 
         assert len(result) == 1
-        assert result.iloc[0]['OQPLA_Final_Score'] == 0.9
+        assert result.iloc[0]['IMP_Final_Score'] == 0.9
 
     def test_filter_combined_criteria(self):
-        """Test filtering with both confidence and OQPLA criteria."""
+        """Test filtering with both confidence and IMP score criteria."""
         from backend.modules.imp_classifier import filter_imp_candidates
 
         df = pd.DataFrame({
             'Is_IMP_Candidate': [True, True, True, True],
             'IMP_Confidence': ['High', 'High', 'Medium', 'Low'],
-            'OQPLA_Final_Score': [0.9, 0.75, 0.6, 0.4]
+            'IMP_Final_Score': [0.9, 0.75, 0.6, 0.4]
         })
 
-        result = filter_imp_candidates(df, min_confidence='High', min_oqpla_score=0.8)
+        result = filter_imp_candidates(df, min_confidence='High', min_imp_final_score=0.8)
 
         assert len(result) == 1
-        assert result.iloc[0]['OQPLA_Final_Score'] == 0.9
+        assert result.iloc[0]['IMP_Final_Score'] == 0.9
 
     def test_filter_invalid_confidence_raises(self):
         """Test that invalid confidence level raises ValueError."""
@@ -280,32 +280,32 @@ class TestFilterIMPCandidates:
 class TestRankIMPCandidates:
     """Tests for rank_imp_candidates function."""
 
-    def test_rank_by_oqpla_descending(self):
-        """Test ranking by OQPLA score (highest first)."""
+    def test_rank_by_imp_score_descending(self):
+        """Test ranking by IMP score (highest first)."""
         from backend.modules.imp_classifier import rank_imp_candidates
 
         df = pd.DataFrame({
             'ChEMBL_ID': ['A', 'B', 'C'],
-            'OQPLA_Final_Score': [0.5, 0.9, 0.7]
+            'IMP_Final_Score': [0.5, 0.9, 0.7]
         })
 
-        result = rank_imp_candidates(df, rank_by='OQPLA_Final_Score')
+        result = rank_imp_candidates(df, rank_by='IMP_Final_Score')
 
         assert result.iloc[0]['ChEMBL_ID'] == 'B'  # Highest score
         assert result.iloc[0]['Rank'] == 1
         assert result.iloc[2]['ChEMBL_ID'] == 'A'  # Lowest score
         assert result.iloc[2]['Rank'] == 3
 
-    def test_rank_by_oqpla_ascending(self):
-        """Test ranking by OQPLA score (lowest first)."""
+    def test_rank_by_imp_score_ascending(self):
+        """Test ranking by IMP score (lowest first)."""
         from backend.modules.imp_classifier import rank_imp_candidates
 
         df = pd.DataFrame({
             'ChEMBL_ID': ['A', 'B', 'C'],
-            'OQPLA_Final_Score': [0.5, 0.9, 0.7]
+            'IMP_Final_Score': [0.5, 0.9, 0.7]
         })
 
-        result = rank_imp_candidates(df, rank_by='OQPLA_Final_Score', ascending=True)
+        result = rank_imp_candidates(df, rank_by='IMP_Final_Score', ascending=True)
 
         assert result.iloc[0]['ChEMBL_ID'] == 'A'  # Lowest score
         assert result.iloc[0]['Rank'] == 1
@@ -378,7 +378,7 @@ class TestGenerateIMPReport:
             'Is_IMP_Candidate': [True, True, False],
             'IMP_Confidence': ['High', 'Medium', 'Not IMP'],
             'Outlier_Count': [4, 2, 1],
-            'OQPLA_Final_Score': [0.9, 0.6, 0.3]
+            'IMP_Final_Score': [0.9, 0.6, 0.3]
         })
 
         report = generate_imp_report(df, "Test Compound")
@@ -396,7 +396,7 @@ class TestGenerateIMPReport:
         df = pd.DataFrame({
             'Is_IMP_Candidate': [False],
             'IMP_Confidence': ['Not IMP'],
-            'OQPLA_Final_Score': [0.3]
+            'IMP_Final_Score': [0.3]
         })
 
         report = generate_imp_report(df)
@@ -407,15 +407,15 @@ class TestGenerateIMPReport:
 class TestConfidenceAssignment:
     """Tests for internal confidence assignment functions."""
 
-    def test_assign_confidence_oqpla_boundary_cases(self):
-        """Test OQPLA confidence at exact boundaries."""
-        from backend.modules.imp_classifier import _assign_confidence_oqpla
+    def test_assign_confidence_imp_score_boundary_cases(self):
+        """Test IMP score confidence at exact boundaries."""
+        from backend.modules.imp_classifier import _assign_confidence_imp_score
 
         # Test boundaries
-        assert _assign_confidence_oqpla(True, 0.7) == 'Medium'  # Exactly 0.7
-        assert _assign_confidence_oqpla(True, 0.71) == 'High'  # Just above
-        assert _assign_confidence_oqpla(True, 0.5) == 'Low'  # Exactly 0.5
-        assert _assign_confidence_oqpla(True, 0.51) == 'Medium'  # Just above
+        assert _assign_confidence_imp_score(True, 0.7) == 'Medium'  # Exactly 0.7
+        assert _assign_confidence_imp_score(True, 0.71) == 'High'  # Just above
+        assert _assign_confidence_imp_score(True, 0.5) == 'Low'  # Exactly 0.5
+        assert _assign_confidence_imp_score(True, 0.51) == 'Medium'  # Just above
 
     def test_assign_confidence_simple_boundary_cases(self):
         """Test simple confidence at exact boundaries."""

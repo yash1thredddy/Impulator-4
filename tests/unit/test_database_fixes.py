@@ -148,7 +148,7 @@ class TestStatusTransitionValidation:
         )
 
         # Then complete
-        with patch('backend.services.job_service.sync_db_to_azure'):
+        with patch('backend.services.job_service.sync_db_to_azure', create=True):
             result = job_service.complete_job(
                 db_session, job.id, "/path/result.zip",
                 {"compound_name": "Test", "total_activities": 5}
@@ -171,7 +171,7 @@ class TestStatusTransitionValidation:
         job_service.update_progress(
             db_session, job.id, 10.0, "Starting", JobStatus.PROCESSING
         )
-        with patch('backend.services.job_service.sync_db_to_azure'):
+        with patch('backend.services.job_service.sync_db_to_azure', create=True):
             job_service.complete_job(
                 db_session, job.id, "/path/result.zip",
                 {"compound_name": "Test"}
@@ -213,7 +213,7 @@ class TestStatusTransitionValidation:
         job_service.update_progress(
             db_session, job.id, 10.0, "Starting", JobStatus.PROCESSING
         )
-        with patch('backend.services.job_service.sync_db_to_azure'):
+        with patch('backend.services.job_service.sync_db_to_azure', create=True):
             job_service.complete_job(
                 db_session, job.id, "/path/result.zip", {}
             )
@@ -257,7 +257,7 @@ class TestBatchSummaryAggregation:
         job_service.update_progress(
             db_session, job1.id, 50.0, "Processing", JobStatus.PROCESSING
         )
-        with patch('backend.services.job_service.sync_db_to_azure'):
+        with patch('backend.services.job_service.sync_db_to_azure', create=True):
             job_service.complete_job(
                 db_session, job3.id, "/path/result.zip",
                 {"compound_name": "Test3"}
@@ -329,7 +329,7 @@ class TestCheckPendingCompounds:
         job_service.update_progress(
             db_session, job.id, 10.0, "Starting", JobStatus.PROCESSING
         )
-        with patch('backend.services.job_service.sync_db_to_azure'):
+        with patch('backend.services.job_service.sync_db_to_azure', create=True):
             job_service.complete_job(
                 db_session, job.id, "/path/result.zip", {}
             )

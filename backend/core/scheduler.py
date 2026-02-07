@@ -6,7 +6,7 @@ and submits them to the ThreadPoolExecutor.
 
 Features:
 - Event-driven: starts on job submit, stops after idle timeout
-- Atomic job claiming: prevents race conditions with row-level locking
+- Atomic job claiming: single-threaded scheduler prevents double-claiming
 - 2 workers max: only 2 jobs in executor, rest stay in SQLite
 - Recovery: handles stalled PROCESSING jobs on startup
 """
@@ -126,14 +126,15 @@ class JobScheduler:
         while job_executor.has_capacity():
             try:
                 with get_db_session() as db:
-                    # Find oldest pending job with row-level lock
-                    # skip_locked=True ensures we don't wait for locked rows
-                    # (another thread may be claiming a job)
+                    # Find oldest pending job.
+                    # Note: with_for_update/skip_locked are PostgreSQL features;
+                    # SQLite ignores them silently. Safe here because the
+                    # scheduler runs on a single thread, so no row-level
+                    # locking is needed to prevent double-claiming.
                     job = (
                         db.query(Job)
                         .filter(Job.status == JobStatus.PENDING)
                         .order_by(Job.created_at)
-                        .with_for_update(skip_locked=True)
                         .first()
                     )
 
@@ -182,6 +183,7 @@ class JobScheduler:
                         smiles=smiles,
                         similarity_threshold=params.get('similarity_threshold', 90),
                         activity_types=params.get('activity_types', []),
+                        author_name=params.get('author_name'),
                     )
                     logger.info(f"Scheduler claimed and submitted job {job_id}")
                     work_done = True

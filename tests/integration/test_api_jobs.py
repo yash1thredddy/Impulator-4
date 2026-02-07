@@ -61,8 +61,10 @@ def client(test_engine, mock_azure):
 
     app.dependency_overrides[get_db] = override_get_db
 
-    with TestClient(app) as c:
-        yield c
+    # Mock the scheduler to prevent background job processing after test teardown
+    with patch('backend.core.scheduler.job_scheduler.trigger'):
+        with TestClient(app) as c:
+            yield c
 
     # Restore original values
     app.dependency_overrides.clear()
@@ -140,8 +142,10 @@ class TestJobSubmission:
 
         app.dependency_overrides[get_db] = override_get_db
 
-        with TestClient(app) as c:
-            yield c
+        # Mock the scheduler to prevent background job processing after test teardown
+        with patch('backend.core.scheduler.job_scheduler.trigger'):
+            with TestClient(app) as c:
+                yield c
 
         # Restore original values
         app.dependency_overrides.clear()
@@ -152,6 +156,7 @@ class TestJobSubmission:
         """Test job submission with empty compound name."""
         response = client.post("/api/v1/jobs", json={
             "compound_name": "",
+            "author_name": "Test Author",
             "smiles": "CCO",
             "similarity_threshold": 90
         })
@@ -161,6 +166,7 @@ class TestJobSubmission:
         """Test job submission with empty SMILES."""
         response = client.post("/api/v1/jobs", json={
             "compound_name": "Test",
+            "author_name": "Test Author",
             "smiles": "",
             "similarity_threshold": 90
         })
@@ -170,6 +176,7 @@ class TestJobSubmission:
         """Test job submission with invalid similarity threshold."""
         response = client.post("/api/v1/jobs", json={
             "compound_name": "Test",
+            "author_name": "Test Author",
             "smiles": "CCO",
             "similarity_threshold": 150  # > 100
         })
@@ -222,6 +229,7 @@ class TestJobSubmissionWithScheduler:
 
         response = client.post("/api/v1/jobs", json={
             "compound_name": "TestCompound",
+            "author_name": "Test Author",
             "smiles": "CCO",
             "similarity_threshold": 90
         })
@@ -241,9 +249,9 @@ class TestJobSubmissionWithScheduler:
 
         response = client.post("/api/v1/jobs/batch", json={
             "compounds": [
-                {"compound_name": "Compound1", "smiles": "CCO"},
-                {"compound_name": "Compound2", "smiles": "CCCO"},
-                {"compound_name": "Compound3", "smiles": "CCCCO"}
+                {"compound_name": "Compound1", "author_name": "Test Author", "smiles": "CCO"},
+                {"compound_name": "Compound2", "author_name": "Test Author", "smiles": "CCCO"},
+                {"compound_name": "Compound3", "author_name": "Test Author", "smiles": "CCCCO"}
             ],
             "similarity_threshold": 90,
             "skip_existing": False
@@ -268,6 +276,7 @@ class TestJobSubmissionWithScheduler:
             "/api/v1/jobs",
             json={
                 "compound_name": "StatusTest",
+                "author_name": "Test Author",
                 "smiles": "CCO",
                 "similarity_threshold": 90
             },
@@ -328,8 +337,8 @@ class TestBatchJobOperations:
         """Test that batch submission returns a batch_id."""
         response = client.post("/api/v1/jobs/batch", json={
             "compounds": [
-                {"compound_name": "BatchTest1", "smiles": "CCO"},
-                {"compound_name": "BatchTest2", "smiles": "CCCO"}
+                {"compound_name": "BatchTest1", "author_name": "Test Author", "smiles": "CCO"},
+                {"compound_name": "BatchTest2", "author_name": "Test Author", "smiles": "CCCO"}
             ],
             "similarity_threshold": 90
         })
@@ -349,8 +358,8 @@ class TestBatchJobOperations:
             "/api/v1/jobs/batch",
             json={
                 "compounds": [
-                    {"compound_name": "SummaryTest1", "smiles": "CCO"},
-                    {"compound_name": "SummaryTest2", "smiles": "CCCO"}
+                    {"compound_name": "SummaryTest1", "author_name": "Test Author", "smiles": "CCO"},
+                    {"compound_name": "SummaryTest2", "author_name": "Test Author", "smiles": "CCCO"}
                 ],
                 "similarity_threshold": 90
             },

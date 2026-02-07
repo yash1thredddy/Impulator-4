@@ -801,16 +801,18 @@ def get_molecule_data(chembl_id: str) -> Optional[Dict]:
     Returns:
         Optional[Dict]: Molecule data or None if error
     """
-    # Try library first
-    try:
-        future = _timeout_executor.submit(_fetch_molecule_data_with_timeout, chembl_id)
-        result = future.result(timeout=CHEMBL_API_TIMEOUT)
-        if result is not None:
-            return result
-    except FuturesTimeoutError:
-        logger.warning(f"Library timeout fetching molecule data for {chembl_id}, trying REST API...")
-    except Exception as e:
-        logger.warning(f"Library error fetching molecule data for {chembl_id}: {str(e)}, trying REST API...")
+    # Try library first (only if installed)
+    client = _get_chembl_client()
+    if 'molecule' in client:
+        try:
+            future = _timeout_executor.submit(_fetch_molecule_data_with_timeout, chembl_id)
+            result = future.result(timeout=CHEMBL_API_TIMEOUT)
+            if result is not None:
+                return result
+        except FuturesTimeoutError:
+            logger.warning(f"Library timeout fetching molecule data for {chembl_id}, trying REST API...")
+        except Exception as e:
+            logger.warning(f"Library error fetching molecule data for {chembl_id}: {str(e)}, trying REST API...")
 
     # Fallback to REST API
     try:
@@ -875,16 +877,18 @@ def get_target_name(target_chembl_id: str) -> Optional[str]:
     if not target_chembl_id:
         return None
 
-    # Try library first
-    try:
-        future = _timeout_executor.submit(_fetch_target_name_with_timeout, target_chembl_id)
-        result = future.result(timeout=CHEMBL_API_TIMEOUT)
-        if result is not None:
-            return result
-    except FuturesTimeoutError:
-        logger.warning(f"Library timeout fetching target name for {target_chembl_id}, trying REST API...")
-    except Exception as e:
-        logger.warning(f"Library error fetching target name for {target_chembl_id}: {str(e)}, trying REST API...")
+    # Try library first (only if installed)
+    client = _get_chembl_client()
+    if 'target' in client:
+        try:
+            future = _timeout_executor.submit(_fetch_target_name_with_timeout, target_chembl_id)
+            result = future.result(timeout=CHEMBL_API_TIMEOUT)
+            if result is not None:
+                return result
+        except FuturesTimeoutError:
+            logger.warning(f"Library timeout fetching target name for {target_chembl_id}, trying REST API...")
+        except Exception as e:
+            logger.warning(f"Library error fetching target name for {target_chembl_id}: {str(e)}, trying REST API...")
 
     # Fallback to REST API
     try:
@@ -1080,7 +1084,7 @@ def _similarity_search_with_timeout(smiles: str, similarity_threshold: int, max_
     client = _get_chembl_client()
     if 'similarity' not in client:
         logger.error("ChEMBL client not available for similarity search")
-        return []
+        return None
 
     last_error = None
     for attempt in range(max_retries):
@@ -1127,36 +1131,39 @@ def get_chembl_ids(smiles: str, similarity_threshold: int = 90, max_retries: int
     Returns:
         List[Dict[str, str]]: List of ChEMBL IDs
     """
-    # Try library first
-    for attempt in range(max_retries):
-        try:
-            # Use ThreadPoolExecutor for timeout
-            future = _timeout_executor.submit(
-                _similarity_search_with_timeout, smiles, similarity_threshold
-            )
-            result = future.result(timeout=SIMILARITY_SEARCH_TIMEOUT)
-            if result is not None:  # Library succeeded (empty list is valid - no similar compounds)
-                return result
+    # Try library first (only if chembl_webresource_client is installed)
+    client = _get_chembl_client()
+    if 'similarity' in client:
+        for attempt in range(max_retries):
+            try:
+                # Use ThreadPoolExecutor for timeout
+                future = _timeout_executor.submit(
+                    _similarity_search_with_timeout, smiles, similarity_threshold
+                )
+                result = future.result(timeout=SIMILARITY_SEARCH_TIMEOUT)
+                if result is not None:  # Library succeeded (empty list is valid - no similar compounds)
+                    return result
 
-        except FuturesTimeoutError:
-            logger.warning(f"Similarity search timeout (attempt {attempt + 1}/{max_retries})")
-            if attempt < max_retries - 1:
-                time.sleep(2 * (attempt + 1))
-            continue
-        except IndexError as e:
-            # Handle "tuple index out of range" from chembl client
-            logger.warning(f"ChEMBL API IndexError (attempt {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(1 * (attempt + 1))  # Exponential backoff
-            continue
-        except Exception as e:
-            logger.warning(f"Library error in similarity search (attempt {attempt + 1}/{max_retries}): {str(e)}")
-            if attempt < max_retries - 1:
-                time.sleep(1 * (attempt + 1))
-            continue
+            except FuturesTimeoutError:
+                logger.warning(f"Similarity search timeout (attempt {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    time.sleep(2 * (attempt + 1))
+                continue
+            except IndexError as e:
+                # Handle "tuple index out of range" from chembl client
+                logger.warning(f"ChEMBL API IndexError (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(1 * (attempt + 1))  # Exponential backoff
+                continue
+            except Exception as e:
+                logger.warning(f"Library error in similarity search (attempt {attempt + 1}/{max_retries}): {str(e)}")
+                if attempt < max_retries - 1:
+                    time.sleep(1 * (attempt + 1))
+                continue
 
-    # Library failed, try REST API fallback
-    logger.info("Library similarity search failed, trying REST API fallback...")
+        logger.info("Library similarity search failed, trying REST API fallback...")
+    else:
+        logger.info("ChEMBL library not available, using REST API for similarity search...")
     try:
         result = rest_api_similarity_search(smiles, similarity_threshold)
         if result is not None:  # Empty list is valid - no similar compounds found
@@ -1183,12 +1190,13 @@ def _fetch_activity_batch(batch_params: Dict[str, Any], max_retries: int = 2) ->
     chembl_ids = batch_params['chembl_ids']
     activity_type = batch_params['activity_type']
 
+    client = _get_chembl_client()
+    if 'activity' not in client:
+        logger.warning("ChEMBL activity library not available in _fetch_activity_batch")
+        return []
+
     for attempt in range(max_retries):
         try:
-            client = _get_chembl_client()
-            if 'activity' not in client:
-                return []
-
             activities = client['activity'].filter(
                 molecule_chembl_id__in=chembl_ids,
                 standard_type=activity_type
@@ -1313,57 +1321,58 @@ def fetch_batch_molecule_data(
         progress_callback(0.1, f"Fetching molecule data for {len(chembl_ids)} compounds...")
 
     client = _get_chembl_client()
-    if 'molecule' not in client:
-        logger.error("ChEMBL molecule client not available")
-        return {}
 
-    # Try batch fetch with retries
-    for attempt in range(max_retries):
-        try:
-            if progress_callback:
-                progress_callback(0.2, f"Querying ChEMBL (batch, attempt {attempt + 1})...")
+    if 'molecule' in client:
+        # Try batch fetch with retries
+        for attempt in range(max_retries):
+            try:
+                if progress_callback:
+                    progress_callback(0.2, f"Querying ChEMBL (batch, attempt {attempt + 1})...")
 
-            # Single batch query for all molecules
-            molecules = client['molecule'].filter(
-                molecule_chembl_id__in=chembl_ids
-            ).only([
-                'molecule_chembl_id',
-                'pref_name',
-                'molecule_properties',
-                'molecule_structures'
-            ])
+                # Single batch query for all molecules
+                molecules = client['molecule'].filter(
+                    molecule_chembl_id__in=chembl_ids
+                ).only([
+                    'molecule_chembl_id',
+                    'pref_name',
+                    'molecule_properties',
+                    'molecule_structures'
+                ])
 
-            if progress_callback:
-                progress_callback(0.6, "Processing molecule data...")
+                if progress_callback:
+                    progress_callback(0.6, "Processing molecule data...")
 
-            # Convert to dict keyed by ChEMBL ID
-            result = {}
-            for mol in list(molecules):
-                chembl_id = mol.get('molecule_chembl_id')
-                if chembl_id:
-                    result[chembl_id] = mol
+                # Convert to dict keyed by ChEMBL ID
+                result = {}
+                for mol in list(molecules):
+                    chembl_id = mol.get('molecule_chembl_id')
+                    if chembl_id:
+                        result[chembl_id] = mol
 
-            if progress_callback:
-                progress_callback(1.0, f"Fetched {len(result)}/{len(chembl_ids)} molecules")
+                if progress_callback:
+                    progress_callback(1.0, f"Fetched {len(result)}/{len(chembl_ids)} molecules")
 
-            logger.info(f"Batch molecule fetch: {len(result)}/{len(chembl_ids)} molecules retrieved")
-            return result
+                logger.info(f"Batch molecule fetch: {len(result)}/{len(chembl_ids)} molecules retrieved")
+                return result
 
-        except Exception as e:
-            error_str = str(e)
-            is_corruption_error = "empty attribute" in error_str or "doesn't allow a default" in error_str
+            except Exception as e:
+                error_str = str(e)
+                is_corruption_error = "empty attribute" in error_str or "doesn't allow a default" in error_str
 
-            if attempt < max_retries - 1:
-                if is_corruption_error:
-                    logger.warning(f"Batch molecule fetch API data corruption (attempt {attempt + 1}), retrying...")
+                if attempt < max_retries - 1:
+                    if is_corruption_error:
+                        logger.warning(f"Batch molecule fetch API data corruption (attempt {attempt + 1}), retrying...")
+                    else:
+                        logger.warning(f"Batch molecule fetch attempt {attempt + 1} failed: {e}")
+                    time.sleep(0.5 * (attempt + 1))
                 else:
-                    logger.warning(f"Batch molecule fetch attempt {attempt + 1} failed: {e}")
-                time.sleep(0.5 * (attempt + 1))
-            else:
-                logger.error(f"Batch molecule fetch failed after {max_retries} attempts ({type(e).__name__}): {e}")
+                    logger.error(f"Batch molecule fetch failed after {max_retries} attempts ({type(e).__name__}): {e}")
 
-    # Try REST API batch fallback first (faster than individual fetches)
-    logger.info("Library batch failed, trying REST API batch fallback...")
+        logger.info("Library batch failed, trying REST API batch fallback...")
+    else:
+        logger.info("ChEMBL molecule library not available, using REST API...")
+
+    # Try REST API batch fallback (faster than individual fetches)
     if progress_callback:
         progress_callback(0.3, "Trying REST API batch fallback...")
 
@@ -1433,55 +1442,56 @@ def fetch_batch_target_names(
         progress_callback(0.1, f"Fetching target names for {len(unique_ids)} targets...")
 
     client = _get_chembl_client()
-    if 'target' not in client:
-        logger.error("ChEMBL target client not available")
-        return {}
 
-    # Try batch fetch with retries
-    for attempt in range(max_retries):
-        try:
-            if progress_callback:
-                progress_callback(0.2, f"Querying ChEMBL targets (batch, attempt {attempt + 1})...")
+    if 'target' in client:
+        # Try batch fetch with retries
+        for attempt in range(max_retries):
+            try:
+                if progress_callback:
+                    progress_callback(0.2, f"Querying ChEMBL targets (batch, attempt {attempt + 1})...")
 
-            # Single batch query for all targets
-            targets = client['target'].filter(
-                target_chembl_id__in=unique_ids
-            ).only([
-                'target_chembl_id',
-                'pref_name'
-            ])
+                # Single batch query for all targets
+                targets = client['target'].filter(
+                    target_chembl_id__in=unique_ids
+                ).only([
+                    'target_chembl_id',
+                    'pref_name'
+                ])
 
-            if progress_callback:
-                progress_callback(0.6, "Processing target data...")
+                if progress_callback:
+                    progress_callback(0.6, "Processing target data...")
 
-            # Convert to dict keyed by Target ChEMBL ID
-            result = {}
-            for target in list(targets):
-                target_id = target.get('target_chembl_id')
-                if target_id:
-                    result[target_id] = target.get('pref_name', '') or ''
+                # Convert to dict keyed by Target ChEMBL ID
+                result = {}
+                for target in list(targets):
+                    target_id = target.get('target_chembl_id')
+                    if target_id:
+                        result[target_id] = target.get('pref_name', '') or ''
 
-            if progress_callback:
-                progress_callback(1.0, f"Fetched {len(result)}/{len(unique_ids)} target names")
+                if progress_callback:
+                    progress_callback(1.0, f"Fetched {len(result)}/{len(unique_ids)} target names")
 
-            logger.info(f"Batch target fetch: {len(result)}/{len(unique_ids)} targets retrieved")
-            return result
+                logger.info(f"Batch target fetch: {len(result)}/{len(unique_ids)} targets retrieved")
+                return result
 
-        except Exception as e:
-            error_str = str(e)
-            is_corruption_error = "empty attribute" in error_str or "doesn't allow a default" in error_str
+            except Exception as e:
+                error_str = str(e)
+                is_corruption_error = "empty attribute" in error_str or "doesn't allow a default" in error_str
 
-            if attempt < max_retries - 1:
-                if is_corruption_error:
-                    logger.warning(f"Batch target fetch API data corruption (attempt {attempt + 1}), retrying...")
+                if attempt < max_retries - 1:
+                    if is_corruption_error:
+                        logger.warning(f"Batch target fetch API data corruption (attempt {attempt + 1}), retrying...")
+                    else:
+                        logger.warning(f"Batch target fetch attempt {attempt + 1} failed: {e}")
+                    time.sleep(0.5 * (attempt + 1))
                 else:
-                    logger.warning(f"Batch target fetch attempt {attempt + 1} failed: {e}")
-                time.sleep(0.5 * (attempt + 1))
-            else:
-                logger.error(f"Batch target fetch failed after {max_retries} attempts ({type(e).__name__}): {e}")
+                    logger.error(f"Batch target fetch failed after {max_retries} attempts ({type(e).__name__}): {e}")
 
-    # Try REST API batch fallback first (faster than individual fetches)
-    logger.info("Library batch failed, trying REST API batch fallback...")
+        logger.info("Library batch failed, trying REST API batch fallback...")
+    else:
+        logger.info("ChEMBL target library not available, using REST API...")
+
+    # Try REST API batch fallback (faster than individual fetches)
     if progress_callback:
         progress_callback(0.3, "Trying REST API batch fallback...")
 
@@ -1558,61 +1568,61 @@ def fetch_all_activities_single_batch(
         progress_callback(0.1, f"Fetching activities for {len(chembl_ids)} compounds...")
 
     client = _get_chembl_client()
-    if 'activity' not in client:
-        logger.error("ChEMBL client not available")
-        return []
+    library_available = 'activity' in client
 
-    # Try single batch with retries (ChEMBL API can have intermittent issues with corrupted records)
-    for attempt in range(max_retries):
-        try:
-            # Single query for ALL activities - auto-paginates
-            activities = client['activity'].filter(
-                molecule_chembl_id__in=chembl_ids
-            ).only([
-                'molecule_chembl_id',
-                'standard_type',
-                'standard_value',
-                'standard_units',
-                'target_chembl_id'
-            ])
+    if library_available:
+        # Try single batch with retries (ChEMBL API can have intermittent issues with corrupted records)
+        for attempt in range(max_retries):
+            try:
+                # Single query for ALL activities - auto-paginates
+                activities = client['activity'].filter(
+                    molecule_chembl_id__in=chembl_ids
+                ).only([
+                    'molecule_chembl_id',
+                    'standard_type',
+                    'standard_value',
+                    'standard_units',
+                    'target_chembl_id'
+                ])
 
-            if progress_callback:
-                progress_callback(0.3, f"Fetching from ChEMBL (attempt {attempt + 1})...")
+                if progress_callback:
+                    progress_callback(0.3, f"Fetching from ChEMBL (attempt {attempt + 1})...")
 
-            # Convert to list (triggers pagination)
-            all_raw = list(activities)
+                # Convert to list (triggers pagination)
+                all_raw = list(activities)
 
-            if progress_callback:
-                progress_callback(0.7, f"Filtering {len(all_raw)} activities locally...")
+                if progress_callback:
+                    progress_callback(0.7, f"Filtering {len(all_raw)} activities locally...")
 
-            # Filter locally (instant)
-            filtered = [
-                a for a in all_raw
-                if a.get('standard_type') in activity_types_set
-            ]
+                # Filter locally (instant)
+                filtered = [
+                    a for a in all_raw
+                    if a.get('standard_type') in activity_types_set
+                ]
 
-            if progress_callback:
-                progress_callback(1.0, f"Found {len(filtered)} activities")
+                if progress_callback:
+                    progress_callback(1.0, f"Found {len(filtered)} activities")
 
-            logger.info(f"Single batch fetch: {len(all_raw)} raw -> {len(filtered)} filtered")
-            return filtered
+                logger.info(f"Single batch fetch: {len(all_raw)} raw -> {len(filtered)} filtered")
+                return filtered
 
-        except Exception as e:
-            error_str = str(e)
-            # Check if this is a ChEMBL data corruption error (empty attribute)
-            is_corruption_error = "empty attribute" in error_str or "doesn't allow a default" in error_str
+            except Exception as e:
+                error_str = str(e)
+                # Check if this is a ChEMBL data corruption error (empty attribute)
+                is_corruption_error = "empty attribute" in error_str or "doesn't allow a default" in error_str
 
-            if attempt < max_retries - 1:
-                if is_corruption_error:
-                    logger.warning(f"ChEMBL API data corruption on attempt {attempt + 1}, retrying...")
+                if attempt < max_retries - 1:
+                    if is_corruption_error:
+                        logger.warning(f"ChEMBL API data corruption on attempt {attempt + 1}, retrying...")
+                    else:
+                        logger.warning(f"Single batch attempt {attempt + 1} failed ({type(e).__name__}): {e}")
+                    time.sleep(1 * (attempt + 1))  # Exponential backoff
                 else:
-                    logger.warning(f"Single batch attempt {attempt + 1} failed ({type(e).__name__}): {e}")
-                time.sleep(1 * (attempt + 1))  # Exponential backoff
-            else:
-                logger.error(f"Single batch activity fetch failed after {max_retries} attempts ({type(e).__name__}): {e}")
+                    logger.error(f"Single batch activity fetch failed after {max_retries} attempts ({type(e).__name__}): {e}")
 
-    # Library failed, try REST API fallback (faster and more reliable)
-    logger.info("Library failed, falling back to REST API...")
+        logger.info("Library failed, falling back to REST API...")
+    else:
+        logger.info("ChEMBL activity library not available, using REST API...")
 
     if progress_callback:
         progress_callback(0.2, "Trying REST API fallback...")
@@ -1625,7 +1635,11 @@ def fetch_all_activities_single_batch(
     except Exception as e:
         logger.warning(f"REST API fallback also failed: {e}")
 
-    # Both library and REST API failed, fall back to chunked library fetching
+    # Both library and REST API failed, fall back to chunked library fetching (only if library available)
+    if not library_available:
+        logger.error("All activity fetch methods failed (library not installed, REST API failed)")
+        return []
+
     logger.info("REST API failed, falling back to chunked library fetching...")
 
     # Fallback: fetch in smaller chunks (more resilient to bad records)
@@ -1727,36 +1741,45 @@ def fetch_compound_activities(
     all_activities = []
     client = _get_chembl_client()
 
-    if 'activity' not in client:
-        logger.error("ChEMBL client not available")
-        return []
+    if 'activity' in client:
+        for activity_type in activity_types:
+            for attempt in range(max_retries_per_type):
+                try:
+                    activities = client['activity'].filter(
+                        molecule_chembl_id=chembl_id,
+                        standard_type=activity_type
+                    ).only('standard_value', 'standard_units', 'standard_type',
+                           'target_chembl_id', 'target_pref_name')
 
-    for activity_type in activity_types:
-        for attempt in range(max_retries_per_type):
-            try:
-                activities = client['activity'].filter(
-                    molecule_chembl_id=chembl_id,
-                    standard_type=activity_type
-                ).only('standard_value', 'standard_units', 'standard_type',
-                       'target_chembl_id', 'target_pref_name')
+                    activity_list = list(activities)
+                    all_activities.extend(activity_list)
+                    break  # Success, move to next activity type
 
-                activity_list = list(activities)
-                all_activities.extend(activity_list)
-                break  # Success, move to next activity type
+                except Exception as e:
+                    error_str = str(e)
+                    # Check for ChEMBL data corruption (empty attribute errors during pagination)
+                    is_corruption_error = "empty attribute" in error_str or "doesn't allow a default" in error_str
 
-            except Exception as e:
-                error_str = str(e)
-                # Check for ChEMBL data corruption (empty attribute errors during pagination)
-                is_corruption_error = "empty attribute" in error_str or "doesn't allow a default" in error_str
-
-                if attempt < max_retries_per_type - 1:
-                    if is_corruption_error:
-                        logger.warning(f"Activity fetch for {activity_type} API data corruption (attempt {attempt + 1}), retrying...")
+                    if attempt < max_retries_per_type - 1:
+                        if is_corruption_error:
+                            logger.warning(f"Activity fetch for {activity_type} API data corruption (attempt {attempt + 1}), retrying...")
+                        else:
+                            logger.warning(f"Activity fetch for {activity_type} attempt {attempt + 1} failed: {e}")
+                        time.sleep(0.5 * (attempt + 1))
                     else:
-                        logger.warning(f"Activity fetch for {activity_type} attempt {attempt + 1} failed: {e}")
-                    time.sleep(0.5 * (attempt + 1))
-                else:
-                    logger.error(f"Error fetching {activity_type} for {chembl_id} after {max_retries_per_type} attempts: {e}")
+                        logger.error(f"Error fetching {activity_type} for {chembl_id} after {max_retries_per_type} attempts: {e}")
+
+        return all_activities
+
+    # Library not available, fall back to REST API
+    logger.info(f"ChEMBL library not available, using REST API for {chembl_id} activities...")
+    try:
+        rest_results = rest_api_fetch_activities([chembl_id], activity_types)
+        if rest_results:
+            logger.info(f"REST API fallback successful: {len(rest_results)} activities for {chembl_id}")
+            return rest_results
+    except Exception as e:
+        logger.error(f"REST API activity fetch also failed for {chembl_id}: {e}")
 
     return all_activities
 

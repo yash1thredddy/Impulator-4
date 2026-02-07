@@ -212,6 +212,11 @@ def calculate_efficiency_metrics_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if missing_columns:
         raise ValueError(f"Missing required columns: {missing_columns}")
 
+    # Ensure numeric dtypes — upstream columns may be object dtype
+    # (e.g. from descriptor cache returning non-scalar values)
+    for col in required_columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
     # Vectorized SEI: pActivity / (PSA / 100)
     # Only calculate where TPSA > 0 and pActivity is valid
     mask_sei = (df['TPSA'].notna()) & (df['TPSA'] > 0) & (df['pActivity'].notna())

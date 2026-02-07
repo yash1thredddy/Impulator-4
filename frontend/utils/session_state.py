@@ -229,17 +229,21 @@ class SessionState:
         cls.set_view(VIEW_ANALYZE)
 
     @classmethod
-    def navigate_to_compound(cls, compound_name: str, entry_id: str = None, storage_path: str = None) -> None:
+    def navigate_to_compound(cls, compound_name: str, entry_id: str = None, storage_path: str = None, is_duplicate: bool = False, duplicate_of_name: str = None) -> None:
         """Navigate to compound details view.
 
         Args:
             compound_name: Display name of the compound
             entry_id: UUID entry_id for storage lookup (optional, for new storage format)
             storage_path: Full Azure storage path from database (most reliable for fetching results)
+            is_duplicate: Whether the compound is a duplicate of another
+            duplicate_of_name: Display name of the parent compound (if duplicate)
         """
         cls.set('selected_compound', compound_name)
         cls.set('selected_compound_entry_id', entry_id)
         cls.set('selected_compound_storage_path', storage_path)
+        cls.set('selected_compound_is_duplicate', is_duplicate)
+        cls.set('selected_compound_duplicate_of_name', duplicate_of_name)
         cls.set_view(VIEW_COMPOUND_DETAILS)
 
     # Job management helpers

@@ -132,7 +132,6 @@ def test_similarity_search():
     print("="*70)
     print("\nTesting each compound with its specific similarity threshold...")
 
-    all_passed = True
     total_found = 0
 
     for compound in TEST_COMPOUNDS:
@@ -163,10 +162,11 @@ def test_similarity_search():
         if len(results) == 0:
             print(f"  WARNING: No results for {name}")
 
-    print(f"\n--- Summary ---")
+    print("\n--- Summary ---")
     print(f"Total similar compounds found across all queries: {total_found}")
 
-    return total_found > 0
+    assert total_found > 0, "No similar compounds found across all queries"
+    return True
 
 
 def test_molecule_data():
@@ -176,12 +176,12 @@ def test_molecule_data():
     print("="*70)
 
     # Test single molecule
-    print(f"\nFetching single molecule data for CHEMBL25 (Aspirin)...")
+    print("\nFetching single molecule data for CHEMBL25 (Aspirin)...")
     start = time.time()
     mol = get_molecule_data("CHEMBL25")
     elapsed = time.time() - start
 
-    print(f"\nSingle molecule (library + REST fallback):")
+    print("\nSingle molecule (library + REST fallback):")
     print(f"  Name: {mol.get('pref_name') if mol else 'None'}")
     print(f"  Time: {elapsed:.2f}s")
 
@@ -190,7 +190,7 @@ def test_molecule_data():
     rest_mol = rest_api_fetch_molecule("CHEMBL25")
     rest_elapsed = time.time() - start
 
-    print(f"\nDirect REST API (single):")
+    print("\nDirect REST API (single):")
     print(f"  Name: {rest_mol.get('pref_name') if rest_mol else 'None'}")
     print(f"  Time: {rest_elapsed:.2f}s")
 
@@ -201,7 +201,7 @@ def test_molecule_data():
     batch_results = fetch_batch_molecule_data(TEST_CHEMBL_IDS)
     batch_elapsed = time.time() - start
 
-    print(f"\nBatch function (library + REST fallback):")
+    print("\nBatch function (library + REST fallback):")
     print(f"  Found: {len(batch_results)}/{len(TEST_CHEMBL_IDS)} molecules")
     print(f"  Time: {batch_elapsed:.2f}s")
     for cid, mol in list(batch_results.items())[:3]:
@@ -212,11 +212,12 @@ def test_molecule_data():
     rest_batch = rest_api_fetch_molecules_batch(TEST_CHEMBL_IDS)
     rest_batch_elapsed = time.time() - start
 
-    print(f"\nDirect REST API (batch):")
+    print("\nDirect REST API (batch):")
     print(f"  Found: {len(rest_batch)}/{len(TEST_CHEMBL_IDS)} molecules")
     print(f"  Time: {rest_batch_elapsed:.2f}s")
 
-    return len(batch_results) > 0 or len(rest_batch) > 0
+    assert len(batch_results) > 0 or len(rest_batch) > 0, "No molecule data found"
+    return True
 
 
 def test_target_names():
@@ -233,7 +234,7 @@ def test_target_names():
     name = get_target_name(target_id)
     elapsed = time.time() - start
 
-    print(f"\nSingle target (library + REST fallback):")
+    print("\nSingle target (library + REST fallback):")
     print(f"  Name: {name}")
     print(f"  Time: {elapsed:.2f}s")
 
@@ -242,7 +243,7 @@ def test_target_names():
     rest_name = rest_api_fetch_target(target_id)
     rest_elapsed = time.time() - start
 
-    print(f"\nDirect REST API (single):")
+    print("\nDirect REST API (single):")
     print(f"  Name: {rest_name}")
     print(f"  Time: {rest_elapsed:.2f}s")
 
@@ -253,7 +254,7 @@ def test_target_names():
     batch_results = fetch_batch_target_names(TEST_TARGET_IDS)
     batch_elapsed = time.time() - start
 
-    print(f"\nBatch function (library + REST fallback):")
+    print("\nBatch function (library + REST fallback):")
     print(f"  Found: {len(batch_results)}/{len(TEST_TARGET_IDS)} targets")
     print(f"  Time: {batch_elapsed:.2f}s")
     for tid, name in list(batch_results.items())[:3]:
@@ -264,11 +265,12 @@ def test_target_names():
     rest_batch = rest_api_fetch_targets_batch(TEST_TARGET_IDS)
     rest_batch_elapsed = time.time() - start
 
-    print(f"\nDirect REST API (batch):")
+    print("\nDirect REST API (batch):")
     print(f"  Found: {len(rest_batch)}/{len(TEST_TARGET_IDS)} targets")
     print(f"  Time: {rest_batch_elapsed:.2f}s")
 
-    return len(batch_results) > 0 or len(rest_batch) > 0
+    assert len(batch_results) > 0 or len(rest_batch) > 0, "No target names found"
+    return True
 
 
 def test_activities():
@@ -285,7 +287,7 @@ def test_activities():
     results = fetch_all_activities_single_batch(chembl_ids)
     elapsed = time.time() - start
 
-    print(f"\nBatch function (library + REST fallback):")
+    print("\nBatch function (library + REST fallback):")
     print(f"  Found: {len(results)} activities")
     print(f"  Time: {elapsed:.2f}s")
 
@@ -302,11 +304,12 @@ def test_activities():
     rest_results = rest_api_fetch_activities(chembl_ids)
     rest_elapsed = time.time() - start
 
-    print(f"\nDirect REST API:")
+    print("\nDirect REST API:")
     print(f"  Found: {len(rest_results)} activities")
     print(f"  Time: {rest_elapsed:.2f}s")
 
-    return len(results) > 0 or len(rest_results) > 0
+    assert len(results) > 0 or len(rest_results) > 0, "No activities found"
+    return True
 
 
 def test_drug_indications():
@@ -326,7 +329,7 @@ def test_drug_indications():
 
     total_indications = sum(len(v) for v in results.values())
 
-    print(f"\nBatch function (REST API primary, library fallback):")
+    print("\nBatch function (REST API primary, library fallback):")
     print(f"  Compounds: {len(results)}")
     print(f"  Total indications: {total_indications}")
     print(f"  Time: {elapsed:.2f}s")
@@ -342,11 +345,12 @@ def test_drug_indications():
     rest_results = rest_api_fetch_drug_indications_batch(chembl_ids)
     rest_elapsed = time.time() - start
 
-    print(f"\nDirect REST API:")
+    print("\nDirect REST API:")
     print(f"  Found: {len(rest_results)} raw indications")
     print(f"  Time: {rest_elapsed:.2f}s")
 
-    return total_indications > 0 or len(rest_results) > 0
+    assert total_indications > 0 or len(rest_results) > 0, "No drug indications found"
+    return True
 
 
 def test_single_drug_indications():
@@ -363,14 +367,15 @@ def test_single_drug_indications():
     results = get_drug_indications(chembl_id)
     elapsed = time.time() - start
 
-    print(f"\nSingle compound function:")
+    print("\nSingle compound function:")
     print(f"  Found: {len(results)} indications")
     print(f"  Time: {elapsed:.2f}s")
     if results:
         for ind in list(results)[:3]:
             print(f"    - {ind.get('MESH_Heading', 'N/A')} (Phase {ind.get('Max_Phase', 'N/A')})")
 
-    return len(results) > 0
+    assert len(results) > 0, "No single drug indications found"
+    return True
 
 
 def test_single_compound_activities():
@@ -386,7 +391,7 @@ def test_single_compound_activities():
     results = fetch_compound_activities(chembl_id)
     elapsed = time.time() - start
 
-    print(f"\nSingle compound function:")
+    print("\nSingle compound function:")
     print(f"  Found: {len(results)} activities")
     print(f"  Time: {elapsed:.2f}s")
 
@@ -398,7 +403,8 @@ def test_single_compound_activities():
     for act_type, count in list(by_type.items())[:5]:
         print(f"    {act_type}: {count} activities")
 
-    return len(results) > 0
+    assert len(results) > 0, "No single compound activities found"
+    return True
 
 
 def test_batch_fetch_activities_legacy():
@@ -414,7 +420,7 @@ def test_batch_fetch_activities_legacy():
     results = batch_fetch_activities(chembl_ids, batch_size=50)
     elapsed = time.time() - start
 
-    print(f"\nLegacy batch function:")
+    print("\nLegacy batch function:")
     print(f"  Found: {len(results)} activities")
     print(f"  Time: {elapsed:.2f}s")
 
@@ -426,7 +432,8 @@ def test_batch_fetch_activities_legacy():
     for cid, count in list(by_compound.items())[:3]:
         print(f"    {cid}: {count} activities")
 
-    return len(results) > 0
+    assert len(results) > 0, "No legacy batch activities found"
+    return True
 
 
 def main():

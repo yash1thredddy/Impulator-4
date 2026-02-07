@@ -25,7 +25,7 @@ except ImportError:
     logger.warning("RDKit not available - 2D structure rendering disabled")
 
 
-def render_compound_card(compound: Dict[str, Any], key_prefix: str = "") -> bool:
+def render_compound_card(compound: Dict[str, Any], key_prefix: str = "", select_mode: bool = False) -> bool:
     """Render a compound card in the grid view (matching old UI style).
 
     Args:
@@ -40,9 +40,10 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "") -> bool
             - num_outliers: Optional outlier count
             - qed: Optional QED score
         key_prefix: Prefix for widget keys to ensure uniqueness
+        select_mode: Whether selection mode is active (shows checkbox instead of View button)
 
     Returns:
-        bool: True if the "View" button was clicked
+        bool: True if the "View" button was clicked (always False in select mode)
     """
     compound_name = compound.get('compound_name', 'Unknown')
     entry_id = compound.get('entry_id', '')  # Unique identifier for key generation
@@ -52,7 +53,7 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "") -> bool
     # Optional fields from metadata
     chembl_id = compound.get('chembl_id', '')
     total_activities = compound.get('total_activities', 0)
-    num_outliers = compound.get('num_outliers', 0)
+    imp_score = compound.get('imp_score')
     qed = compound.get('qed', 0.0)
     similarity_threshold = compound.get('similarity_threshold', 90)
 
@@ -64,21 +65,29 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "") -> bool
     safe_compound_name = html.escape(compound_name)
 
     with st.container(border=True):
-        # Duplicate tag if applicable
-        if is_duplicate:
-            st.markdown(
-                "<div style='text-align: center; margin-bottom: 4px;'>"
-                "<span style='background: #ff6b35; color: white; padding: 2px 8px; "
-                "border-radius: 4px; font-size: 11px; font-weight: 500;'>DUPLICATE</span>"
-                "</div>",
-                unsafe_allow_html=True
+        # Selection checkbox in select mode
+        if select_mode and entry_id:
+            cb_key = f"select_{entry_id}"
+            st.checkbox(
+                safe_display_name,
+                key=cb_key,
+                label_visibility="collapsed",
             )
 
-        # Compound name centered - larger font, minimal top margin
+        # Compound name centered, DUPLICATE tag pinned to right corner
+        dup_tag = ""
+        if is_duplicate:
+            dup_tag = (
+                "<span style='position: absolute; right: 0; top: 50%; transform: translateY(-50%); "
+                "background: #ff6b35; color: white; padding: 3px 10px; "
+                "border-radius: 4px; font-size: 12px; font-weight: 600;'>DUPLICATE</span>"
+            )
+
         st.markdown(
-            f"<h2 style='text-align: center; margin: 0 0 10px 0; padding-top: 0; overflow: hidden; "
-            f"text-overflow: ellipsis; white-space: nowrap; font-size: 1.5rem; font-weight: 600;' "
-            f"title='{safe_compound_name}'>{safe_display_name}</h2>",
+            f"<div style='position: relative; text-align: center; "
+            f"margin: 0 0 10px 0; padding-top: 0;' title='{safe_compound_name}'>"
+            f"<span style='font-size: 1.5rem; font-weight: 600;'>{safe_display_name}</span>"
+            f"{dup_tag}</div>",
             unsafe_allow_html=True
         )
 
@@ -103,15 +112,16 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "") -> bool
         # Stats using HTML flexbox for consistent layout
         # Escape all values for XSS prevention
         qed_display = f"{qed:.2f}" if qed and qed > 0 else "N/A"
+        imp_score_display = f"{imp_score:.2f}" if imp_score is not None else "N/A"
         safe_total_activities = html.escape(str(total_activities))
-        safe_num_outliers = html.escape(str(num_outliers))
+        safe_imp_score = html.escape(imp_score_display)
         safe_qed_display = html.escape(str(qed_display))
         safe_similarity = html.escape(str(similarity_threshold))
 
         st.markdown(
             f"""<div style='display: flex; justify-content: space-between; font-size: 16px; margin: 8px 0;'>
                 <span><b>Activities:</b> {safe_total_activities}</span>
-                <span><b>Outliers:</b> {safe_num_outliers}</span>
+                <span><b>IMP Score:</b> {safe_imp_score}</span>
             </div>
             <div style='display: flex; justify-content: space-between; font-size: 16px; margin: 8px 0;'>
                 <span><b>QED:</b> {safe_qed_display}</span>
@@ -120,15 +130,17 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "") -> bool
             unsafe_allow_html=True
         )
 
-        # View button - key_prefix already contains unique grid position
-        # Use entry_id if available for extra uniqueness with duplicate compound names
-        if entry_id:
-            button_key = f"{key_prefix}view_{entry_id}"
-        else:
-            # For legacy compounds without entry_id, key_prefix alone is unique per grid position
-            button_key = f"{key_prefix}view"
-        if st.button("View Details", key=button_key, type="primary", use_container_width=True):
-            return True
+        # View button (hidden in select mode)
+        if not select_mode:
+            # key_prefix already contains unique grid position
+            # Use entry_id if available for extra uniqueness with duplicate compound names
+            if entry_id:
+                button_key = f"{key_prefix}view_{entry_id}"
+            else:
+                # For legacy compounds without entry_id, key_prefix alone is unique per grid position
+                button_key = f"{key_prefix}view"
+            if st.button("View Details", key=button_key, type="primary", use_container_width=True):
+                return True
 
     return False
 
@@ -244,12 +256,13 @@ def render_structure_thumbnail(smiles: str, compound_name: str, key_prefix: str 
     st.components.v1.html(html_content, height=110)
 
 
-def render_compound_grid(compounds: list, columns: int = 3) -> Optional[str]:
+def render_compound_grid(compounds: list, columns: int = 3, select_mode: bool = False) -> Optional[str]:
     """Render a grid of compound cards (3 columns for better sizing).
 
     Args:
         compounds: List of compound dictionaries
         columns: Number of columns in the grid (default 3)
+        select_mode: Whether selection mode is active
 
     Returns:
         Optional[dict]: Dict with compound_name and entry_id of clicked compound, or None
@@ -268,20 +281,23 @@ def render_compound_grid(compounds: list, columns: int = 3) -> Optional[str]:
         for i, compound in enumerate(row_compounds):
             with cols[i]:
                 # Use row_start + i to create unique keys per grid position
-                if render_compound_card(compound, key_prefix=f"grid_{row_start + i}_"):
+                if render_compound_card(compound, key_prefix=f"grid_{row_start + i}_", select_mode=select_mode):
                     clicked_compound = {
                         'compound_name': compound.get('compound_name'),
                         'entry_id': compound.get('entry_id'),
+                        'is_duplicate': compound.get('is_duplicate', False),
+                        'duplicate_of': compound.get('duplicate_of'),
                     }
 
     return clicked_compound
 
 
-def render_compound_list(compounds: list) -> Optional[dict]:
+def render_compound_list(compounds: list, select_mode: bool = False) -> Optional[dict]:
     """Render a list view of compounds (alternative to grid).
 
     Args:
         compounds: List of compound dictionaries
+        select_mode: Whether selection mode is active
 
     Returns:
         Optional[dict]: Dict with compound_name and entry_id of clicked compound, or None
@@ -300,32 +316,56 @@ def render_compound_list(compounds: list) -> Optional[dict]:
         has_imp_warning = compound.get('has_imp_warning', False)
         is_duplicate = compound.get('is_duplicate', False)
 
-        col1, col2, col3, col4 = st.columns([3, 4, 2, 2])
+        if select_mode and entry_id:
+            # Selection mode: checkbox + name + smiles + similarity
+            col0, col1, col2, col3 = st.columns([0.5, 3, 4, 2])
 
-        with col1:
-            # Escape compound name for XSS prevention
-            safe_name = html.escape(compound_name)
-            if is_duplicate:
-                st.markdown(f"**{safe_name}** <span style='color: #ff6b35; font-size: 12px;'>[DUP]</span>", unsafe_allow_html=True)
-            elif has_imp_warning:
-                st.markdown(f"**{safe_name}** ")
-            else:
-                st.markdown(f"**{safe_name}**")
+            with col0:
+                cb_key = f"select_{entry_id}"
+                st.checkbox("Select", key=cb_key, label_visibility="collapsed")
 
-        with col2:
-            st.code(smiles + "..." if len(compound.get('smiles', '')) > 50 else smiles)
+            with col1:
+                safe_name = html.escape(compound_name)
+                if is_duplicate:
+                    st.markdown(f"**{safe_name}** <span style='color: #ff6b35; font-size: 12px;'>[DUP]</span>", unsafe_allow_html=True)
+                elif has_imp_warning:
+                    st.markdown(f"**{safe_name}** ")
+                else:
+                    st.markdown(f"**{safe_name}**")
 
-        with col3:
-            st.caption(f"Sim: {similarity_threshold}%")
+            with col2:
+                st.code(smiles + "..." if len(compound.get('smiles', '')) > 50 else smiles)
 
-        with col4:
-            # Use index + entry_id for unique key (handles duplicate compound names)
-            button_key = f"list_view_{i}_{entry_id}" if entry_id else f"list_view_{i}"
-            if st.button("View", key=button_key):
-                clicked_compound = {
-                    'compound_name': compound_name,
-                    'entry_id': entry_id,
-                }
+            with col3:
+                st.caption(f"Sim: {similarity_threshold}%")
+        else:
+            # Normal mode: name + smiles + similarity + view button
+            col1, col2, col3, col4 = st.columns([3, 4, 2, 2])
+
+            with col1:
+                safe_name = html.escape(compound_name)
+                if is_duplicate:
+                    st.markdown(f"**{safe_name}** <span style='color: #ff6b35; font-size: 12px;'>[DUP]</span>", unsafe_allow_html=True)
+                elif has_imp_warning:
+                    st.markdown(f"**{safe_name}** ")
+                else:
+                    st.markdown(f"**{safe_name}**")
+
+            with col2:
+                st.code(smiles + "..." if len(compound.get('smiles', '')) > 50 else smiles)
+
+            with col3:
+                st.caption(f"Sim: {similarity_threshold}%")
+
+            with col4:
+                button_key = f"list_view_{i}_{entry_id}" if entry_id else f"list_view_{i}"
+                if st.button("View", key=button_key):
+                    clicked_compound = {
+                        'compound_name': compound_name,
+                        'entry_id': entry_id,
+                        'is_duplicate': is_duplicate,
+                        'duplicate_of': compound.get('duplicate_of'),
+                    }
 
         st.divider()
 

@@ -15,6 +15,7 @@ import io
 import json
 import zipfile
 import logging
+import uuid
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from functools import lru_cache
@@ -167,8 +168,11 @@ def list_results(use_local_cache: bool = True) -> List[Dict[str, Any]]:
 
         for blob in blobs:
             if blob.name.endswith(".zip"):
-                # Extract compound name from path: results/compound_name.zip
-                compound_name = blob.name.replace("results/", "").replace(".zip", "")
+                # Extract compound name from path:
+                #   Legacy:  results/Aspirin.zip -> "Aspirin"
+                #   UUID:    results/3a/3a4f8c9e-....zip -> "3a4f8c9e-..."
+                parts = blob.name.rsplit("/", 1)
+                compound_name = parts[-1].replace(".zip", "")
                 results.append({
                     "compound_name": compound_name,
                     "blob_name": blob.name,
@@ -375,47 +379,7 @@ def download_result(entry_id: str, force_refresh: bool = False) -> Optional[byte
     Returns:
         ZIP file bytes, or None if not found
     """
-    if not _is_uuid(entry_id):
-        logger.warning(f"download_result requires a valid UUID, got: {entry_id}")
-        return None
-
-    # Check local cache first (unless force refresh)
-    if not force_refresh and _is_cached_locally(entry_id):
-        logger.debug(f"Using cached result for {entry_id}")
-        return _read_from_local_cache(entry_id)
-
-    # Download from Azure
-    if not is_azure_configured():
-        # Fallback: try local cache even without Azure
-        return _read_from_local_cache(entry_id)
-
-    container = _get_container_client()
-    if container is None:
-        return _read_from_local_cache(entry_id)
-
-    # UUID-based storage path
-    blob_name = _get_uuid_blob_path(entry_id)
-
-    try:
-        blob_client = container.get_blob_client(blob_name)
-
-        if not blob_client.exists():
-            logger.warning(f"Result {blob_name} not found in Azure")
-            return None
-
-        download_stream = blob_client.download_blob()
-        data = download_stream.readall()
-        logger.info(f"Downloaded {entry_id} from Azure ({len(data)} bytes)")
-
-        # Cache locally for future use
-        _write_to_local_cache(entry_id, data)
-
-        return data
-
-    except Exception as e:
-        logger.error(f"Failed to download result: {e}")
-        # Try local cache as fallback
-        return _read_from_local_cache(entry_id)
+    return download_result_by_entry_id(entry_id, force_refresh=force_refresh)
 
 
 def load_result_dataframe(entry_id: str, filename: str = "similar_compounds.csv") -> Optional[pd.DataFrame]:
@@ -429,22 +393,7 @@ def load_result_dataframe(entry_id: str, filename: str = "similar_compounds.csv"
     Returns:
         DataFrame or None if not found
     """
-    zip_data = download_result(entry_id)
-    if zip_data is None:
-        return None
-
-    try:
-        with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
-            if filename in zf.namelist():
-                with zf.open(filename) as f:
-                    return pd.read_csv(f)
-            else:
-                logger.warning(f"{filename} not found in {entry_id}.zip")
-                return None
-
-    except Exception as e:
-        logger.error(f"Failed to extract {filename}: {e}")
-        return None
+    return load_result_dataframe_by_entry_id(entry_id, filename=filename)
 
 
 def load_result_json(entry_id: str, filename: str = "summary.json") -> Optional[Dict]:
@@ -458,22 +407,7 @@ def load_result_json(entry_id: str, filename: str = "summary.json") -> Optional[
     Returns:
         Dict or None if not found
     """
-    zip_data = download_result(entry_id)
-    if zip_data is None:
-        return None
-
-    try:
-        with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
-            if filename in zf.namelist():
-                with zf.open(filename) as f:
-                    return json.load(f)
-            else:
-                logger.warning(f"{filename} not found in {entry_id}.zip")
-                return None
-
-    except Exception as e:
-        logger.error(f"Failed to extract {filename}: {e}")
-        return None
+    return load_result_json_by_entry_id(entry_id, filename=filename)
 
 
 def get_result_files(entry_id: str) -> List[str]:
@@ -670,6 +604,11 @@ def download_result_by_entry_id(entry_id: str, force_refresh: bool = False) -> O
     if not entry_id:
         return None
 
+    if not _is_uuid(entry_id):
+        logger.warning(f"download_result_by_entry_id requires a valid UUID, got: {entry_id}")
+        return None
+
+    entry_id = str(uuid.UUID(entry_id))
     cache_path = _get_local_cache_path_by_entry_id(entry_id)
 
     # Check local cache first (unless force refresh)

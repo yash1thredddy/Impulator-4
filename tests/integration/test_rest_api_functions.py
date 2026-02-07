@@ -11,12 +11,30 @@ Tests:
 
 import sys
 import os
-import time
 import pytest
 import requests
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from backend.modules.api_client import (  # noqa: E402
+    # Constants
+    CHEMBL_RESPONSE_KEYS,
+    CHEMBL_MAX_LIMIT,
+    DEFAULT_ACTIVITY_TYPES,
+    SIMILARITY_SEARCH_TIMEOUT,
+    # Helper functions
+    _get_response_data,
+    _rest_api_get,
+    # REST API functions
+    rest_api_similarity_search,
+    rest_api_fetch_molecule,
+    rest_api_fetch_molecules_batch,
+    rest_api_fetch_target,
+    rest_api_fetch_targets_batch,
+    rest_api_fetch_activities,
+    rest_api_fetch_drug_indications_batch,
+)
 
 
 # =============================================================================
@@ -44,25 +62,6 @@ class TestApiConnectivity:
             pytest.fail(f"ChEMBL API connection error: {e}")
         except Exception as e:
             pytest.fail(f"ChEMBL API check failed: {type(e).__name__}: {e}")
-
-from backend.modules.api_client import (
-    # Constants
-    CHEMBL_RESPONSE_KEYS,
-    CHEMBL_MAX_LIMIT,
-    DEFAULT_ACTIVITY_TYPES,
-    SIMILARITY_SEARCH_TIMEOUT,
-    # Helper functions
-    _get_response_data,
-    _rest_api_get,
-    # REST API functions
-    rest_api_similarity_search,
-    rest_api_fetch_molecule,
-    rest_api_fetch_molecules_batch,
-    rest_api_fetch_target,
-    rest_api_fetch_targets_batch,
-    rest_api_fetch_activities,
-    rest_api_fetch_drug_indications_batch,
-)
 
 
 # =============================================================================

@@ -56,6 +56,13 @@ def render_job_form() -> Optional[str]:
         help="Name to identify this compound in results"
     )
 
+    # Author name input
+    author_name = st.text_input(
+        "Author Name",
+        placeholder="e.g., Dr. Jane Smith",
+        help="Your name (required for attribution in reports)"
+    )
+
     # Input type selection
     input_type = st.radio(
         "Structure Input Type",
@@ -122,6 +129,7 @@ def render_job_form() -> Optional[str]:
     ):
         return _submit_job(
             compound_name=compound_name,
+            author_name=author_name,
             structure_input=structure_input,
             input_type=input_type.lower(),
             similarity_threshold=similarity_threshold,
@@ -172,6 +180,7 @@ def render_activity_checkboxes(key_prefix: str = "single") -> List[str]:
 
 def _submit_job(
     compound_name: str,
+    author_name: str,
     structure_input: str,
     input_type: str,
     similarity_threshold: int,
@@ -185,6 +194,10 @@ def _submit_job(
     # Validate inputs
     if not compound_name or not compound_name.strip():
         st.error("Please enter a compound name")
+        return None
+
+    if not author_name or not author_name.strip():
+        st.error("Please enter an author name")
         return None
 
     if not structure_input or not structure_input.strip():
@@ -220,7 +233,8 @@ def _submit_job(
             compound_name=sanitized_name,
             smiles=smiles,
             similarity_threshold=similarity_threshold,
-            activity_types=activity_types
+            activity_types=activity_types,
+            author_name=author_name.strip(),
         )
 
         if response.success:
@@ -244,6 +258,7 @@ def _submit_job(
             # Store job params for later resolution
             st.session_state['duplicate_smiles'] = smiles
             st.session_state['duplicate_compound_name'] = sanitized_name
+            st.session_state['duplicate_author_name'] = author_name.strip()
             st.session_state['duplicate_similarity_threshold'] = similarity_threshold
             st.session_state['duplicate_activity_types'] = activity_types
             st.rerun()
@@ -274,6 +289,7 @@ def _resolve_duplicate_action(action: str, new_name: Optional[str]) -> Optional[
     # Get stored job parameters
     smiles = st.session_state.get('duplicate_smiles')
     compound_name = st.session_state.get('duplicate_compound_name')
+    author_name = st.session_state.get('duplicate_author_name')
     similarity_threshold = st.session_state.get('duplicate_similarity_threshold')
     activity_types = st.session_state.get('duplicate_activity_types')
     duplicate_info = st.session_state.get('pending_duplicate_info', {})
@@ -289,7 +305,8 @@ def _resolve_duplicate_action(action: str, new_name: Optional[str]) -> Optional[
             existing_entry_id=existing_entry_id,
             new_compound_name=new_name,
             similarity_threshold=similarity_threshold,
-            activity_types=activity_types
+            activity_types=activity_types,
+            author_name=author_name,
         )
 
         # Clear duplicate dialog state BEFORE rerun
@@ -630,6 +647,13 @@ def render_csv_upload_form() -> Optional[str]:
     # Configuration
     st.subheader("Batch Configuration")
 
+    batch_author_name = st.text_input(
+        "Author Name",
+        placeholder="e.g., Dr. Jane Smith",
+        help="Your name (required, applied to all compounds in this batch)",
+        key="batch_author_name"
+    )
+
     similarity_threshold = st.slider(
         "Similarity Threshold (%)",
         min_value=50,
@@ -646,6 +670,11 @@ def render_csv_upload_form() -> Optional[str]:
     if not duplicate_check_done:
         # Step 1: Check for duplicates first
         if st.button("Check & Submit Batch", type="primary", width='stretch'):
+            # Validate author name before making any API calls
+            if not batch_author_name or not batch_author_name.strip():
+                st.error("Please enter an author name before submitting")
+                return None
+
             # Build compounds list with structures for InChIKey-based duplicate detection
             df_has_smiles = 'smiles' in df_mapped.columns
             df_has_inchi = 'inchi' in df_mapped.columns
@@ -888,13 +917,17 @@ def render_csv_upload_form() -> Optional[str]:
         with col1:
             if st.button("✅ Confirm & Submit", type="primary", width='stretch'):
                 st.session_state['batch_user_confirmed'] = True
+                if not batch_author_name or not batch_author_name.strip():
+                    st.error("Please enter an author name")
+                    return None
                 return _submit_batch(
                     df=df_mapped,
                     has_smiles=has_smiles,
                     similarity_threshold=similarity_threshold,
                     activity_types=selected_activities,
                     duplicate_decisions=duplicate_decisions,
-                    duplicate_new_names=duplicate_new_names
+                    duplicate_new_names=duplicate_new_names,
+                    author_name=batch_author_name.strip(),
                 )
 
         with col2:
@@ -945,7 +978,8 @@ def _submit_batch(
     similarity_threshold: int,
     activity_types: List[str],
     duplicate_decisions: Dict[str, str] = None,
-    duplicate_new_names: Dict[str, str] = None
+    duplicate_new_names: Dict[str, str] = None,
+    author_name: str = "",
 ) -> Optional[str]:
     """Submit batch of compounds to backend.
 
@@ -957,6 +991,7 @@ def _submit_batch(
         duplicate_decisions: Dict mapping compound_name -> action ('skip', 'replace', 'duplicate')
                             for each existing compound
         duplicate_new_names: Dict mapping original compound_name -> new_name for duplicates
+        author_name: Name of the author submitting the batch
 
     Returns:
         batch_id if successful, None otherwise
@@ -1026,6 +1061,7 @@ def _submit_batch(
 
         compound_data = {
             "compound_name": final_name,
+            "author_name": author_name,
             "smiles": smiles,
             "similarity_threshold": similarity_threshold,
             "activity_types": activity_types,

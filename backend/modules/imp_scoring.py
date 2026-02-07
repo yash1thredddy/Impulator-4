@@ -1,31 +1,28 @@
 """
-O[Q/P/L]A Scoring Module - Overall Quality/Promise/Likelihood Assessment
+IMP Scoring Module - Multi-criteria scoring for IMP (Invalid Metabolic Panacea) detection.
 Decoupled from Streamlit for backend use.
 
-This module implements the O[Q/P/L]A multi-criteria scoring system for IMPs 2.0.
+This module implements the IMP multi-criteria scoring system.
 
-**Phase 1 Components** (raw weights, normalized to 100%):
-1. Efficiency Outlier Score (40% raw -> 53.33% normalized)
-2. Development Angle Score (15% raw -> 20% normalized)
-3. Distance to Best-in-Class Score (20% raw -> 26.67% normalized)
+**Components** (weights sum to 100%, no normalization):
+1. Efficiency Outlier Score - 45%
+2. Distance to Best-in-Class Score - 20%
+3. Development Angle Score - 15%
+4. Assay Interference Score - 15%
+5. PDB Structural Evidence Score - 5%
 
-**Phase 2 Components** (raw weights, normalized to 100%):
-1. Efficiency Outlier Score (40% raw -> 50% normalized)
-2. Development Angle Score (15% raw -> 18.75% normalized)
-3. Distance to Best-in-Class Score (20% raw -> 25% normalized)
-4. PDB Structural Evidence Score (5% raw -> 6.25% normalized)
-5. Target Prediction Confidence Score (10%) - DEFERRED
-6. Analog Support Score (10%) - FUTURE
-
-When PDB is enabled, weights are renormalized.
+When PDB is disabled, PDB_Score = 0 (max possible = 95% before QED).
 Final score includes QED multiplier for drug-likeness: 0.75 + 0.25 * QED
-- QED=0 gives floor of 75% (was 50%)
-- QED=1 gives max of 100%
-- Max QED impact is 25% (was 50%)
 
 **Efficiency Score Calculation**:
 Uses only SEI and BEI (not NSEI/NBEI) to avoid redundancy since normalized
 metrics are derived from the same underlying data.
+
+**Interference Score Calculation**:
+Converts 5 binary assay interference flags into a 0-1 score: flags_triggered / 5.
+Only PAINS, Aggregator, Thiol, Redox, and Fluorescence are counted.
+BRENK and NIH remain display-only (not counted in score).
+More flags = stronger evidence the compound is a genuine IMP (assay artifact).
 """
 
 import numpy as np
@@ -39,21 +36,25 @@ logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[float, str], None]
 
 # =============================================================================
-# OQPLA Weight Constants (Raw Weights)
+# IMP Score Weight Constants (Direct Percentages - Sum to 100%)
 # =============================================================================
-# These raw weights are normalized to 100% based on which components are active.
 
-# Phase 1 raw weights (sum = 75%)
-WEIGHT_EFFICIENCY_RAW = 0.40  # Efficiency Outlier Score
-WEIGHT_ANGLE_RAW = 0.15       # Development Angle Score (was 0.10)
-WEIGHT_DISTANCE_RAW = 0.20    # Distance to Best-in-Class Score (was 0.15)
-
-# Phase 2 additional raw weight
-WEIGHT_PDB_RAW = 0.05         # PDB Structural Evidence Score (was 0.15)
+WEIGHT_EFFICIENCY = 0.45      # Efficiency Outlier Score
+WEIGHT_DISTANCE = 0.20        # Distance to Best-in-Class Score
+WEIGHT_ANGLE = 0.15           # Development Angle Score
+WEIGHT_INTERFERENCE = 0.15    # Assay Interference Score
+WEIGHT_PDB = 0.05             # PDB Structural Evidence Score
 
 # QED Multiplier constants
-QED_MULTIPLIER_FLOOR = 0.75   # Minimum multiplier when QED=0 (was 0.5)
-QED_MULTIPLIER_SCALE = 0.25   # Additional multiplier per QED unit (was 0.5)
+QED_MULTIPLIER_FLOOR = 0.75   # Minimum multiplier when QED=0
+QED_MULTIPLIER_SCALE = 0.25   # Additional multiplier per QED unit
+
+# Interference flag columns COUNTED in score (BRENK and NIH are display-only)
+INTERFERENCE_FLAG_COLUMNS = [
+    'PAINS_Violation', 'Aggregator_Risk', 'Redox_Reactive',
+    'Fluorescence_Interference', 'Thiol_Reactive',
+]
+INTERFERENCE_FLAG_COUNT = len(INTERFERENCE_FLAG_COLUMNS)  # 5
 
 # Default efficiency metrics (use only SEI and BEI, not NSEI/NBEI)
 DEFAULT_EFFICIENCY_METRICS = ['SEI', 'BEI']
@@ -163,28 +164,134 @@ def calculate_distance_to_best_score(
     return distance_score
 
 
-def calculate_oqpla_phase1(
+def calculate_interference_score(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Component 4: Assay Interference Score (15% weight).
+
+    Converts 5 binary assay interference flags into a single 0-1 score.
+    Score = number of flags triggered / 5.
+
+    More flags = higher score = stronger evidence of IMP (assay artifact).
+
+    Only these 5 flags are counted (BRENK and NIH are display-only):
+        PAINS_Violation, Aggregator_Risk, Redox_Reactive,
+        Fluorescence_Interference, Thiol_Reactive
+
+    Args:
+        df: DataFrame (may or may not contain interference flag columns)
+
+    Returns:
+        DataFrame with added Interference_Score column (0.0-1.0)
+    """
+    df = df.copy()
+
+    present_cols = [col for col in INTERFERENCE_FLAG_COLUMNS if col in df.columns]
+
+    if not present_cols:
+        logger.warning("No interference flag columns found in DataFrame. Setting Interference_Score = 0.")
+        df['Interference_Score'] = 0.0
+        return df
+
+    df['Interference_Score'] = df[present_cols].fillna(0).astype(int).sum(axis=1) / INTERFERENCE_FLAG_COUNT
+    df['Interference_Score'] = df['Interference_Score'].clip(0.0, 1.0)
+
+    return df
+
+
+def calculate_imp_score(
+    df: pd.DataFrame,
+    use_pdb: bool = True,
+    progress_callback: Optional[ProgressCallback] = None
+) -> pd.DataFrame:
+    """
+    Calculate IMP score using all 5 components.
+
+    Weights (sum to 100%, no normalization):
+    - Efficiency: 45%
+    - Distance: 20%
+    - Angle: 15%
+    - Interference: 15%
+    - PDB: 5%
+
+    QED Multiplier: 0.75 + 0.25 * QED
+
+    When use_pdb=False, PDB_Score = 0 (max possible = 95% before QED).
+
+    Args:
+        df: DataFrame with efficiency metrics, plane geometry, SMILES, and
+            optionally interference flag columns
+        use_pdb: If True, query PDB for structural evidence
+        progress_callback: Optional callback for PDB progress updates
+
+    Returns:
+        pd.DataFrame: Input DataFrame with added IMP score columns
+    """
+    df = df.copy()
+
+    required_columns = ['SEI', 'BEI', 'NSEI', 'NBEI', 'Angle_SEI_BEI', 'Modulus_SEI_BEI', 'QED', 'SMILES']
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Missing required columns: {missing_columns}")
+
+    # Ensure numeric dtypes — upstream columns may be object dtype
+    numeric_cols = [c for c in required_columns if c != 'SMILES']
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    # Calculate component scores
+    df['Efficiency_Score'] = calculate_efficiency_outlier_score(df)
+    df['Angle_Score'] = calculate_angle_score(df['Angle_SEI_BEI'])
+    df['Distance_Score'] = calculate_distance_to_best_score(df)
+    df = calculate_interference_score(df)
+    df = calculate_pdb_evidence_score(df, use_pdb=use_pdb, progress_callback=progress_callback)
+
+    # Calculate base score (direct weights, no normalization)
+    df['IMP_Base_Score'] = (
+        WEIGHT_EFFICIENCY * df['Efficiency_Score'] +
+        WEIGHT_DISTANCE * df['Distance_Score'] +
+        WEIGHT_ANGLE * df['Angle_Score'] +
+        WEIGHT_INTERFERENCE * df['Interference_Score'] +
+        WEIGHT_PDB * df['PDB_Score']
+    )
+
+    # Apply QED multiplier
+    df['QED_Multiplier'] = QED_MULTIPLIER_FLOOR + QED_MULTIPLIER_SCALE * df['QED']
+    df['IMP_Final_Score'] = df['IMP_Base_Score'] * df['QED_Multiplier']
+
+    # Calculate individual contributions (after QED)
+    df['Efficiency_Contribution'] = WEIGHT_EFFICIENCY * df['Efficiency_Score'] * df['QED_Multiplier']
+    df['Angle_Contribution'] = WEIGHT_ANGLE * df['Angle_Score'] * df['QED_Multiplier']
+    df['Distance_Contribution'] = WEIGHT_DISTANCE * df['Distance_Score'] * df['QED_Multiplier']
+    df['Interference_Contribution'] = WEIGHT_INTERFERENCE * df['Interference_Score'] * df['QED_Multiplier']
+    df['PDB_Contribution'] = WEIGHT_PDB * df['PDB_Score'] * df['QED_Multiplier']
+
+    df['QED_Impact'] = df['IMP_Final_Score'] - df['IMP_Base_Score']
+
+    return df
+
+
+def calculate_imp_score_phase1(
     df: pd.DataFrame,
     use_normalized_weights: bool = True
 ) -> pd.DataFrame:
     """
-    Calculate O[Q/P/L]A score using Phase 1 components (1-3) only.
+    Deprecated: Use calculate_imp_score(use_pdb=False) instead.
+
+    Calculate IMP score using Phase 1 components (1-3) only.
 
     Phase 1 weights (raw -> normalized):
-    - Efficiency: 40% -> 53.33%
-    - Angle: 15% -> 20%
-    - Distance: 20% -> 26.67%
+    - Efficiency: 45% -> 56.25%
+    - Angle: 15% -> 18.75%
+    - Distance: 20% -> 25%
 
     QED Multiplier: 0.75 + 0.25 * QED
-    - QED=0 gives 75% floor
-    - QED=1 gives 100% max
 
     Args:
         df: DataFrame with efficiency metrics and plane geometry
         use_normalized_weights: If True, normalize Phase 1 weights to 100%
 
     Returns:
-        pd.DataFrame: Input DataFrame with added O[Q/P/L]A columns
+        pd.DataFrame: Input DataFrame with added IMP score columns
     """
     df = df.copy()
 
@@ -198,21 +305,21 @@ def calculate_oqpla_phase1(
     df['Distance_Score'] = calculate_distance_to_best_score(df)
 
     if use_normalized_weights:
-        total_phase1_weight = WEIGHT_EFFICIENCY_RAW + WEIGHT_ANGLE_RAW + WEIGHT_DISTANCE_RAW
-        w1 = WEIGHT_EFFICIENCY_RAW / total_phase1_weight
-        w2 = WEIGHT_ANGLE_RAW / total_phase1_weight
-        w3 = WEIGHT_DISTANCE_RAW / total_phase1_weight
+        total_phase1_weight = WEIGHT_EFFICIENCY + WEIGHT_ANGLE + WEIGHT_DISTANCE
+        w1 = WEIGHT_EFFICIENCY / total_phase1_weight
+        w2 = WEIGHT_ANGLE / total_phase1_weight
+        w3 = WEIGHT_DISTANCE / total_phase1_weight
     else:
-        w1, w2, w3 = WEIGHT_EFFICIENCY_RAW, WEIGHT_ANGLE_RAW, WEIGHT_DISTANCE_RAW
+        w1, w2, w3 = WEIGHT_EFFICIENCY, WEIGHT_ANGLE, WEIGHT_DISTANCE
 
-    df['OQPLA_Base_Score'] = (
+    df['IMP_Base_Score'] = (
         w1 * df['Efficiency_Score'] +
         w2 * df['Angle_Score'] +
         w3 * df['Distance_Score']
     )
 
     df['QED_Multiplier'] = QED_MULTIPLIER_FLOOR + QED_MULTIPLIER_SCALE * df['QED']
-    df['OQPLA_Final_Score'] = df['OQPLA_Base_Score'] * df['QED_Multiplier']
+    df['IMP_Final_Score'] = df['IMP_Base_Score'] * df['QED_Multiplier']
 
     return df
 
@@ -372,23 +479,23 @@ def calculate_pdb_evidence_score(
     return df
 
 
-def calculate_oqpla_phase2(
+def calculate_imp_score_phase2(
     df: pd.DataFrame,
     use_pdb: bool = True,
     progress_callback: Optional[ProgressCallback] = None
 ) -> pd.DataFrame:
     """
-    Calculate O[Q/P/L]A score using Phase 2 components (1-4).
+    Deprecated: Use calculate_imp_score() instead.
+
+    Calculate IMP score using Phase 2 components (1-4, no interference).
 
     Phase 2 weights (raw -> normalized):
-    - Efficiency: 40% -> 50%
-    - Angle: 15% -> 18.75%
-    - Distance: 20% -> 25%
-    - PDB: 5% -> 6.25%
+    - Efficiency: 45% -> 52.94%
+    - Angle: 15% -> 17.65%
+    - Distance: 20% -> 23.53%
+    - PDB: 5% -> 5.88%
 
     QED Multiplier: 0.75 + 0.25 * QED
-    - QED=0 gives 75% floor
-    - QED=1 gives 100% max
 
     Args:
         df: DataFrame with efficiency metrics, plane geometry, and SMILES
@@ -396,7 +503,7 @@ def calculate_oqpla_phase2(
         progress_callback: Optional callback for progress updates
 
     Returns:
-        pd.DataFrame: Input DataFrame with added O[Q/P/L]A columns
+        pd.DataFrame: Input DataFrame with added IMP score columns
     """
     df = df.copy()
 
@@ -411,13 +518,13 @@ def calculate_oqpla_phase2(
 
     df = calculate_pdb_evidence_score(df, use_pdb=use_pdb, progress_callback=progress_callback)
 
-    total_phase2_weight = WEIGHT_EFFICIENCY_RAW + WEIGHT_ANGLE_RAW + WEIGHT_DISTANCE_RAW + WEIGHT_PDB_RAW
-    w1 = WEIGHT_EFFICIENCY_RAW / total_phase2_weight
-    w2 = WEIGHT_ANGLE_RAW / total_phase2_weight
-    w3 = WEIGHT_DISTANCE_RAW / total_phase2_weight
-    w4 = WEIGHT_PDB_RAW / total_phase2_weight
+    total_phase2_weight = WEIGHT_EFFICIENCY + WEIGHT_ANGLE + WEIGHT_DISTANCE + WEIGHT_PDB
+    w1 = WEIGHT_EFFICIENCY / total_phase2_weight
+    w2 = WEIGHT_ANGLE / total_phase2_weight
+    w3 = WEIGHT_DISTANCE / total_phase2_weight
+    w4 = WEIGHT_PDB / total_phase2_weight
 
-    df['OQPLA_Base_Score'] = (
+    df['IMP_Base_Score'] = (
         w1 * df['Efficiency_Score'] +
         w2 * df['Angle_Score'] +
         w3 * df['Distance_Score'] +
@@ -425,26 +532,26 @@ def calculate_oqpla_phase2(
     )
 
     df['QED_Multiplier'] = QED_MULTIPLIER_FLOOR + QED_MULTIPLIER_SCALE * df['QED']
-    df['OQPLA_Final_Score'] = df['OQPLA_Base_Score'] * df['QED_Multiplier']
+    df['IMP_Final_Score'] = df['IMP_Base_Score'] * df['QED_Multiplier']
 
     df['Efficiency_Contribution'] = w1 * df['Efficiency_Score'] * df['QED_Multiplier']
     df['Angle_Contribution'] = w2 * df['Angle_Score'] * df['QED_Multiplier']
     df['Distance_Contribution'] = w3 * df['Distance_Score'] * df['QED_Multiplier']
     df['PDB_Contribution'] = w4 * df['PDB_Score'] * df['QED_Multiplier']
 
-    df['QED_Impact'] = df['OQPLA_Final_Score'] - df['OQPLA_Base_Score']
+    df['QED_Impact'] = df['IMP_Final_Score'] - df['IMP_Base_Score']
 
     return df
 
 
-def interpret_oqpla_score(score: float) -> Dict[str, str]:
+def interpret_imp_score(score: float) -> Dict[str, str]:
     """
-    Interpret O[Q/P/L]A score and provide classification + recommendation.
+    Interpret IMP score and provide classification + recommendation.
 
     CRITICAL: IMP = Invalid Metabolic Panacea = FALSE POSITIVE indicator
 
-    Higher OQPLA scores indicate HIGHER probability of being an assay artifact.
-    Lower OQPLA scores indicate compounds more likely to be genuine leads.
+    Higher IMP scores indicate HIGHER probability of being an assay artifact.
+    Lower IMP scores indicate compounds more likely to be genuine leads.
 
     Score Interpretation (INVERSE relationship):
     - High Score (0.9+) = High false positive risk → EXCLUDE/DEPRIORITIZE
@@ -496,27 +603,27 @@ def interpret_oqpla_score(score: float) -> Dict[str, str]:
         }
 
 
-def add_oqpla_interpretation(df: pd.DataFrame) -> pd.DataFrame:
-    """Add human-readable O[Q/P/L]A interpretation columns to DataFrame."""
+def add_imp_score_interpretation(df: pd.DataFrame) -> pd.DataFrame:
+    """Add human-readable IMP score interpretation columns to DataFrame."""
     df = df.copy()
 
-    if 'OQPLA_Final_Score' not in df.columns:
-        raise ValueError("OQPLA_Final_Score column not found. Run calculate_oqpla_phase1() first.")
+    if 'IMP_Final_Score' not in df.columns:
+        raise ValueError("IMP_Final_Score column not found. Run calculate_imp_score() first.")
 
-    interpretations = df['OQPLA_Final_Score'].apply(interpret_oqpla_score)
+    interpretations = df['IMP_Final_Score'].apply(interpret_imp_score)
 
-    df['OQPLA_Classification'] = interpretations.apply(lambda x: x['classification'])
-    df['OQPLA_Priority'] = interpretations.apply(lambda x: x['priority'])
+    df['IMP_Classification'] = interpretations.apply(lambda x: x['classification'])
+    df['IMP_Priority'] = interpretations.apply(lambda x: x['priority'])
 
     return df
 
 
-def get_oqpla_summary(df: pd.DataFrame) -> Dict:
-    """Generate summary statistics about O[Q/P/L]A scores in the dataset."""
-    if 'OQPLA_Final_Score' not in df.columns:
-        return {'error': 'No O[Q/P/L]A scores found'}
+def get_imp_score_summary(df: pd.DataFrame) -> Dict:
+    """Generate summary statistics about IMP scores in the dataset."""
+    if 'IMP_Final_Score' not in df.columns:
+        return {'error': 'No IMP scores found'}
 
-    scores = df['OQPLA_Final_Score'].dropna()
+    scores = df['IMP_Final_Score'].dropna()
 
     summary = {
         'total_compounds': len(df),
@@ -528,8 +635,8 @@ def get_oqpla_summary(df: pd.DataFrame) -> Dict:
         'max_score': float(scores.max()) if len(scores) > 0 else np.nan
     }
 
-    if 'OQPLA_Classification' in df.columns:
-        classification_counts = df['OQPLA_Classification'].value_counts().to_dict()
+    if 'IMP_Classification' in df.columns:
+        classification_counts = df['IMP_Classification'].value_counts().to_dict()
         summary['classification_counts'] = classification_counts
 
         summary['exceptional_imps'] = classification_counts.get('Exceptional IMP', 0)
@@ -538,8 +645,8 @@ def get_oqpla_summary(df: pd.DataFrame) -> Dict:
         summary['weak_imps'] = classification_counts.get('Weak IMP', 0)
         summary['not_imps'] = classification_counts.get('Not IMP', 0)
 
-    if 'OQPLA_Priority' in df.columns:
-        priority_counts = df['OQPLA_Priority'].value_counts().sort_index().to_dict()
+    if 'IMP_Priority' in df.columns:
+        priority_counts = df['IMP_Priority'].value_counts().sort_index().to_dict()
         summary['priority_counts'] = priority_counts
 
     return summary
@@ -580,11 +687,11 @@ def create_pdb_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =============================================================================
-# OQPLA Score Breakdown Helper
+# IMP Score Breakdown Helper
 # =============================================================================
 
-# List of all OQPLA output columns
-OQPLA_OUTPUT_COLUMNS = [
+# List of all IMP Score output columns
+IMP_SCORE_OUTPUT_COLUMNS = [
     # Raw efficiency metrics (all calculated, displayed)
     'SEI', 'BEI', 'NSEI', 'NBEI',
 
@@ -592,15 +699,15 @@ OQPLA_OUTPUT_COLUMNS = [
     'Modulus_SEI_BEI', 'Angle_SEI_BEI',
 
     # Component scores (0-1)
-    'Efficiency_Score', 'Angle_Score', 'Distance_Score', 'PDB_Score',
+    'Efficiency_Score', 'Angle_Score', 'Distance_Score', 'Interference_Score', 'PDB_Score',
 
     # Weighted contributions
     'Efficiency_Contribution', 'Angle_Contribution',
-    'Distance_Contribution', 'PDB_Contribution',
+    'Distance_Contribution', 'Interference_Contribution', 'PDB_Contribution',
 
     # Final calculations
-    'OQPLA_Base_Score', 'QED', 'QED_Multiplier', 'QED_Impact',
-    'OQPLA_Final_Score', 'OQPLA_Classification', 'OQPLA_Priority',
+    'IMP_Base_Score', 'QED', 'QED_Multiplier', 'QED_Impact',
+    'IMP_Final_Score', 'IMP_Classification', 'IMP_Priority',
 
     # PDB details (if available)
     'PDB_Num_Structures', 'PDB_High_Quality', 'PDB_Medium_Quality', 'PDB_Poor_Quality'
@@ -608,88 +715,51 @@ OQPLA_OUTPUT_COLUMNS = [
 
 
 def _build_component_scores(row: pd.Series) -> dict:
-    """
-    Build component scores dict with weights derived from config constants.
-
-    Weights are computed from the module-level constants (WEIGHT_*_RAW) rather
-    than being hardcoded, ensuring consistency with the actual scoring calculations.
-
-    Automatically detects Phase 1 vs Phase 2 results by checking for PDB_Score:
-    - Phase 1 (no PDB): Weights normalize to 53.33%, 20%, 26.67%
-    - Phase 2 (with PDB): Weights normalize to 50%, 18.75%, 25%, 6.25%
-
-    Args:
-        row: A pandas Series containing OQPLA score columns
-
-    Returns:
-        dict with component score details including derived weights
-    """
-    # Detect if PDB was used (Phase 2) or not (Phase 1)
-    # Phase 1 doesn't create PDB_Score column; Phase 2 always does (even if use_pdb=False, it sets 0.5)
-    pdb_score = row.get('PDB_Score')
-    has_pdb = pdb_score is not None and not (isinstance(pdb_score, float) and np.isnan(pdb_score))
-
-    # Calculate total weight and normalized weights based on which phase was used
-    if has_pdb:
-        # Phase 2: includes PDB weight
-        total_weight = WEIGHT_EFFICIENCY_RAW + WEIGHT_ANGLE_RAW + WEIGHT_DISTANCE_RAW + WEIGHT_PDB_RAW
-        pdb_norm = WEIGHT_PDB_RAW / total_weight
-    else:
-        # Phase 1: no PDB weight
-        total_weight = WEIGHT_EFFICIENCY_RAW + WEIGHT_ANGLE_RAW + WEIGHT_DISTANCE_RAW
-        pdb_norm = 0.0
-
-    # Derive normalized weights (percentages)
-    eff_norm = WEIGHT_EFFICIENCY_RAW / total_weight
-    angle_norm = WEIGHT_ANGLE_RAW / total_weight
-    dist_norm = WEIGHT_DISTANCE_RAW / total_weight
-
+    """Build component scores dict with direct weights (no normalization)."""
     result = {
         'efficiency': {
             'value': row.get('Efficiency_Score'),
-            'weight_raw': f'{WEIGHT_EFFICIENCY_RAW * 100:.0f}%',
-            'weight_normalized': f'{eff_norm * 100:.2f}%',
+            'weight': f'{WEIGHT_EFFICIENCY * 100:.0f}%',
             'contribution': row.get('Efficiency_Contribution'),
             'description': 'Outlier score based on SEI and BEI z-scores'
         },
-        'angle': {
-            'value': row.get('Angle_Score'),
-            'weight_raw': f'{WEIGHT_ANGLE_RAW * 100:.0f}%',
-            'weight_normalized': f'{angle_norm * 100:.2f}%',
-            'contribution': row.get('Angle_Contribution'),
-            'description': 'Proximity to optimal 45° development angle'
-        },
         'distance': {
             'value': row.get('Distance_Score'),
-            'weight_raw': f'{WEIGHT_DISTANCE_RAW * 100:.0f}%',
-            'weight_normalized': f'{dist_norm * 100:.2f}%',
+            'weight': f'{WEIGHT_DISTANCE * 100:.0f}%',
             'contribution': row.get('Distance_Contribution'),
             'description': 'Proximity to best-in-class compound (highest modulus)'
         },
-    }
-
-    # Only include PDB if it was used
-    if has_pdb:
-        result['pdb'] = {
-            'value': pdb_score,
-            'weight_raw': f'{WEIGHT_PDB_RAW * 100:.0f}%',
-            'weight_normalized': f'{pdb_norm * 100:.2f}%',
+        'angle': {
+            'value': row.get('Angle_Score'),
+            'weight': f'{WEIGHT_ANGLE * 100:.0f}%',
+            'contribution': row.get('Angle_Contribution'),
+            'description': 'Proximity to optimal 45° development angle'
+        },
+        'interference': {
+            'value': row.get('Interference_Score'),
+            'weight': f'{WEIGHT_INTERFERENCE * 100:.0f}%',
+            'contribution': row.get('Interference_Contribution'),
+            'description': 'Assay interference flags (PAINS, Aggregator, Thiol, Redox, Fluorescence). BRENK/NIH display-only.'
+        },
+        'pdb': {
+            'value': row.get('PDB_Score'),
+            'weight': f'{WEIGHT_PDB * 100:.0f}%',
             'contribution': row.get('PDB_Contribution'),
             'description': 'Structural validation from RCSB PDB'
-        }
-
+        },
+    }
     return result
 
 
-def get_oqpla_score_breakdown(row: pd.Series) -> dict:
+def get_imp_score_breakdown(row: pd.Series) -> dict:
     """
-    Get a complete breakdown of OQPLA score components for a single compound.
+    Get a complete breakdown of IMP score components for a single compound.
 
     Returns dict with all individual scores and their interpretations,
     organized by category for easy frontend display.
 
     Args:
-        row: A pandas Series containing OQPLA score columns
+        row: A pandas Series containing IMP score columns
 
     Returns:
         dict with sections: efficiency_metrics, plane_geometry, component_scores,
@@ -737,14 +807,14 @@ def get_oqpla_score_breakdown(row: pd.Series) -> dict:
         },
         'component_scores': _build_component_scores(row),
         'final_calculation': {
-            'base_score': row.get('OQPLA_Base_Score'),
+            'base_score': row.get('IMP_Base_Score'),
             'qed': row.get('QED'),
             'qed_multiplier': row.get('QED_Multiplier'),
             'qed_formula': '0.75 + 0.25 × QED',
             'qed_impact': row.get('QED_Impact'),
-            'final_score': row.get('OQPLA_Final_Score'),
-            'classification': row.get('OQPLA_Classification'),
-            'priority': row.get('OQPLA_Priority'),
+            'final_score': row.get('IMP_Final_Score'),
+            'classification': row.get('IMP_Classification'),
+            'priority': row.get('IMP_Priority'),
         },
         'pdb_details': {
             'num_structures': row.get('PDB_Num_Structures', 0),

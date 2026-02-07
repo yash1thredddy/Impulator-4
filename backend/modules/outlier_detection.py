@@ -307,7 +307,7 @@ def calculate_z_scores(df: pd.DataFrame, metrics: List[str] = None) -> pd.DataFr
 
     Z-score = (value - mean) / std
 
-    Used in O[Q/P/L]A scoring (Component 1).
+    Used in IMP scoring (Component 1).
 
     Args:
         df: DataFrame with efficiency metrics

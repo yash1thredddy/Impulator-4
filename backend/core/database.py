@@ -243,6 +243,16 @@ def _apply_migrations() -> None:
                 conn.execute(text("ALTER TABLE compounds ADD COLUMN duplicate_of VARCHAR(36)"))
                 migrations_applied.append('compounds.duplicate_of')
 
+            # Add author_name column if missing
+            if 'author_name' not in compounds_columns:
+                conn.execute(text("ALTER TABLE compounds ADD COLUMN author_name VARCHAR(100)"))
+                migrations_applied.append('compounds.author_name')
+
+            # Add activity_types column if missing (for config-aware duplicate detection)
+            if 'activity_types' not in compounds_columns:
+                conn.execute(text("ALTER TABLE compounds ADD COLUMN activity_types TEXT"))
+                migrations_applied.append('compounds.activity_types')
+
             # Create indexes AFTER columns exist
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_compounds_inchikey ON compounds(inchikey)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_compounds_is_duplicate ON compounds(is_duplicate)"))
@@ -263,8 +273,10 @@ def _apply_migrations() -> None:
                     chembl_id VARCHAR(50),
                     smiles TEXT,
                     inchikey VARCHAR(27),
+                    author_name VARCHAR(100),
                     is_duplicate BOOLEAN DEFAULT 0,
                     duplicate_of VARCHAR(36),
+                    activity_types TEXT,
                     storage_path VARCHAR(500),
                     deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
                     deleted_by_session VARCHAR(36),
@@ -278,6 +290,16 @@ def _apply_migrations() -> None:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_deleted_compounds_compound_name ON deleted_compounds(compound_name)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_deleted_compounds_deleted_at ON deleted_compounds(deleted_at)"))
             migrations_applied.append('deleted_compounds table created')
+        else:
+            # Migrate existing deleted_compounds table
+            result = conn.execute(text("PRAGMA table_info(deleted_compounds)"))
+            del_columns = {row[1] for row in result.fetchall()}
+            if 'author_name' not in del_columns:
+                conn.execute(text("ALTER TABLE deleted_compounds ADD COLUMN author_name VARCHAR(100)"))
+                migrations_applied.append('deleted_compounds.author_name')
+            if 'activity_types' not in del_columns:
+                conn.execute(text("ALTER TABLE deleted_compounds ADD COLUMN activity_types TEXT"))
+                migrations_applied.append('deleted_compounds.activity_types')
 
         if migrations_applied:
             logger.info(f"Applied migrations: {migrations_applied}")

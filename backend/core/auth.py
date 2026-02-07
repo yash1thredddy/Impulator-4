@@ -30,7 +30,7 @@ def validate_session_id(x_session_id: Optional[str] = Header(None, alias="X-Sess
     """Validate and return session ID.
 
     Ensures session ID is a valid UUID format to prevent injection.
-    If no session ID is provided, generates an anonymous session.
+    If no session ID is provided, generates a UUID v4 session ID.
 
     Args:
         x_session_id: Session ID from X-Session-ID header
@@ -42,8 +42,9 @@ def validate_session_id(x_session_id: Optional[str] = Header(None, alias="X-Sess
         HTTPException: If session ID format is invalid
     """
     if not x_session_id:
-        # Generate anonymous session for unauthenticated requests
-        return f"anon-{uuid.uuid4()}"
+        # Generate UUID v4 session for requests without explicit session header.
+        # Keep UUID-only format to match validation policy and DB column size.
+        return str(uuid.uuid4())
 
     # Strip whitespace
     x_session_id = x_session_id.strip()

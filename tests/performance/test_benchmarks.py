@@ -73,17 +73,17 @@ class TestEfficiencyMetricsPerformance:
         assert elapsed < 1.0, f"Too slow: {elapsed:.2f}s for {n_iterations * 4} calculations"
 
 
-class TestOQPLAScoringPerformance:
-    """Benchmark tests for OQPLA scoring."""
+class TestIMPScoringPerformance:
+    """Benchmark tests for IMP scoring."""
 
     @pytest.mark.benchmark
-    def test_oqpla_scoring_performance(self):
-        """OQPLA scoring should process 1k rows in < 30 seconds.
+    def test_imp_scoring_performance(self):
+        """IMP scoring should process 1k rows in < 30 seconds.
 
         Note: This test doesn't make actual API calls, testing the
         calculation logic only.
         """
-        from backend.modules.oqpla_scoring import calculate_distance_to_best_score
+        from backend.modules.imp_scoring import calculate_distance_to_best_score
 
         # Create test dataset with typical values
         n_rows = 1000

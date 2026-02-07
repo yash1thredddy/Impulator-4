@@ -71,6 +71,18 @@ def render_sidebar() -> None:
                 SessionState.navigate_to_analyze()
                 st.rerun()
 
+        # Select mode toggle (only on home page)
+        if SessionState.get_current_view() == "home":
+            select_mode = SessionState.get('compound_select_mode', False)
+            if select_mode:
+                if st.button("Cancel Selection", key="nav_cancel_select", width='stretch'):
+                    _exit_select_mode()
+                    st.rerun()
+            else:
+                if st.button("Select", key="nav_select", width='stretch'):
+                    SessionState.set('compound_select_mode', True)
+                    st.rerun()
+
         st.divider()
 
         # Smart polling: only use polling fragment when jobs are active
@@ -283,6 +295,17 @@ def _on_delete_job(job_id: str, entry_id: str = None) -> None:
     except Exception as e:
         logger.error(f"Error deleting job {job_id}: {e}")
         st.toast(f"Error: {e}", icon="")
+
+
+def _exit_select_mode() -> None:
+    """Exit compound selection mode and clear all selection state."""
+    SessionState.set('compound_select_mode', False)
+    SessionState.set('confirm_batch_delete', False)
+    SessionState.set('batch_delete_ids', [])
+    SessionState.set('batch_delete_names', [])
+    keys_to_clear = [k for k in st.session_state if k.startswith("select_")]
+    for k in keys_to_clear:
+        del st.session_state[k]
 
 
 def render_backend_status() -> None:

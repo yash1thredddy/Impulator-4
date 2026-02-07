@@ -18,6 +18,20 @@ from frontend.ui.components.molecule_viewer import (
 )
 
 
+def _apply_subtitle(fig: go.Figure, subtitle: str) -> None:
+    """Apply a subtitle to a Plotly figure (Plotly v6+).
+
+    Must be called after figure creation since px.* constructors
+    only accept string titles.
+    """
+    fig.update_layout(
+        title=dict(
+            text=fig.layout.title.text if fig.layout.title and fig.layout.title.text else "",
+            subtitle=dict(text=subtitle)
+        )
+    )
+
+
 def create_scatter_plot(
     df: pd.DataFrame,
     x_col: str,
@@ -27,6 +41,7 @@ def create_scatter_plot(
     smiles_col: Optional[str] = None,
     name_col: Optional[str] = None,
     title: Optional[str] = None,
+    subtitle: Optional[str] = None,
     trendline: bool = False,
     color_scale: str = "Viridis",
     marker_size: int = 8,
@@ -43,6 +58,7 @@ def create_scatter_plot(
         smiles_col: SMILES column for structure viewer
         name_col: Name/ID column for display
         title: Chart title
+        subtitle: Chart subtitle (Plotly v6)
         trendline: Whether to add a trendline
         color_scale: Color scale for continuous color
         marker_size: Base marker size
@@ -58,13 +74,14 @@ def create_scatter_plot(
         customdata_cols = None
 
     # Build scatter plot
+    default_title = f"{y_col.replace('_', ' ')} vs {x_col.replace('_', ' ')}"
     fig = px.scatter(
         df,
         x=x_col,
         y=y_col,
         color=color_col,
         size=size_col,
-        title=title or f"{y_col} vs {x_col}",
+        title=title or default_title,
         color_continuous_scale=color_scale,
         opacity=opacity,
         custom_data=customdata_cols if customdata_cols else None,
@@ -83,6 +100,9 @@ def create_scatter_plot(
         hovermode="closest"
     )
 
+    if subtitle:
+        _apply_subtitle(fig, subtitle)
+
     return fig
 
 
@@ -91,7 +111,8 @@ def create_histogram(
     column: str,
     bins: int = 30,
     color_col: Optional[str] = None,
-    title: Optional[str] = None
+    title: Optional[str] = None,
+    subtitle: Optional[str] = None
 ) -> go.Figure:
     """Create a histogram.
 
@@ -101,6 +122,7 @@ def create_histogram(
         bins: Number of bins
         color_col: Optional column for color grouping
         title: Chart title
+        subtitle: Chart subtitle (Plotly v6)
 
     Returns:
         Plotly Figure
@@ -119,6 +141,9 @@ def create_histogram(
         yaxis_title="Count"
     )
 
+    if subtitle:
+        _apply_subtitle(fig, subtitle)
+
     return fig
 
 
@@ -127,7 +152,8 @@ def create_box_plot(
     y_col: str,
     x_col: Optional[str] = None,
     color_col: Optional[str] = None,
-    title: Optional[str] = None
+    title: Optional[str] = None,
+    subtitle: Optional[str] = None
 ) -> go.Figure:
     """Create a box plot.
 
@@ -137,6 +163,7 @@ def create_box_plot(
         x_col: Optional X-axis column (categories)
         color_col: Optional column for color grouping
         title: Chart title
+        subtitle: Chart subtitle (Plotly v6)
 
     Returns:
         Plotly Figure
@@ -150,6 +177,9 @@ def create_box_plot(
         template="plotly_white"
     )
 
+    if subtitle:
+        _apply_subtitle(fig, subtitle)
+
     return fig
 
 
@@ -158,7 +188,8 @@ def create_violin_plot(
     y_col: str,
     x_col: Optional[str] = None,
     color_col: Optional[str] = None,
-    title: Optional[str] = None
+    title: Optional[str] = None,
+    subtitle: Optional[str] = None
 ) -> go.Figure:
     """Create a violin plot.
 
@@ -168,6 +199,7 @@ def create_violin_plot(
         x_col: Optional X-axis column (categories)
         color_col: Optional column for color grouping
         title: Chart title
+        subtitle: Chart subtitle (Plotly v6)
 
     Returns:
         Plotly Figure
@@ -182,6 +214,9 @@ def create_violin_plot(
         template="plotly_white"
     )
 
+    if subtitle:
+        _apply_subtitle(fig, subtitle)
+
     return fig
 
 
@@ -191,6 +226,7 @@ def create_bar_chart(
     y_col: str,
     color_col: Optional[str] = None,
     title: Optional[str] = None,
+    subtitle: Optional[str] = None,
     orientation: str = "v"
 ) -> go.Figure:
     """Create a bar chart.
@@ -201,6 +237,7 @@ def create_bar_chart(
         y_col: Y-axis column
         color_col: Optional column for color encoding
         title: Chart title
+        subtitle: Chart subtitle (Plotly v6)
         orientation: 'v' for vertical, 'h' for horizontal
 
     Returns:
@@ -216,6 +253,9 @@ def create_bar_chart(
         orientation=orientation
     )
 
+    if subtitle:
+        _apply_subtitle(fig, subtitle)
+
     return fig
 
 
@@ -229,6 +269,7 @@ def create_3d_scatter(
     smiles_col: Optional[str] = None,
     name_col: Optional[str] = None,
     title: Optional[str] = None,
+    subtitle: Optional[str] = None,
     color_scale: str = "Viridis",
     marker_size: int = 5,
     opacity: float = 0.8
@@ -245,6 +286,7 @@ def create_3d_scatter(
         smiles_col: SMILES column for structure viewer
         name_col: Name/ID column for display
         title: Chart title
+        subtitle: Chart subtitle (Plotly v6)
         color_scale: Color scale for continuous color
         marker_size: Base marker size
         opacity: Marker opacity
@@ -283,6 +325,9 @@ def create_3d_scatter(
         )
     )
 
+    if subtitle:
+        _apply_subtitle(fig, subtitle)
+
     return fig
 
 
@@ -290,6 +335,7 @@ def create_correlation_heatmap(
     df: pd.DataFrame,
     columns: Optional[List[str]] = None,
     title: str = "Correlation Heatmap",
+    subtitle: Optional[str] = None,
     color_scale: str = "RdBu_r"
 ) -> go.Figure:
     """Create a correlation heatmap.
@@ -298,6 +344,7 @@ def create_correlation_heatmap(
         df: DataFrame with data
         columns: Columns to include (None for all numeric)
         title: Chart title
+        subtitle: Chart subtitle (Plotly v6)
         color_scale: Color scale
 
     Returns:
@@ -323,6 +370,9 @@ def create_correlation_heatmap(
         yaxis_title=""
     )
 
+    if subtitle:
+        _apply_subtitle(fig, subtitle)
+
     return fig
 
 
@@ -330,7 +380,8 @@ def create_pair_plot(
     df: pd.DataFrame,
     columns: List[str],
     color_col: Optional[str] = None,
-    title: str = "Pair Plot"
+    title: str = "Pair Plot",
+    subtitle: Optional[str] = None
 ) -> go.Figure:
     """Create a scatter matrix (pair plot).
 
@@ -339,6 +390,7 @@ def create_pair_plot(
         columns: Columns to include
         color_col: Optional column for color encoding
         title: Chart title
+        subtitle: Chart subtitle (Plotly v6)
 
     Returns:
         Plotly Figure
@@ -350,6 +402,9 @@ def create_pair_plot(
         title=title,
         template="plotly_white"
     )
+
+    if subtitle:
+        _apply_subtitle(fig, subtitle)
 
     fig.update_traces(diagonal_visible=False)
 

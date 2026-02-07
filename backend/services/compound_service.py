@@ -30,7 +30,6 @@ if PROJECT_ROOT not in sys.path:
 from backend.config import settings  # noqa: E402
 from backend.core.database import get_db_session  # noqa: E402
 from backend.core.azure_sync import (  # noqa: E402
-    sync_db_to_azure,
     upload_result_to_azure_by_entry_id,
     get_storage_path_from_entry_id,
 )
@@ -40,19 +39,18 @@ from backend.models.database import JobStatus  # noqa: E402
 # Import chemistry modules (clean absolute imports)
 from backend.modules.api_client import (  # noqa: E402
     get_chembl_ids,
-    get_drug_indications,
     get_drug_indications_batch,
 )
-from backend.modules.efficiency_metrics import calculate_all_efficiency_metrics  # noqa: E402
-from backend.modules.efficiency_planes import calculate_all_plane_metrics  # noqa: E402
+from backend.modules.efficiency_metrics import calculate_efficiency_metrics_dataframe  # noqa: E402
+from backend.modules.efficiency_planes import calculate_plane_metrics_dataframe  # noqa: E402
 from backend.modules.outlier_detection import detect_efficiency_outliers  # noqa: E402
-from backend.modules.oqpla_scoring import (  # noqa: E402
-    calculate_oqpla_phase2,
-    add_oqpla_interpretation,
+from backend.modules.imp_scoring import (  # noqa: E402
+    calculate_imp_score,
+    add_imp_score_interpretation,
     create_detailed_pdb_summary,
 )
 from backend.modules.imp_classifier import classify_imp_candidates  # noqa: E402
-from backend.modules.assay_interference_filter import get_all_interference_flags  # noqa: E402
+from backend.modules.assay_interference_filter import get_interference_flags_from_smiles, InterferenceFlags  # noqa: E402
 from backend.modules.chemical_classifier import get_complete_classification  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -83,6 +81,7 @@ class CompoundService:
         smiles: str,
         similarity_threshold: int = 90,
         activity_types: Optional[List[str]] = None,
+        author_name: Optional[str] = None,
     ) -> None:
         """
         Main processing function. Runs in background thread.
@@ -96,6 +95,7 @@ class CompoundService:
             smiles: SMILES string
             similarity_threshold: Similarity threshold (50-100)
             activity_types: List of activity types to fetch
+            author_name: Name of the author who submitted the analysis
         """
         import uuid
 
@@ -175,16 +175,16 @@ class CompoundService:
                 if self._is_job_cancelled(db, job_id):
                     return
 
-                # Step 4: OQPLA scoring + PDB (75%)
-                self._update_progress(db, job_id, 68, "Querying PDB & calculating OQPLA scores...")
-                df_results = self._calculate_oqpla_scores(
+                # Step 4: IMP scoring + PDB (75%)
+                self._update_progress(db, job_id, 68, "Querying PDB & calculating IMP scores...")
+                df_results = self._calculate_imp_scores(
                     df_results,
                     use_pdb=True,
                     progress_callback=lambda pct, msg: self._update_progress(db, job_id, 68 + int(pct * 7), f"PDB: {msg}")
                 )
-                self._update_progress(db, job_id, 75, "OQPLA + PDB scoring complete")
+                self._update_progress(db, job_id, 75, "IMP + PDB scoring complete")
 
-                # Check for cancellation after OQPLA/PDB scoring (long operation)
+                # Check for cancellation after IMP/PDB scoring (long operation)
                 if self._is_job_cancelled(db, job_id):
                     return
 
@@ -210,7 +210,8 @@ class CompoundService:
                 self._update_progress(db, job_id, 89, "Saving results...")
                 result_path, result_summary = self._save_results(
                     compound_name, smiles, similarity_threshold, activity_types, df_results, indications_df,
-                    entry_id=entry_id  # Pass entry_id for UUID-based storage path
+                    entry_id=entry_id,  # Pass entry_id for UUID-based storage path
+                    author_name=author_name,
                 )
                 # Add entry_id to result_summary for database
                 result_summary['entry_id'] = entry_id
@@ -242,12 +243,8 @@ class CompoundService:
                     result_summary['azure_upload_error'] = str(azure_error)
                     self._update_progress(db, job_id, 95, "Upload failed (results saved locally)")
 
-                # Step 9: Sync database (100%)
-                self._update_progress(db, job_id, 97, "Syncing database...")
-                try:
-                    sync_db_to_azure()
-                except Exception as sync_error:
-                    logger.error(f"Database sync failed for job {job_id}: {sync_error}")
+                # Step 9: Finalize job (100%)
+                self._update_progress(db, job_id, 97, "Finalizing job...")
 
                 # Complete job
                 self._complete_job(db, job_id, result_path, result_summary)
@@ -521,7 +518,7 @@ class CompoundService:
 
     def _add_assay_interference_flags(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Add PAINS and other assay interference flags to the DataFrame.
+        Add assay interference flags to the DataFrame.
 
         Uses the assay_interference_filter module to detect:
         - PAINS (Pan-Assay Interference Substructures)
@@ -529,6 +526,10 @@ class CompoundService:
         - Redox reactivity
         - Fluorescence interference
         - Thiol reactivity
+        - BRENK alerts (unwanted substructures)
+        - NIH alerts (problematic functional groups)
+
+        Each flag also has a _Details column with matched pattern names.
 
         Args:
             df: DataFrame with SMILES column
@@ -537,51 +538,79 @@ class CompoundService:
             DataFrame with interference flag columns added
         """
         if 'SMILES' not in df.columns:
-            logger.warning("SMILES column not found, skipping PAINS analysis")
+            logger.warning("SMILES column not found, skipping interference analysis")
             return df
 
         df = df.copy()
 
-        # Map from get_all_interference_flags keys to frontend expected column names
-        # The frontend expects: PAINS_Violation, Aggregator_Risk, Redox_Reactive, Fluorescence_Interference, Thiol_Reactive
-        flag_mapping = {
-            'PAINS': 'PAINS_Violation',
-            'Aggregator': 'Aggregator_Risk',
-            'Redox': 'Redox_Reactive',
-            'Fluorescence': 'Fluorescence_Interference',
-            'Thiol_Reactive': 'Thiol_Reactive'
+        # Boolean flag columns (mapped from InterferenceFlags fields to frontend names)
+        bool_mapping = {
+            'pains': 'PAINS_Violation',
+            'aggregator': 'Aggregator_Risk',
+            'redox': 'Redox_Reactive',
+            'fluorescence': 'Fluorescence_Interference',
+            'thiol': 'Thiol_Reactive',
+            'brenk': 'BRENK_Alerts',
+            'nih': 'NIH_Alerts',
         }
 
-        # Initialize interference columns with frontend expected names
-        for col in flag_mapping.values():
+        # Detail columns (matched pattern names)
+        detail_mapping = {
+            'pains_details': 'PAINS_Details',
+            'aggregator_reason': 'Aggregator_Details',
+            'redox_details': 'Redox_Details',
+            'fluorescence_details': 'Fluorescence_Details',
+            'thiol_details': 'Thiol_Details',
+            'brenk_details': 'BRENK_Details',
+            'nih_details': 'NIH_Details',
+        }
+
+        # Initialize all columns
+        for col in bool_mapping.values():
             df[col] = False
+        for col in detail_mapping.values():
+            df[col] = ''
 
         # Get unique SMILES to avoid redundant processing
         unique_smiles = df['SMILES'].dropna().unique()
-        flags_cache = {}
+        flags_cache: dict[str, InterferenceFlags] = {}
 
-        logger.info(f"Running PAINS analysis for {len(unique_smiles)} unique compounds...")
+        logger.info(f"Running interference analysis for {len(unique_smiles)} unique compounds...")
 
         for i, smiles in enumerate(unique_smiles):
             try:
-                flags = get_all_interference_flags(smiles)
-                flags_cache[smiles] = flags
+                flags_cache[smiles] = get_interference_flags_from_smiles(smiles)
             except Exception as e:
-                logger.warning(f"PAINS analysis failed for {smiles[:30]}...: {e}")
-                flags_cache[smiles] = {k: False for k in flag_mapping.keys()}
+                logger.warning(f"Interference analysis failed for {smiles[:30]}...: {e}")
+                flags_cache[smiles] = InterferenceFlags()
 
             if (i + 1) % 50 == 0:
-                logger.info(f"Processed {i + 1}/{len(unique_smiles)} compounds for PAINS")
+                logger.info(f"Processed {i + 1}/{len(unique_smiles)} compounds for interference")
 
-        # Apply flags to DataFrame with mapped column names
-        for api_key, col_name in flag_mapping.items():
+        # Apply boolean flags
+        for field_name, col_name in bool_mapping.items():
             df[col_name] = df['SMILES'].apply(
-                lambda s: flags_cache.get(s, {}).get(api_key, False) if pd.notna(s) else False
+                lambda s, fn=field_name: getattr(flags_cache.get(s, InterferenceFlags()), fn, False) if pd.notna(s) else False
             )
 
-        # Count how many compounds have PAINS
+        # Apply detail columns
+        for field_name, col_name in detail_mapping.items():
+            def _get_detail(s, fn=field_name):
+                if not pd.notna(s):
+                    return ''
+                val = getattr(flags_cache.get(s, InterferenceFlags()), fn, '')
+                if isinstance(val, list):
+                    return ', '.join(val)
+                return val or ''
+            df[col_name] = df['SMILES'].apply(_get_detail)
+
         pains_count = df['PAINS_Violation'].sum()
-        logger.info(f"PAINS analysis complete: {pains_count}/{len(df)} records have PAINS flags")
+        brenk_count = df['BRENK_Alerts'].sum()
+        nih_count = df['NIH_Alerts'].sum()
+        logger.info(
+            f"Interference analysis complete: {pains_count} PAINS, "
+            f"{brenk_count} BRENK, {nih_count} NIH out of {len(df)} records"
+        )
 
         return df
 
@@ -736,9 +765,12 @@ class CompoundService:
         for col in descriptor_cols:
             # Only update where current value is NaN
             mask = df[col].isna()
-            df.loc[mask, col] = df.loc[mask, 'SMILES'].apply(
+            values = df.loc[mask, 'SMILES'].apply(
                 lambda s: descriptor_cache.get(s, {}).get(col, np.nan) if pd.notna(s) else np.nan
             )
+            # Coerce to numeric — descriptor cache can return non-scalar values
+            # (e.g. empty lists) which would corrupt the column dtype to object
+            df.loc[mask, col] = pd.to_numeric(values, errors='coerce')
 
         progress_callback(1.0, "Molecular descriptors complete")
         return df
@@ -762,7 +794,7 @@ class CompoundService:
             progress_callback(0.2, "Calculating efficiency metrics...")
 
             # Initialize ALL required columns upfront to avoid "missing columns" errors
-            # This ensures OQPLA scoring can check column existence even if values are NaN
+            # This ensures IMP scoring can check column existence even if values are NaN
             required_columns = [
                 'SEI', 'BEI', 'NSEI', 'NBEI', 'nBEI_viz',  # Efficiency metrics
                 'Modulus_SEI_BEI', 'Angle_SEI_BEI', 'Slope_SEI_BEI',  # SEI-BEI plane
@@ -773,39 +805,23 @@ class CompoundService:
                 if col not in df.columns:
                     df[col] = np.nan
 
-            # Calculate efficiency metrics if not already present
-            if df['SEI'].isna().all():
-                for idx, row in df.iterrows():
-                    if pd.notna(row.get('pActivity')) and pd.notna(row.get('TPSA')):
-                        metrics = calculate_all_efficiency_metrics(
-                            pActivity=float(row['pActivity']),
-                            psa=float(row.get('TPSA', 0)),
-                            molecular_weight=float(row.get('Molecular_Weight', 0)),
-                            npol=float(row.get('NPOL', 0)) if pd.notna(row.get('NPOL')) else 0,
-                            heavy_atoms=float(row.get('Heavy_Atoms', 0)) if pd.notna(row.get('Heavy_Atoms')) else 0
-                        )
-                        for key, value in metrics.items():
-                            df.at[idx, key] = value
+            # Calculate efficiency metrics using vectorized operations
+            metrics_input_cols = ['pActivity', 'TPSA', 'Molecular_Weight', 'NPOL', 'Heavy_Atoms']
+            if all(col in df.columns for col in metrics_input_cols):
+                df = calculate_efficiency_metrics_dataframe(df)
+            else:
+                missing = [c for c in metrics_input_cols if c not in df.columns]
+                logger.warning(f"Skipping efficiency metrics: missing columns {missing}")
 
             progress_callback(0.5, "Calculating plane geometry...")
 
-            # Calculate plane metrics
-            for idx, row in df.iterrows():
-                if all(pd.notna(row.get(m)) for m in ['SEI', 'BEI', 'NSEI', 'NBEI']):
-                    plane_metrics = calculate_all_plane_metrics(
-                        sei=float(row['SEI']),
-                        bei=float(row['BEI']),
-                        nsei=float(row['NSEI']),
-                        nbei=float(row['NBEI']),
-                        psa=float(row.get('TPSA', 0)),
-                        molecular_weight=float(row.get('Molecular_Weight', 0)),
-                        npol=float(row.get('NPOL', 0)) if pd.notna(row.get('NPOL')) else 0,
-                        heavy_atoms=float(row.get('Heavy_Atoms', 0)) if pd.notna(row.get('Heavy_Atoms')) else 0
-                    )
-                    for key, value in plane_metrics.items():
-                        if key not in df.columns:
-                            df[key] = np.nan
-                        df.at[idx, key] = value
+            # Calculate plane metrics using vectorized operations
+            plane_input_cols = ['SEI', 'BEI', 'NSEI', 'NBEI', 'TPSA', 'Molecular_Weight', 'NPOL', 'Heavy_Atoms']
+            if all(col in df.columns for col in plane_input_cols):
+                df = calculate_plane_metrics_dataframe(df)
+            else:
+                missing = [c for c in plane_input_cols if c not in df.columns]
+                logger.warning(f"Skipping plane metrics: missing columns {missing}")
 
             progress_callback(0.8, "Detecting outliers...")
 
@@ -820,14 +836,14 @@ class CompoundService:
             progress_callback(1.0, "Skipped advanced metrics (error occurred)")
             return df
 
-    def _calculate_oqpla_scores(
+    def _calculate_imp_scores(
         self,
         df: pd.DataFrame,
         use_pdb: bool = True,
         progress_callback: Optional[Callable[[float, str], None]] = None
     ) -> pd.DataFrame:
         """
-        Calculate OQPLA scores with optional PDB integration.
+        Calculate IMP scores with optional PDB integration.
 
         Args:
             df: DataFrame with efficiency metrics
@@ -835,16 +851,15 @@ class CompoundService:
             progress_callback: Optional callback for PDB progress updates
 
         Returns:
-            DataFrame with OQPLA scores added
+            DataFrame with IMP scores added
         """
         try:
-            # Use Phase 2 which includes PDB scoring
-            df = calculate_oqpla_phase2(df, use_pdb=use_pdb, progress_callback=progress_callback)
-            df = add_oqpla_interpretation(df)
+            df = calculate_imp_score(df, use_pdb=use_pdb, progress_callback=progress_callback)
+            df = add_imp_score_interpretation(df)
             return df
 
         except Exception as e:
-            logger.warning(f"OQPLA scoring failed: {e}")
+            logger.warning(f"IMP scoring failed: {e}")
             return df
 
     def _add_chemical_classification(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -917,13 +932,13 @@ class CompoundService:
         Classify IMP candidates.
 
         Args:
-            df: DataFrame with OQPLA scores
+            df: DataFrame with IMP scores
 
         Returns:
             DataFrame with IMP classification added
         """
         try:
-            return classify_imp_candidates(df, min_outlier_count=2, use_oqpla=True)
+            return classify_imp_candidates(df, min_outlier_count=2, use_imp_score=True)
         except Exception as e:
             logger.warning(f"IMP classification failed: {e}")
             return df
@@ -996,7 +1011,8 @@ class CompoundService:
         activity_types: Optional[List[str]],
         df_results: pd.DataFrame,
         indications_df: Optional[pd.DataFrame] = None,
-        entry_id: Optional[str] = None
+        entry_id: Optional[str] = None,
+        author_name: Optional[str] = None,
     ) -> tuple:
         """
         Save results to disk and create ZIP archive.
@@ -1009,6 +1025,7 @@ class CompoundService:
             df_results: Results DataFrame
             indications_df: Optional DataFrame with drug indications (separate file)
             entry_id: Optional UUID for the compound entry (used for ZIP filename)
+            author_name: Name of the author who submitted the analysis
 
         Returns:
             Tuple of (zip_path, result_summary)
@@ -1025,6 +1042,7 @@ class CompoundService:
         # Create metadata
         result_summary = {
             'compound_name': compound_name,
+            'author_name': author_name or 'N/A',
             'query_smiles': smiles,
             'similarity_threshold': similarity_threshold,
             'activity_types': ','.join(activity_types or []),
@@ -1038,9 +1056,13 @@ class CompoundService:
             result_summary['imp_candidates'] = int(df_results['Is_IMP_Candidate'].sum())
             result_summary['has_imp_candidates'] = result_summary['imp_candidates'] > 0
 
-        # Add PAINS summary if available
+        # Add interference summary if available
         if 'PAINS_Violation' in df_results.columns:
             result_summary['pains_count'] = int(df_results['PAINS_Violation'].sum())
+        if 'BRENK_Alerts' in df_results.columns:
+            result_summary['brenk_count'] = int(df_results['BRENK_Alerts'].sum())
+        if 'NIH_Alerts' in df_results.columns:
+            result_summary['nih_count'] = int(df_results['NIH_Alerts'].sum())
 
         # Add similar_count for frontend
         result_summary['similar_count'] = result_summary.get('total_compounds', 0)
@@ -1075,25 +1097,16 @@ class CompoundService:
         else:
             result_summary['qed'] = 0.0
 
-        # OQPLA score (average if available) - for Compound table
-        if 'OQPLA_Final_Score' in df_results.columns:
-            oqpla_values = df_results['OQPLA_Final_Score'].dropna()
-            if len(oqpla_values) > 0:
-                result_summary['avg_oqpla_score'] = float(oqpla_values.mean())
+        # IMP score (max if available) - for Compound table
+        # Uses max to match the detail page display (best IMP candidate)
+        if 'IMP_Final_Score' in df_results.columns:
+            imp_values = df_results['IMP_Final_Score'].dropna()
+            if len(imp_values) > 0:
+                result_summary['imp_score'] = float(imp_values.max())
             else:
-                result_summary['avg_oqpla_score'] = None
+                result_summary['imp_score'] = None
         else:
-            result_summary['avg_oqpla_score'] = None
-
-        # Save metadata (legacy filename)
-        metadata_filename = os.path.join(compound_folder, f"{safe_name}_metadata.json")
-        with open(metadata_filename, 'w') as f:
-            json.dump(result_summary, f, indent=4)
-
-        # Save standardized summary.json (for frontend direct Azure access)
-        summary_filename = os.path.join(compound_folder, "summary.json")
-        with open(summary_filename, 'w') as f:
-            json.dump(result_summary, f, indent=4)
+            result_summary['imp_score'] = None
 
         # Also save CSV with standard name for frontend
         similar_csv = os.path.join(compound_folder, "similar_compounds.csv")
@@ -1128,6 +1141,15 @@ class CompoundService:
         else:
             result_summary['drug_indications_count'] = 0
             result_summary['compounds_with_indications'] = 0
+
+        # Save metadata and summary after all fields are finalized
+        metadata_filename = os.path.join(compound_folder, f"{safe_name}_metadata.json")
+        with open(metadata_filename, 'w') as f:
+            json.dump(result_summary, f, indent=4)
+
+        summary_filename = os.path.join(compound_folder, "summary.json")
+        with open(summary_filename, 'w') as f:
+            json.dump(result_summary, f, indent=4)
 
         # Create ZIP archive - use entry_id for filename if available (UUID-based storage)
         # This enables true duplicate support and avoids issues with special characters
@@ -1181,6 +1203,7 @@ def process_compound_job(
     smiles: str,
     similarity_threshold: int = 90,
     activity_types: Optional[List[str]] = None,
+    author_name: Optional[str] = None,
 ) -> None:
     """
     Wrapper function for executor.submit().
@@ -1194,4 +1217,5 @@ def process_compound_job(
         smiles=smiles,
         similarity_threshold=similarity_threshold,
         activity_types=activity_types,
+        author_name=author_name,
     )

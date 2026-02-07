@@ -21,12 +21,12 @@ class TestCompoundService:
 
     def test_search_similar_compounds_fallback(self, service):
         """Test fallback similarity search."""
-        with patch('backend.services.compound_service.CompoundService._search_similar_compounds_fallback') as mock:
+        from backend.services.compound_service import CompoundService
+
+        with patch.object(CompoundService, '_search_similar_compounds_fallback') as mock:
             mock.return_value = [{"ChEMBL ID": "CHEMBL25"}]
 
-            # Force fallback by making import fail
-            with patch.dict('sys.modules', {'backend.modules.api_client': None}):
-                result = service._search_similar_compounds_fallback("CCO", 90)
+            result = service._search_similar_compounds_fallback("CCO", 90)
 
             # Should return mocked result
             assert mock.called or isinstance(result, list)
@@ -65,12 +65,14 @@ class TestCompoundServiceProgressCallbacks:
 
     def test_update_progress(self, mock_db):
         """Test progress update calls job_service."""
+        import backend.services.job_service as js_mod
         from backend.services.compound_service import CompoundService
         from backend.models.database import JobStatus
 
         service = CompoundService()
 
-        with patch('backend.services.job_service.job_service') as mock_job_service:
+        mock_js = MagicMock()
+        with patch.object(js_mod, 'job_service', mock_js):
             service._update_progress(
                 mock_db,
                 "test-job-id",
@@ -79,7 +81,7 @@ class TestCompoundServiceProgressCallbacks:
                 JobStatus.PROCESSING
             )
 
-            mock_job_service.update_progress.assert_called_once_with(
+            mock_js.update_progress.assert_called_once_with(
                 mock_db,
                 "test-job-id",
                 50.0,
@@ -89,11 +91,13 @@ class TestCompoundServiceProgressCallbacks:
 
     def test_complete_job(self, mock_db):
         """Test job completion calls job_service."""
+        import backend.services.job_service as js_mod
         from backend.services.compound_service import CompoundService
 
         service = CompoundService()
 
-        with patch('backend.services.job_service.job_service') as mock_job_service:
+        mock_js = MagicMock()
+        with patch.object(js_mod, 'job_service', mock_js):
             service._complete_job(
                 mock_db,
                 "test-job-id",
@@ -101,18 +105,20 @@ class TestCompoundServiceProgressCallbacks:
                 {"total": 100}
             )
 
-            mock_job_service.complete_job.assert_called_once()
+            mock_js.complete_job.assert_called_once()
 
     def test_fail_job(self, mock_db):
         """Test job failure calls job_service."""
+        import backend.services.job_service as js_mod
         from backend.services.compound_service import CompoundService
 
         service = CompoundService()
 
-        with patch('backend.services.job_service.job_service') as mock_job_service:
+        mock_js = MagicMock()
+        with patch.object(js_mod, 'job_service', mock_js):
             service._fail_job(mock_db, "test-job-id", "Test error")
 
-            mock_job_service.fail_job.assert_called_once_with(
+            mock_js.fail_job.assert_called_once_with(
                 mock_db,
                 "test-job-id",
                 "Test error"
@@ -132,7 +138,8 @@ class TestProcessCompoundJobWrapper:
                 compound_name="Aspirin",
                 smiles="CC(=O)OC1=CC=CC=C1C(=O)O",
                 similarity_threshold=90,
-                activity_types=['IC50', 'Ki']
+                activity_types=['IC50', 'Ki'],
+                author_name=None
             )
 
             mock_method.assert_called_once_with(
@@ -140,5 +147,6 @@ class TestProcessCompoundJobWrapper:
                 compound_name="Aspirin",
                 smiles="CC(=O)OC1=CC=CC=C1C(=O)O",
                 similarity_threshold=90,
-                activity_types=['IC50', 'Ki']
+                activity_types=['IC50', 'Ki'],
+                author_name=None
             )

@@ -41,6 +41,7 @@ class JobCreate(BaseModel):
     """Request schema for creating a job."""
 
     compound_name: str = Field(..., min_length=1, max_length=100)
+    author_name: str = Field(..., min_length=1, max_length=100)
     smiles: str = Field(..., min_length=1, max_length=5000)
     similarity_threshold: int = Field(default=90, ge=50, le=100)
     activity_types: Optional[List[str]] = None
@@ -162,10 +163,31 @@ class JobCreate(BaseModel):
 
         return v
 
+    @field_validator('author_name')
+    @classmethod
+    def validate_author_name(cls, v: str) -> str:
+        """Validate author name for safety."""
+        if not v or not v.strip():
+            raise ValueError('Author name cannot be empty')
+
+        v = v.strip()
+
+        if len(v) > 100:
+            raise ValueError('Author name too long (max 100 characters)')
+
+        if not COMPOUND_NAME_PATTERN.match(v):
+            raise ValueError('Author name contains invalid characters')
+
+        if '\x00' in v:
+            raise ValueError('Author name contains invalid characters')
+
+        return v
+
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "compound_name": "Aspirin",
+                "author_name": "Dr. Smith",
                 "smiles": "CC(=O)OC1=CC=CC=C1C(=O)O",
                 "similarity_threshold": 90,
                 "activity_types": ["IC50", "Ki"],
@@ -178,7 +200,7 @@ class JobCreate(BaseModel):
 class BatchJobCreate(BaseModel):
     """Request schema for creating a batch job."""
 
-    compounds: List[JobCreate] = Field(..., min_length=1, max_length=100)
+    compounds: List[JobCreate] = Field(..., min_length=1, max_length=1000)
     # Session ID for user isolation (applied to all jobs in batch)
     session_id: Optional[str] = None
     # Per-compound duplicate decisions: maps compound_name -> action ('skip', 'replace', 'duplicate')
@@ -289,6 +311,9 @@ class ActiveJobResponse(BaseModel):
     compound_name: Optional[str] = None
     batch_id: Optional[str] = None
     created_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    entry_id: Optional[str] = None
+    storage_path: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -370,6 +395,8 @@ class ExistingCompoundInfo(BaseModel):
     compound_name: str
     inchikey: Optional[str] = None
     processed_at: Optional[str] = None
+    similarity_threshold: Optional[int] = None
+    activity_types: Optional[str] = None  # Comma-separated
 
 
 class DuplicateFoundResponse(BaseModel):
@@ -377,22 +404,96 @@ class DuplicateFoundResponse(BaseModel):
 
     status: str = "duplicate_found"
     duplicate_type: str = Field(..., description="'exact' if both structure and name match, 'structure_only' if only structure matches")
+    config_match: str = Field(default="identical", description="'identical', 'different_threshold', 'different_activities', 'different_both'")
     existing_compound: ExistingCompoundInfo
     submitted: dict = Field(..., description="Info about the submitted compound")
     suggested_name: Optional[str] = Field(None, description="Suggested unique name for duplicate (e.g., 'Quercetin_v3')")
+    config_diff: Optional[dict] = Field(None, description="Config comparison details when config_match != 'identical'")
 
 
 class ResolveDuplicateRequest(BaseModel):
     """Request to resolve a duplicate compound situation."""
 
     action: DuplicateAction
-    smiles: str
-    compound_name: str
+    smiles: str = Field(..., min_length=1, max_length=5000)
+    compound_name: str = Field(..., min_length=1, max_length=100)
+    author_name: str = Field(..., min_length=1, max_length=100)
     existing_entry_id: Optional[str] = None
     new_compound_name: Optional[str] = Field(None, description="New name if user wants to change it (for exact duplicates)")
     similarity_threshold: int = Field(default=90, ge=70, le=100)
     activity_types: Optional[List[str]] = None
     session_id: Optional[str] = None
+
+    @field_validator('smiles')
+    @classmethod
+    def validate_smiles(cls, v: str) -> str:
+        """Validate SMILES string format and chemical validity."""
+        if not v or not v.strip():
+            raise ValueError('SMILES string cannot be empty')
+        v = v.strip()
+        if len(v) > 2000:
+            raise ValueError('SMILES too long (max 2000 characters)')
+        if not SMILES_PATTERN.match(v):
+            raise ValueError('SMILES contains invalid characters')
+        if RDKIT_AVAILABLE:
+            try:
+                mol = Chem.MolFromSmiles(v)
+                if mol is None:
+                    raise ValueError('Invalid SMILES: could not parse as a valid molecule')
+            except Exception as e:
+                raise ValueError(f'Invalid SMILES: {str(e)}')
+        return v
+
+    @field_validator('compound_name')
+    @classmethod
+    def validate_compound_name(cls, v: str) -> str:
+        """Validate compound name for safety."""
+        if not v or not v.strip():
+            raise ValueError('Compound name cannot be empty')
+        v = v.strip()
+        if len(v) > 100:
+            raise ValueError('Compound name too long (max 100 characters)')
+        if not COMPOUND_NAME_PATTERN.match(v):
+            raise ValueError('Compound name contains invalid characters')
+        if '..' in v or '/' in v or '\\' in v:
+            raise ValueError('Compound name contains invalid path characters')
+        if '\x00' in v:
+            raise ValueError('Compound name contains invalid characters')
+        return v
+
+    @field_validator('author_name')
+    @classmethod
+    def validate_author_name(cls, v: str) -> str:
+        """Validate author name for safety."""
+        if not v or not v.strip():
+            raise ValueError('Author name cannot be empty')
+        v = v.strip()
+        if len(v) > 100:
+            raise ValueError('Author name too long (max 100 characters)')
+        if not COMPOUND_NAME_PATTERN.match(v):
+            raise ValueError('Author name contains invalid characters')
+        if '\x00' in v:
+            raise ValueError('Author name contains invalid characters')
+        return v
+
+    @field_validator('new_compound_name')
+    @classmethod
+    def validate_new_compound_name(cls, v: Optional[str]) -> Optional[str]:
+        """Validate new compound name for safety."""
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            return None
+        if len(v) > 100:
+            raise ValueError('New compound name too long (max 100 characters)')
+        if not COMPOUND_NAME_PATTERN.match(v):
+            raise ValueError('New compound name contains invalid characters')
+        if '..' in v or '/' in v or '\\' in v:
+            raise ValueError('New compound name contains invalid path characters')
+        if '\x00' in v:
+            raise ValueError('New compound name contains invalid characters')
+        return v
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -446,7 +547,7 @@ class CompoundCreate(CompoundBase):
 
     total_activities: int = 0
     imp_candidates: int = 0
-    avg_oqpla_score: Optional[float] = None
+    imp_score: Optional[float] = None
     storage_path: Optional[str] = None
 
 
@@ -456,7 +557,7 @@ class CompoundResponse(CompoundBase):
     id: int
     total_activities: int
     imp_candidates: int
-    avg_oqpla_score: Optional[float] = None
+    imp_score: Optional[float] = None
     storage_path: Optional[str] = None
     processed_at: Optional[datetime] = None
 

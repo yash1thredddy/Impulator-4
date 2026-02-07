@@ -137,7 +137,8 @@ class ImpulatorAPIClient:
         compound_name: str,
         smiles: str,
         similarity_threshold: int = None,
-        activity_types: List[str] = None
+        activity_types: List[str] = None,
+        author_name: str = "",
     ) -> JobResponse:
         """Submit a compound analysis job.
 
@@ -146,12 +147,14 @@ class ImpulatorAPIClient:
             smiles: SMILES string
             similarity_threshold: Similarity threshold (default from config)
             activity_types: Activity types to search
+            author_name: Name of the author submitting the analysis
 
         Returns:
             JobResponse with job_id on success
         """
         payload = {
             "compound_name": compound_name,
+            "author_name": author_name,
             "smiles": smiles,
             "similarity_threshold": similarity_threshold or config.DEFAULT_SIMILARITY_THRESHOLD,
             "activity_types": activity_types or list(config.DEFAULT_ACTIVITY_TYPES),
@@ -254,7 +257,8 @@ class ImpulatorAPIClient:
         existing_entry_id: Optional[str] = None,
         new_compound_name: Optional[str] = None,
         similarity_threshold: int = None,
-        activity_types: List[str] = None
+        activity_types: List[str] = None,
+        author_name: Optional[str] = None,
     ) -> JobResponse:
         """Resolve a duplicate compound situation.
 
@@ -268,6 +272,7 @@ class ImpulatorAPIClient:
             new_compound_name: New name if user wants to change it
             similarity_threshold: Similarity threshold for new job
             activity_types: Activity types for new job
+            author_name: Name of the author submitting the analysis
 
         Returns:
             JobResponse with job_id on success (for replace/duplicate),
@@ -277,6 +282,7 @@ class ImpulatorAPIClient:
             "action": action,
             "smiles": smiles,
             "compound_name": compound_name,
+            "author_name": author_name,
             "existing_entry_id": existing_entry_id,
             "new_compound_name": new_compound_name,
             "similarity_threshold": similarity_threshold or config.DEFAULT_SIMILARITY_THRESHOLD,
@@ -440,7 +446,7 @@ class ImpulatorAPIClient:
                     job_id=job_id,
                     status=data.get('status'),
                     progress=data.get('progress', 0.0),
-                    message=data.get('message'),
+                    message=data.get('current_step') or data.get('message'),
                     data=data
                 )
             elif response.status_code == 404:
@@ -532,8 +538,8 @@ class ImpulatorAPIClient:
         try:
             response = self._request(
                 'GET',
-                '/api/v1/jobs',
-                params={'page': page, 'per_page': per_page, 'status': 'completed'}
+                '/api/v1/compounds',
+                params={'page': page, 'per_page': per_page}
             )
 
             if response.status_code == 200:
@@ -638,6 +644,42 @@ class ImpulatorAPIClient:
         except requests.exceptions.RequestException as e:
             return JobResponse(success=False, error=str(e))
 
+    def delete_compounds_batch(self, entry_ids: List[str]) -> JobResponse:
+        """Delete multiple compounds by entry_ids in a single batch.
+
+        Args:
+            entry_ids: List of compound entry UUIDs to delete
+
+        Returns:
+            JobResponse with success/failure and deletion summary in data
+        """
+        try:
+            response = self._request(
+                'POST',
+                '/api/v1/compounds/batch-delete',
+                json={"entry_ids": entry_ids}
+            )
+
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    return JobResponse(
+                        success=True,
+                        message=data.get("message", "Compounds deleted"),
+                        data=data,
+                    )
+                except (json.JSONDecodeError, ValueError):
+                    return JobResponse(success=True, message="Compounds deleted")
+            else:
+                try:
+                    error = response.json().get('detail', f"HTTP {response.status_code}")
+                except (json.JSONDecodeError, ValueError):
+                    error = f"HTTP {response.status_code}"
+                return JobResponse(success=False, error=error)
+
+        except requests.exceptions.RequestException as e:
+            return JobResponse(success=False, error=str(e))
+
     def poll_job_until_complete(
         self,
         job_id: str,
@@ -678,11 +720,20 @@ class ImpulatorAPIClient:
             if response.status == 'completed':
                 return response
             elif response.status == 'failed':
+                failure_data = response.data or {}
+                failure_reason = (
+                    response.error
+                    or failure_data.get('error_message')
+                    or failure_data.get('detail')
+                    or failure_data.get('error')
+                    or 'Job failed'
+                )
                 return JobResponse(
                     success=False,
                     job_id=job_id,
                     status='failed',
-                    error=response.data.get('error', 'Job failed')
+                    error=failure_reason,
+                    data=failure_data
                 )
             elif response.status == 'cancelled':
                 return JobResponse(

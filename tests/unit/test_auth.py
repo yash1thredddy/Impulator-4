@@ -2,6 +2,7 @@
 Unit tests for authentication and session validation.
 """
 import pytest
+import uuid
 
 # Skip all tests if fastapi not installed
 pytest.importorskip("fastapi")
@@ -28,15 +29,13 @@ class TestSessionValidation:
         result = validate_session_id(valid_id)
         assert result == valid_id
 
-    def test_none_session_generates_anonymous(self):
-        """Test that None session ID generates anonymous session."""
+    def test_none_session_generates_uuid(self):
+        """Test that None session ID generates a valid UUID session."""
         from backend.core.auth import validate_session_id
 
         result = validate_session_id(None)
-        assert result.startswith("anon-")
-        # Verify the generated part is a valid UUID
-        anon_uuid = result[5:]  # Remove 'anon-' prefix
-        assert len(anon_uuid) == 36
+        parsed = uuid.UUID(result)
+        assert str(parsed) == result
 
     def test_invalid_format_raises_error(self):
         """Test that invalid session ID format raises HTTPException."""
@@ -72,13 +71,14 @@ class TestSessionValidation:
         result = validate_session_id(f"  {valid_id}  ")
         assert result == valid_id
 
-    def test_empty_string_generates_anonymous(self):
-        """Test that empty string session ID generates anonymous session."""
+    def test_empty_string_generates_uuid(self):
+        """Test that empty string session ID generates a valid UUID session."""
         from backend.core.auth import validate_session_id
 
         # Empty string after strip becomes falsy
         result = validate_session_id("")
-        assert result.startswith("anon-")
+        parsed = uuid.UUID(result)
+        assert str(parsed) == result
 
     def test_non_uuid_v4_rejected(self):
         """Test that non-v4 UUIDs are rejected."""
