@@ -233,6 +233,11 @@ def calculate_imp_score(
     if missing_columns:
         raise ValueError(f"Missing required columns: {missing_columns}")
 
+    # Ensure numeric dtypes — upstream columns may be object dtype
+    numeric_cols = [c for c in required_columns if c != 'SMILES']
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
     # Calculate component scores
     df['Efficiency_Score'] = calculate_efficiency_outlier_score(df)
     df['Angle_Score'] = calculate_angle_score(df['Angle_SEI_BEI'])

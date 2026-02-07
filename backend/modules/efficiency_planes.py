@@ -263,6 +263,10 @@ def calculate_plane_metrics_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if missing_columns:
         raise ValueError(f"Missing required columns: {missing_columns}")
 
+    # Ensure numeric dtypes — upstream columns may be object dtype
+    for col in required_columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
     # Vectorized modulus and angle calculations
     df['Modulus_SEI_BEI'] = np.sqrt(df['SEI'] ** 2 + df['BEI'] ** 2)
     df['Angle_SEI_BEI'] = np.degrees(np.arctan2(df['BEI'], df['SEI']))

@@ -1017,7 +1017,22 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
             # Sort by SEI Count if available
             if 'SEI Count' in target_metrics_df.columns:
                 target_metrics_df = target_metrics_df.sort_values('SEI Count', ascending=False)
-            st.dataframe(target_metrics_df, width='stretch', hide_index=True, height=300)
+
+            # Make Target_ChEMBL_ID a clickable link to ChEMBL
+            if 'Target_ChEMBL_ID' in target_metrics_df.columns:
+                target_metrics_df['Target_ChEMBL_ID'] = target_metrics_df['Target_ChEMBL_ID'].apply(
+                    lambda x: f"https://www.ebi.ac.uk/chembl/explore/target/{x}" if x else ""
+                )
+                col_config = {
+                    "Target_ChEMBL_ID": st.column_config.LinkColumn(
+                        "Target ChEMBL ID",
+                        display_text=r"https://www\.ebi\.ac\.uk/chembl/explore/target/(.*)",
+                    )
+                }
+            else:
+                col_config = {}
+
+            st.dataframe(target_metrics_df, width='stretch', hide_index=True, height=300, column_config=col_config)
 
     # Explanation box
     with st.expander("📖 Understanding Efficiency Metrics by Target", expanded=False):

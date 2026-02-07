@@ -765,9 +765,12 @@ class CompoundService:
         for col in descriptor_cols:
             # Only update where current value is NaN
             mask = df[col].isna()
-            df.loc[mask, col] = df.loc[mask, 'SMILES'].apply(
+            values = df.loc[mask, 'SMILES'].apply(
                 lambda s: descriptor_cache.get(s, {}).get(col, np.nan) if pd.notna(s) else np.nan
             )
+            # Coerce to numeric — descriptor cache can return non-scalar values
+            # (e.g. empty lists) which would corrupt the column dtype to object
+            df.loc[mask, col] = pd.to_numeric(values, errors='coerce')
 
         progress_callback(1.0, "Molecular descriptors complete")
         return df
