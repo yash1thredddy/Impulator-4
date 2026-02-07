@@ -200,7 +200,7 @@ class JobCreate(BaseModel):
 class BatchJobCreate(BaseModel):
     """Request schema for creating a batch job."""
 
-    compounds: List[JobCreate] = Field(..., min_length=1, max_length=100)
+    compounds: List[JobCreate] = Field(..., min_length=1, max_length=1000)
     # Session ID for user isolation (applied to all jobs in batch)
     session_id: Optional[str] = None
     # Per-compound duplicate decisions: maps compound_name -> action ('skip', 'replace', 'duplicate')

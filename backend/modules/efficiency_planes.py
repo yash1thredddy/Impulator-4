@@ -263,24 +263,36 @@ def calculate_plane_metrics_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if missing_columns:
         raise ValueError(f"Missing required columns: {missing_columns}")
 
-    # Calculate plane metrics for each row
-    plane_metrics_list = []
-    for _, row in df.iterrows():
-        metrics = calculate_all_plane_metrics(
-            sei=float(row['SEI']),
-            bei=float(row['BEI']),
-            nsei=float(row['NSEI']),
-            nbei=float(row['NBEI']),
-            psa=float(row['TPSA']),
-            molecular_weight=float(row['Molecular_Weight']),
-            npol=float(row['NPOL']),
-            heavy_atoms=float(row['Heavy_Atoms'])
-        )
-        plane_metrics_list.append(metrics)
+    # Vectorized modulus and angle calculations
+    df['Modulus_SEI_BEI'] = np.sqrt(df['SEI'] ** 2 + df['BEI'] ** 2)
+    df['Angle_SEI_BEI'] = np.degrees(np.arctan2(df['BEI'], df['SEI']))
 
-    # Add metrics as new columns
-    plane_metrics_df = pd.DataFrame(plane_metrics_list)
-    df = pd.concat([df, plane_metrics_df], axis=1)
+    df['Modulus_NSEI_NBEI'] = np.sqrt(df['NSEI'] ** 2 + df['NBEI'] ** 2)
+    df['Angle_NSEI_NBEI'] = np.degrees(np.arctan2(df['NBEI'], df['NSEI']))
+
+    # Slope_SEI_BEI = 10 * (PSA / MW), only when MW > 0
+    df['Slope_SEI_BEI'] = np.nan
+    mask_mw = (
+        df['Molecular_Weight'].notna() &
+        df['TPSA'].notna() &
+        (df['Molecular_Weight'] > 0)
+    )
+    df.loc[mask_mw, 'Slope_SEI_BEI'] = (
+        10 * (df.loc[mask_mw, 'TPSA'] / df.loc[mask_mw, 'Molecular_Weight'])
+    )
+
+    # Atom-normalized plane terms, only when heavy atom count is valid
+    df['Slope_NSEI_NBEI'] = np.nan
+    df['Intercept_NSEI_NBEI'] = np.nan
+    mask_heavy = (
+        df['Heavy_Atoms'].notna() &
+        df['NPOL'].notna() &
+        (df['Heavy_Atoms'] > 0)
+    )
+    df.loc[mask_heavy, 'Slope_NSEI_NBEI'] = (
+        df.loc[mask_heavy, 'NPOL'] / df.loc[mask_heavy, 'Heavy_Atoms']
+    )
+    df.loc[mask_heavy, 'Intercept_NSEI_NBEI'] = np.log10(df.loc[mask_heavy, 'Heavy_Atoms'])
 
     return df
 

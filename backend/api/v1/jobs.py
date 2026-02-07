@@ -423,9 +423,7 @@ async def create_job(
         - JobResponse if job created successfully
         - DuplicateFoundResponse if duplicate detected
     """
-    # Use session_id from validated header, fall back to request body if anonymous
-    if session_id.startswith("anon-") and request.session_id:
-        session_id = request.session_id
+    # Always use the validated header session_id (body session_id is ignored for security)
 
     # Check idempotency key - return existing job if already created
     if idempotency_key:
@@ -613,9 +611,7 @@ async def resolve_duplicate(
         - JobResponse if job created (replace/duplicate actions)
         - Skipped message if skip action
     """
-    # Use session_id from validated header, fall back to request body if anonymous
-    if session_id.startswith("anon-") and request.session_id:
-        session_id = request.session_id
+    # Always use the validated header session_id (body session_id is ignored for security)
 
     # Handle SKIP action
     if request.action == DuplicateAction.SKIP:
@@ -883,9 +879,7 @@ async def create_batch_job(
     Returns:
         Dict with created jobs, skipped/replaced compounds, and batch summary
     """
-    # Use session_id from validated header, fall back to request body if anonymous
-    if session_id.startswith("anon-") and request.session_id:
-        session_id = request.session_id
+    # Always use the validated header session_id (body session_id is ignored for security)
 
     # Validate batch size
     if len(request.compounds) > MAX_BATCH_SIZE:
@@ -950,8 +944,11 @@ async def create_batch_job(
 
             # If action is 'replace', store reference for deferred deletion on job completion
             if compound_action == 'replace':
-                # Find existing compound to replace
-                existing = db.query(Compound).filter(Compound.compound_name == compound_name).first()
+                # Find existing compound to replace by InChIKey (precise) - avoids wrong-duplicate risk
+                existing = None
+                compound_inchikey = generate_inchikey(compound.smiles) if compound.smiles else None
+                if compound_inchikey:
+                    existing = db.query(Compound).filter(Compound.inchikey == compound_inchikey).first()
                 if existing:
                     replace_entry_id = existing.entry_id
 
@@ -979,12 +976,13 @@ async def create_batch_job(
                     job_params["is_duplicate"] = True
                     job_params["duplicate_of"] = existing.duplicate_of
             if compound_action == 'duplicate':
-                # Find existing compound to reference - use original_compound_name if provided
-                # (frontend sends new name in compound_name, original in original_compound_name)
-                original_name = getattr(compound, 'original_compound_name', None) or compound_name
-                existing = db.query(Compound).filter(Compound.compound_name == original_name).first()
+                # Find existing compound to reference by InChIKey (precise)
+                dup_inchikey = generate_inchikey(compound.smiles) if compound.smiles else None
+                dup_existing = None
+                if dup_inchikey:
+                    dup_existing = db.query(Compound).filter(Compound.inchikey == dup_inchikey).first()
                 job_params["is_duplicate"] = True
-                job_params["duplicate_of"] = existing.entry_id if existing else None
+                job_params["duplicate_of"] = dup_existing.entry_id if dup_existing else None
                 marked_duplicate.append(compound_name)
 
             # Create job FIRST - if this fails, no data is lost
@@ -1337,10 +1335,11 @@ async def delete_job(
         if entry_id:
             compound_entry = db.query(Compound).filter(Compound.entry_id == entry_id).first()
         if not compound_entry:
-            # Fallback to compound_name - but this may match wrong compound for duplicates
-            compound_entry = db.query(Compound).filter(Compound.compound_name == compound_name).first()
-            if compound_entry:
-                entry_id = compound_entry.entry_id
+            logger.warning(
+                f"No compound found by entry_id for job {job_id} "
+                f"(compound_name={compound_name}, entry_id={entry_id}). "
+                f"Skipping compound deletion to avoid deleting wrong duplicate."
+            )
 
         # Delete from Azure (UUID-based storage only)
         if entry_id:

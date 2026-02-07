@@ -25,10 +25,9 @@ streamlit run app.py
 ```
 
 ### Documentation
-*   **[Output Schema](OUTPUT_SCHEMA.md)**: Complete CSV output format documentation.
-*   **[Free Deployment Guide](FREE_DEPLOYMENT.md)**: Deploy to Streamlit Cloud or Local.
-*   **[Hugging Face Guide](HUGGINGFACE_GUIDE.md)**: Deploy to HF Spaces (Best for performance).
-*   **[Concurrency Guide](CONCURRENCY_GUIDE.md)**: Understanding multi-user support.
+*   **[Architecture](.claude/docs/architecture.md)**: System design and architecture overview.
+*   **[Testing Strategy](.claude/docs/testing-strategy.md)**: Test approach and patterns.
+*   **[Issues & Fixes](.claude/docs/issues.md)**: Known issues and solutions.
 
 ## 🧪 Key Features
 *   **Compound Analysis**: Automated retrieval of bioactivity data.

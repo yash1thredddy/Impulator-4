@@ -52,7 +52,7 @@ class ImpulatorConfig:
     APP_NAME: str = "IMPULATOR"
     APP_ICON: str = "🧬"
     APP_VERSION: str = field(
-        default_factory=lambda: _get_str_env('APP_VERSION', "2.0.0")
+        default_factory=lambda: _get_str_env('APP_VERSION', "2.1.0")
     )
 
     # Backend API

@@ -14,6 +14,7 @@ from sqlalchemy import desc, func, case
 
 from backend.models.database import Job, JobStatus, JobType
 from backend.core.azure_sync import sync_db_to_azure
+from backend.core.metrics import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,7 @@ class JobService:
         db.add(job)
         db.commit()
         db.refresh(job)
+        metrics.increment('jobs_created')
         logger.info(f"Created job {job.id} ({job_type.value}) session={session_id} batch={batch_id}")
         return job
 
@@ -323,15 +325,22 @@ class JobService:
                 entry_id = result_data.get("entry_id")
                 storage_path = result_data.get("storage_path")
 
-                # Fallback: look up from Compound table
-                if (not entry_id or not storage_path) and compound_name != "Unknown":
-                    from backend.models.database import Compound
-                    compound = db.query(Compound).filter(
-                        Compound.compound_name == compound_name
-                    ).order_by(Compound.processed_at.desc()).first()
-                    if compound:
-                        entry_id = entry_id or compound.entry_id
-                        storage_path = storage_path or compound.storage_path
+                # Fallback: derive from the job result path (UUID-based filename)
+                if not entry_id and job.result_path:
+                    from pathlib import Path
+                    candidate = Path(job.result_path).stem
+                    try:
+                        entry_id = str(uuid.UUID(candidate))
+                    except (ValueError, TypeError, AttributeError):
+                        entry_id = None
+
+                # Build storage_path deterministically from entry_id
+                if entry_id and not storage_path:
+                    try:
+                        from backend.core.azure_sync import get_storage_path_from_entry_id
+                        storage_path = get_storage_path_from_entry_id(entry_id)
+                    except Exception as e:
+                        logger.debug(f"Could not derive storage_path from entry_id {entry_id}: {e}")
 
             item["entry_id"] = entry_id
             item["storage_path"] = storage_path
@@ -610,6 +619,7 @@ class JobService:
 
             db.commit()
             db.refresh(job)
+            metrics.increment('jobs_completed')
 
         # All network I/O happens OUTSIDE the lock to avoid blocking other threads
 
@@ -894,6 +904,7 @@ class JobService:
 
             db.commit()
             db.refresh(job)
+            metrics.increment('jobs_failed')
 
         # Sync to Azure (outside lock - this is network I/O)
         sync_db_to_azure()
@@ -929,6 +940,7 @@ class JobService:
 
             db.commit()
             db.refresh(job)
+            metrics.increment('jobs_cancelled')
 
         logger.info(f"Job {job_id} cancelled")
         return job

@@ -446,7 +446,7 @@ class ImpulatorAPIClient:
                     job_id=job_id,
                     status=data.get('status'),
                     progress=data.get('progress', 0.0),
-                    message=data.get('message'),
+                    message=data.get('current_step') or data.get('message'),
                     data=data
                 )
             elif response.status_code == 404:
@@ -538,8 +538,8 @@ class ImpulatorAPIClient:
         try:
             response = self._request(
                 'GET',
-                '/api/v1/jobs',
-                params={'page': page, 'per_page': per_page, 'status': 'completed'}
+                '/api/v1/compounds',
+                params={'page': page, 'per_page': per_page}
             )
 
             if response.status_code == 200:
@@ -720,11 +720,20 @@ class ImpulatorAPIClient:
             if response.status == 'completed':
                 return response
             elif response.status == 'failed':
+                failure_data = response.data or {}
+                failure_reason = (
+                    response.error
+                    or failure_data.get('error_message')
+                    or failure_data.get('detail')
+                    or failure_data.get('error')
+                    or 'Job failed'
+                )
                 return JobResponse(
                     success=False,
                     job_id=job_id,
                     status='failed',
-                    error=response.data.get('error', 'Job failed')
+                    error=failure_reason,
+                    data=failure_data
                 )
             elif response.status == 'cancelled':
                 return JobResponse(

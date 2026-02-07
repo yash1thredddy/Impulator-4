@@ -15,7 +15,7 @@ from pathlib import Path
 # Configuration
 BACKEND_HOST = os.getenv("API_HOST", "127.0.0.1")
 BACKEND_PORT = int(os.getenv("API_PORT", "8000"))
-FRONTEND_PORT = int(os.getenv("FRONTEND_PORT", "8501"))
+FRONTEND_PORT = int(os.getenv("FRONTEND_PORT", "7860"))
 
 PROJECT_ROOT = Path(__file__).parent
 processes = []

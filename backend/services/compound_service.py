@@ -30,7 +30,6 @@ if PROJECT_ROOT not in sys.path:
 from backend.config import settings  # noqa: E402
 from backend.core.database import get_db_session  # noqa: E402
 from backend.core.azure_sync import (  # noqa: E402
-    sync_db_to_azure,
     upload_result_to_azure_by_entry_id,
     get_storage_path_from_entry_id,
 )
@@ -42,8 +41,8 @@ from backend.modules.api_client import (  # noqa: E402
     get_chembl_ids,
     get_drug_indications_batch,
 )
-from backend.modules.efficiency_metrics import calculate_all_efficiency_metrics  # noqa: E402
-from backend.modules.efficiency_planes import calculate_all_plane_metrics  # noqa: E402
+from backend.modules.efficiency_metrics import calculate_efficiency_metrics_dataframe  # noqa: E402
+from backend.modules.efficiency_planes import calculate_plane_metrics_dataframe  # noqa: E402
 from backend.modules.outlier_detection import detect_efficiency_outliers  # noqa: E402
 from backend.modules.imp_scoring import (  # noqa: E402
     calculate_imp_score,
@@ -244,12 +243,8 @@ class CompoundService:
                     result_summary['azure_upload_error'] = str(azure_error)
                     self._update_progress(db, job_id, 95, "Upload failed (results saved locally)")
 
-                # Step 9: Sync database (100%)
-                self._update_progress(db, job_id, 97, "Syncing database...")
-                try:
-                    sync_db_to_azure()
-                except Exception as sync_error:
-                    logger.error(f"Database sync failed for job {job_id}: {sync_error}")
+                # Step 9: Finalize job (100%)
+                self._update_progress(db, job_id, 97, "Finalizing job...")
 
                 # Complete job
                 self._complete_job(db, job_id, result_path, result_summary)
@@ -807,39 +802,23 @@ class CompoundService:
                 if col not in df.columns:
                     df[col] = np.nan
 
-            # Calculate efficiency metrics if not already present
-            if df['SEI'].isna().all():
-                for idx, row in df.iterrows():
-                    if pd.notna(row.get('pActivity')) and pd.notna(row.get('TPSA')):
-                        metrics = calculate_all_efficiency_metrics(
-                            pActivity=float(row['pActivity']),
-                            psa=float(row.get('TPSA', 0)),
-                            molecular_weight=float(row.get('Molecular_Weight', 0)),
-                            npol=float(row.get('NPOL', 0)) if pd.notna(row.get('NPOL')) else 0,
-                            heavy_atoms=float(row.get('Heavy_Atoms', 0)) if pd.notna(row.get('Heavy_Atoms')) else 0
-                        )
-                        for key, value in metrics.items():
-                            df.at[idx, key] = value
+            # Calculate efficiency metrics using vectorized operations
+            metrics_input_cols = ['pActivity', 'TPSA', 'Molecular_Weight', 'NPOL', 'Heavy_Atoms']
+            if all(col in df.columns for col in metrics_input_cols):
+                df = calculate_efficiency_metrics_dataframe(df)
+            else:
+                missing = [c for c in metrics_input_cols if c not in df.columns]
+                logger.warning(f"Skipping efficiency metrics: missing columns {missing}")
 
             progress_callback(0.5, "Calculating plane geometry...")
 
-            # Calculate plane metrics
-            for idx, row in df.iterrows():
-                if all(pd.notna(row.get(m)) for m in ['SEI', 'BEI', 'NSEI', 'NBEI']):
-                    plane_metrics = calculate_all_plane_metrics(
-                        sei=float(row['SEI']),
-                        bei=float(row['BEI']),
-                        nsei=float(row['NSEI']),
-                        nbei=float(row['NBEI']),
-                        psa=float(row.get('TPSA', 0)),
-                        molecular_weight=float(row.get('Molecular_Weight', 0)),
-                        npol=float(row.get('NPOL', 0)) if pd.notna(row.get('NPOL')) else 0,
-                        heavy_atoms=float(row.get('Heavy_Atoms', 0)) if pd.notna(row.get('Heavy_Atoms')) else 0
-                    )
-                    for key, value in plane_metrics.items():
-                        if key not in df.columns:
-                            df[key] = np.nan
-                        df.at[idx, key] = value
+            # Calculate plane metrics using vectorized operations
+            plane_input_cols = ['SEI', 'BEI', 'NSEI', 'NBEI', 'TPSA', 'Molecular_Weight', 'NPOL', 'Heavy_Atoms']
+            if all(col in df.columns for col in plane_input_cols):
+                df = calculate_plane_metrics_dataframe(df)
+            else:
+                missing = [c for c in plane_input_cols if c not in df.columns]
+                logger.warning(f"Skipping plane metrics: missing columns {missing}")
 
             progress_callback(0.8, "Detecting outliers...")
 
@@ -1126,16 +1105,6 @@ class CompoundService:
         else:
             result_summary['imp_score'] = None
 
-        # Save metadata (legacy filename)
-        metadata_filename = os.path.join(compound_folder, f"{safe_name}_metadata.json")
-        with open(metadata_filename, 'w') as f:
-            json.dump(result_summary, f, indent=4)
-
-        # Save standardized summary.json (for frontend direct Azure access)
-        summary_filename = os.path.join(compound_folder, "summary.json")
-        with open(summary_filename, 'w') as f:
-            json.dump(result_summary, f, indent=4)
-
         # Also save CSV with standard name for frontend
         similar_csv = os.path.join(compound_folder, "similar_compounds.csv")
         df_results.to_csv(similar_csv, index=False)
@@ -1169,6 +1138,15 @@ class CompoundService:
         else:
             result_summary['drug_indications_count'] = 0
             result_summary['compounds_with_indications'] = 0
+
+        # Save metadata and summary after all fields are finalized
+        metadata_filename = os.path.join(compound_folder, f"{safe_name}_metadata.json")
+        with open(metadata_filename, 'w') as f:
+            json.dump(result_summary, f, indent=4)
+
+        summary_filename = os.path.join(compound_folder, "summary.json")
+        with open(summary_filename, 'w') as f:
+            json.dump(result_summary, f, indent=4)
 
         # Create ZIP archive - use entry_id for filename if available (UUID-based storage)
         # This enables true duplicate support and avoids issues with special characters

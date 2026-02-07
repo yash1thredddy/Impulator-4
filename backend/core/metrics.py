@@ -23,14 +23,14 @@ Usage:
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
-from threading import Lock
+from threading import RLock
 
 
 @dataclass
 class Metrics:
     """Thread-safe application metrics."""
 
-    _lock: Lock = field(default_factory=Lock, repr=False)
+    _lock: RLock = field(default_factory=RLock, repr=False)
 
     # Counters
     jobs_created: int = 0
