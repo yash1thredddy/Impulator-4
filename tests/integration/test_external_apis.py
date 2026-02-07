@@ -17,10 +17,8 @@ Usage:
 
 import sys
 import time
-import json
 import argparse
 import requests
-from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 
 # ── Test compounds ──────────────────────────────────────────────────────────
@@ -83,15 +81,15 @@ def timed_request(method: str, url: str, **kwargs) -> Tuple[Optional[requests.Re
         resp = requests.request(method, url, **kwargs)
         latency = (time.perf_counter() - start) * 1000
         return resp, latency, None
-    except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout) as e:
+    except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout):
         latency = (time.perf_counter() - start) * 1000
         return None, latency, f"Timeout after {latency/1000:.0f}s"
-    except requests.exceptions.ConnectionError as e:
-        latency = (time.perf_counter() - start) * 1000
-        return None, latency, f"Connection refused/failed"
     except requests.exceptions.SSLError as e:
         latency = (time.perf_counter() - start) * 1000
         return None, latency, f"SSL error: {e}"
+    except requests.exceptions.ConnectionError:
+        latency = (time.perf_counter() - start) * 1000
+        return None, latency, "Connection refused/failed"
     except Exception as e:
         latency = (time.perf_counter() - start) * 1000
         return None, latency, str(e)
@@ -557,8 +555,10 @@ def main():
     )
     args = parser.parse_args()
 
-    global TIMEOUT
+    global TIMEOUT, TIMEOUT_CHEMBL_SIMILARITY, TIMEOUT_PDB_SEARCH
     TIMEOUT = args.timeout
+    TIMEOUT_CHEMBL_SIMILARITY = max(TIMEOUT, 90)
+    TIMEOUT_PDB_SEARCH = max(TIMEOUT, 45)
 
     success = run_tests(api_filter=args.api, verbose=args.verbose)
     sys.exit(0 if success else 1)

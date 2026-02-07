@@ -94,7 +94,6 @@ class TestMetricsLockReentrancy:
         """Ensure to_dict() completes without deadlock (RLock allows reentrancy)."""
         # Import directly to avoid __init__.py chain
         import importlib
-        import sys
 
         spec = importlib.util.spec_from_file_location(
             "metrics_standalone",

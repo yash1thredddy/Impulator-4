@@ -127,10 +127,20 @@ def render_compound_browser() -> None:
 
     # Handle navigation (only when not in select mode)
     if clicked and not select_mode:
+        # Resolve parent compound name for duplicates
+        duplicate_of_name = None
+        dup_entry_id = clicked.get('duplicate_of')
+        if clicked.get('is_duplicate') and dup_entry_id:
+            parent = next((c for c in compounds if c.get('entry_id') == dup_entry_id), None)
+            if parent:
+                duplicate_of_name = parent.get('compound_name')
+
         SessionState.navigate_to_compound(
             clicked.get('compound_name'),
             entry_id=clicked.get('entry_id'),
-            storage_path=clicked.get('storage_path')
+            storage_path=clicked.get('storage_path'),
+            is_duplicate=clicked.get('is_duplicate', False),
+            duplicate_of_name=duplicate_of_name
         )
         st.rerun()
 

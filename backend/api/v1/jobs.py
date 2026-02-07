@@ -987,9 +987,31 @@ async def create_batch_job(
                 dup_existing = None
                 if dup_inchikey:
                     dup_existing = db.query(Compound).filter(Compound.inchikey == dup_inchikey).first()
-                job_params["is_duplicate"] = True
-                job_params["duplicate_of"] = dup_existing.entry_id if dup_existing else None
-                marked_duplicate.append(compound_name)
+
+                # Fallback when InChIKey lookup fails/unavailable: try exact name match
+                if not dup_existing:
+                    name_candidates = (
+                        db.query(Compound)
+                        .filter(Compound.compound_name == compound_name)
+                        .order_by(Compound.processed_at.desc())
+                        .all()
+                    )
+                    dup_existing = next(
+                        (c for c in name_candidates if not c.is_duplicate),
+                        name_candidates[0] if name_candidates else None
+                    )
+
+                # Only mark as duplicate when a valid parent entry_id exists.
+                # Otherwise, process as a new compound to avoid orphan duplicate records.
+                if dup_existing and dup_existing.entry_id:
+                    job_params["is_duplicate"] = True
+                    job_params["duplicate_of"] = dup_existing.entry_id
+                    marked_duplicate.append(compound_name)
+                else:
+                    logger.warning(
+                        f"Batch duplicate requested for '{compound_name}' but no parent found; "
+                        f"processing as new compound"
+                    )
 
             # Create job FIRST - if this fails, no data is lost
             job = job_service.create_job(

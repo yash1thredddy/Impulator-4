@@ -35,6 +35,8 @@ def render_compound_detail_page() -> None:
     compound_name = SessionState.get('selected_compound')
     entry_id = SessionState.get('selected_compound_entry_id')
     storage_path = SessionState.get('selected_compound_storage_path')
+    is_duplicate = SessionState.get('selected_compound_is_duplicate', False)
+    duplicate_of_name = SessionState.get('selected_compound_duplicate_of_name')
 
     if not compound_name:
         st.error("No compound selected")
@@ -52,6 +54,16 @@ def render_compound_detail_page() -> None:
     with col2:
         safe_compound_name = html.escape(compound_name)
         st.markdown(f"<h2 style='text-align: center; margin: 0;'>{safe_compound_name}</h2>", unsafe_allow_html=True)
+        if is_duplicate:
+            dup_label = "Duplicate compound"
+            if duplicate_of_name:
+                safe_parent = html.escape(duplicate_of_name)
+                dup_label = f"Duplicate of {safe_parent}"
+            st.markdown(
+                f"<p style='text-align: center; margin: 2px 0 0 0; color: #ff6b35; "
+                f"font-size: 13px; font-weight: 600;'>&#9888; {dup_label}</p>",
+                unsafe_allow_html=True
+            )
     with col3:
         if st.button("🗑️", width='stretch', help="Delete compound"):
             SessionState.set('show_delete_confirmation', True)
@@ -185,7 +197,7 @@ def _render_overview_tab(data: Dict[str, Any]) -> None:
 
     # IMP Score Analysis (without PAINS)
     with sub_tabs[6]:
-        _render_imp_score_analysis(df, compound_name)
+        _render_imp_score_analysis(df)
 
     # Drug Indications
     with sub_tabs[7]:
@@ -284,11 +296,23 @@ def _render_compound_info(data: Dict[str, Any], df: pd.DataFrame, summary: Dict)
                         lambda x: x if isinstance(x, str) else ''
                     )
 
+                # Make ChEMBL IDs clickable
+                unique_compounds['ChEMBL_ID'] = unique_compounds['ChEMBL_ID'].apply(
+                    lambda x: f"https://www.ebi.ac.uk/chembl/explore/compound/{x}" if x else ""
+                )
+                col_config = {
+                    "ChEMBL_ID": st.column_config.LinkColumn(
+                        "ChEMBL_ID",
+                        display_text=r"https://www\.ebi\.ac\.uk/chembl/explore/compound/(.*)",
+                    )
+                }
+
                 st.dataframe(
                     unique_compounds,
                     width='stretch',
                     hide_index=True,
-                    height=min(200, len(unique_compounds) * 35 + 40)
+                    height=min(200, len(unique_compounds) * 35 + 40),
+                    column_config=col_config,
                 )
 
 
@@ -1217,12 +1241,19 @@ def _render_pains_analysis(df: pd.DataFrame) -> None:
                             )
                             flagged_df = flagged_df[mask]
 
+                    # Make ChEMBL IDs clickable
+                    flagged_df['ChEMBL_ID'] = flagged_df['ChEMBL_ID'].apply(
+                        lambda x: f"https://www.ebi.ac.uk/chembl/explore/compound/{x}" if x and x != 'Unknown' else ""
+                    )
                     st.dataframe(
                         flagged_df,
                         width='stretch',
                         hide_index=True,
                         column_config={
-                            'ChEMBL_ID': st.column_config.TextColumn('ChEMBL_ID', width='small'),
+                            'ChEMBL_ID': st.column_config.LinkColumn(
+                                'ChEMBL_ID', width='small',
+                                display_text=r"https://www\.ebi\.ac\.uk/chembl/explore/compound/(.*)",
+                            ),
                             'Molecule': st.column_config.TextColumn('Molecule', width='small'),
                             'Flags': st.column_config.TextColumn('Flags', width='medium'),
                             'Details': st.column_config.TextColumn('Details', width='large'),
@@ -1288,7 +1319,7 @@ def _render_pains_analysis(df: pd.DataFrame) -> None:
     """)
 
 
-def _render_imp_score_breakdown(df: pd.DataFrame, compound_name: str) -> None:
+def _render_imp_score_breakdown(df: pd.DataFrame) -> None:
     """
     Render detailed IMP score breakdown for a representative compound.
 
@@ -1595,7 +1626,7 @@ def _render_contribution_chart(row: pd.Series) -> None:
     st.plotly_chart(fig, width='stretch')
 
 
-def _render_imp_score_analysis(df: pd.DataFrame, compound_name: str) -> None:
+def _render_imp_score_analysis(df: pd.DataFrame) -> None:
     """IMP Score analysis with full explanations."""
     if df is None:
         st.info("No data available")
@@ -1698,7 +1729,7 @@ since NSEI and NBEI are derived from the same underlying activity data.
                         st.error(f"**{cls}**: {count} ({pct:.0f}%)")
 
         # Detailed Score Breakdown Section
-        _render_imp_score_breakdown(df, compound_name)
+        _render_imp_score_breakdown(df)
 
     # IMP Candidates section
     if has_imp:
@@ -2405,7 +2436,8 @@ def _render_molecule_viewer(df: pd.DataFrame) -> None:
                 st.markdown(f"**pActivity:** {mol_data['pActivity'].min():.1f} - {mol_data['pActivity'].max():.1f}")
             if 'IMP_Final_Score' in mol_data.columns:
                 avg = mol_data['IMP_Final_Score'].mean()
-                st.markdown(f"**IMP Score:** {avg:.3f}")
+                avg_text = f"{avg:.3f}" if pd.notna(avg) else "N/A"
+                st.markdown(f"**IMP Score:** {avg_text}")
 
     # 3D Viewer
     with st.expander("🧬 Generate 3D Structure"):
@@ -3379,9 +3411,9 @@ def _render_report_header(data: Dict[str, Any], smiles: str) -> None:
         with stat_cols[1]:
             st.metric("Activities", activities_count)
         with stat_cols[2]:
-            st.metric("QED", f"{avg_qed:.2f}" if avg_qed else "N/A")
+            st.metric("QED", f"{avg_qed:.2f}" if pd.notna(avg_qed) else "N/A")
         with stat_cols[3]:
-            st.metric("IMP Score", f"{best_imp_score:.2f}" if best_imp_score else "N/A",
+            st.metric("IMP Score", f"{best_imp_score:.2f}" if pd.notna(best_imp_score) else "N/A",
                       help="Best scoring compound (highest IMP risk)")
         with stat_cols[4]:
             if has_warning and imp_count > 0:
@@ -3560,7 +3592,7 @@ def _render_report_imp_score_calculation(df: pd.DataFrame) -> None:
                 "Component": name,
                 "Score": f"{score:.3f}" if not pd.isna(score) else "N/A",
                 "Weight": weight,
-                "Contribution": f"{contrib:.3f}" if contrib and not pd.isna(contrib) else "N/A"
+                "Contribution": f"{contrib:.3f}" if contrib is not None and not pd.isna(contrib) else "N/A"
             })
 
     if component_data:
@@ -4677,7 +4709,7 @@ def _generate_html_report(data: Dict[str, Any], df: pd.DataFrame) -> str:
             if col in best_row.index and not pd.isna(best_row[col]):
                 contrib_col = col.replace('_Score', '_Contribution')
                 contrib = best_row[contrib_col] if contrib_col in best_row.index else None
-                contrib_str = f"{contrib:.3f}" if contrib and not pd.isna(contrib) else "N/A"
+                contrib_str = f"{contrib:.3f}" if contrib is not None and not pd.isna(contrib) else "N/A"
                 components_html += f"<tr><td>{name}</td><td>{best_row[col]:.3f}</td><td>{weight}</td><td>{contrib_str}</td></tr>"
 
     # Red flags section - count UNIQUE COMPOUNDS (not all rows)

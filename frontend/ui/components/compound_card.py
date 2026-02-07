@@ -285,6 +285,8 @@ def render_compound_grid(compounds: list, columns: int = 3, select_mode: bool = 
                     clicked_compound = {
                         'compound_name': compound.get('compound_name'),
                         'entry_id': compound.get('entry_id'),
+                        'is_duplicate': compound.get('is_duplicate', False),
+                        'duplicate_of': compound.get('duplicate_of'),
                     }
 
     return clicked_compound
@@ -361,6 +363,8 @@ def render_compound_list(compounds: list, select_mode: bool = False) -> Optional
                     clicked_compound = {
                         'compound_name': compound_name,
                         'entry_id': entry_id,
+                        'is_duplicate': is_duplicate,
+                        'duplicate_of': compound.get('duplicate_of'),
                     }
 
         st.divider()
