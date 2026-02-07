@@ -166,6 +166,7 @@ def test_similarity_search():
     print(f"Total similar compounds found across all queries: {total_found}")
 
     assert total_found > 0, "No similar compounds found across all queries"
+    return True
 
 
 def test_molecule_data():
@@ -216,6 +217,7 @@ def test_molecule_data():
     print(f"  Time: {rest_batch_elapsed:.2f}s")
 
     assert len(batch_results) > 0 or len(rest_batch) > 0, "No molecule data found"
+    return True
 
 
 def test_target_names():
@@ -268,6 +270,7 @@ def test_target_names():
     print(f"  Time: {rest_batch_elapsed:.2f}s")
 
     assert len(batch_results) > 0 or len(rest_batch) > 0, "No target names found"
+    return True
 
 
 def test_activities():
@@ -306,6 +309,7 @@ def test_activities():
     print(f"  Time: {rest_elapsed:.2f}s")
 
     assert len(results) > 0 or len(rest_results) > 0, "No activities found"
+    return True
 
 
 def test_drug_indications():
@@ -346,6 +350,7 @@ def test_drug_indications():
     print(f"  Time: {rest_elapsed:.2f}s")
 
     assert total_indications > 0 or len(rest_results) > 0, "No drug indications found"
+    return True
 
 
 def test_single_drug_indications():
@@ -370,6 +375,7 @@ def test_single_drug_indications():
             print(f"    - {ind.get('MESH_Heading', 'N/A')} (Phase {ind.get('Max_Phase', 'N/A')})")
 
     assert len(results) > 0, "No single drug indications found"
+    return True
 
 
 def test_single_compound_activities():
@@ -398,6 +404,7 @@ def test_single_compound_activities():
         print(f"    {act_type}: {count} activities")
 
     assert len(results) > 0, "No single compound activities found"
+    return True
 
 
 def test_batch_fetch_activities_legacy():
@@ -426,6 +433,7 @@ def test_batch_fetch_activities_legacy():
         print(f"    {cid}: {count} activities")
 
     assert len(results) > 0, "No legacy batch activities found"
+    return True
 
 
 def main():

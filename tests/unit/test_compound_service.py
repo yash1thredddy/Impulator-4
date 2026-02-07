@@ -21,12 +21,12 @@ class TestCompoundService:
 
     def test_search_similar_compounds_fallback(self, service):
         """Test fallback similarity search."""
-        with patch('backend.services.compound_service.CompoundService._search_similar_compounds_fallback') as mock:
+        from backend.services.compound_service import CompoundService
+
+        with patch.object(CompoundService, '_search_similar_compounds_fallback') as mock:
             mock.return_value = [{"ChEMBL ID": "CHEMBL25"}]
 
-            # Force fallback by making import fail
-            with patch.dict('sys.modules', {'backend.modules.api_client': None}):
-                result = service._search_similar_compounds_fallback("CCO", 90)
+            result = service._search_similar_compounds_fallback("CCO", 90)
 
             # Should return mocked result
             assert mock.called or isinstance(result, list)
@@ -70,7 +70,8 @@ class TestCompoundServiceProgressCallbacks:
 
         service = CompoundService()
 
-        with patch('backend.services.job_service.job_service') as mock_job_service:
+        mock_js = MagicMock()
+        with patch('backend.services.job_service.job_service', mock_js, create=True):
             service._update_progress(
                 mock_db,
                 "test-job-id",
@@ -79,7 +80,7 @@ class TestCompoundServiceProgressCallbacks:
                 JobStatus.PROCESSING
             )
 
-            mock_job_service.update_progress.assert_called_once_with(
+            mock_js.update_progress.assert_called_once_with(
                 mock_db,
                 "test-job-id",
                 50.0,
@@ -93,7 +94,8 @@ class TestCompoundServiceProgressCallbacks:
 
         service = CompoundService()
 
-        with patch('backend.services.job_service.job_service') as mock_job_service:
+        mock_js = MagicMock()
+        with patch('backend.services.job_service.job_service', mock_js, create=True):
             service._complete_job(
                 mock_db,
                 "test-job-id",
@@ -101,7 +103,7 @@ class TestCompoundServiceProgressCallbacks:
                 {"total": 100}
             )
 
-            mock_job_service.complete_job.assert_called_once()
+            mock_js.complete_job.assert_called_once()
 
     def test_fail_job(self, mock_db):
         """Test job failure calls job_service."""
@@ -109,10 +111,11 @@ class TestCompoundServiceProgressCallbacks:
 
         service = CompoundService()
 
-        with patch('backend.services.job_service.job_service') as mock_job_service:
+        mock_js = MagicMock()
+        with patch('backend.services.job_service.job_service', mock_js, create=True):
             service._fail_job(mock_db, "test-job-id", "Test error")
 
-            mock_job_service.fail_job.assert_called_once_with(
+            mock_js.fail_job.assert_called_once_with(
                 mock_db,
                 "test-job-id",
                 "Test error"

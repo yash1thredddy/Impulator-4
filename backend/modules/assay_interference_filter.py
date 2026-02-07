@@ -711,6 +711,9 @@ def get_interference_flags_from_smiles(smiles: str) -> InterferenceFlags:
 
     try:
         mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            logger.warning(f"Invalid SMILES (could not parse): {smiles}")
+            return InterferenceFlags()
         return calculate_interference_flags(mol)
     except Exception as e:
         logger.error(f"Error processing SMILES '{smiles}': {e}")

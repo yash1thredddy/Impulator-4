@@ -48,7 +48,6 @@ from backend.models.schemas import (
 )
 from backend.services.job_service import job_service, generate_inchikey
 from backend.models.database import Compound, DeletedCompound, Job
-from backend.api.v1.compounds import _handle_children_before_delete
 from backend.core.azure_sync import delete_result_from_azure_by_entry_id
 from backend.core.audit import (
     log_rate_limit_exceeded,

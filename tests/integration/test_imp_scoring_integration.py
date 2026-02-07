@@ -18,7 +18,6 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from backend.modules.imp_scoring import (
-    calculate_imp_score,
     calculate_imp_score_phase1,
     calculate_imp_score_phase2,
     get_imp_score_breakdown,
@@ -28,10 +27,6 @@ from backend.modules.imp_scoring import (
     WEIGHT_ANGLE,
     WEIGHT_INTERFERENCE,
     WEIGHT_PDB,
-    WEIGHT_EFFICIENCY_RAW,
-    WEIGHT_ANGLE_RAW,
-    WEIGHT_DISTANCE_RAW,
-    WEIGHT_PDB_RAW,
     QED_MULTIPLIER_FLOOR,
     QED_MULTIPLIER_SCALE,
 )

@@ -243,12 +243,20 @@ class TestResolveDuplicate:
         # Should create a new job
         assert "id" in data
 
-        # Original compound should be deleted
+        # Original compound should still exist (deletion is deferred until job completes)
         check_session = Session()
-        deleted = check_session.query(Compound).filter(
+        still_exists = check_session.query(Compound).filter(
             Compound.entry_id == "existing-entry-id-12345"
         ).first()
-        assert deleted is None
+        assert still_exists is not None, "Compound should not be deleted until job completes"
+
+        # Verify the job stores replace_entry_id for deferred deletion
+        from backend.models.database import Job
+        import json
+        job = check_session.query(Job).filter(Job.id == data["id"]).first()
+        assert job is not None
+        job_params = json.loads(job.input_params)
+        assert job_params.get("replace_entry_id") == "existing-entry-id-12345"
         check_session.close()
 
     def test_resolve_duplicate_as_duplicate(self, test_engine, client_with_db):

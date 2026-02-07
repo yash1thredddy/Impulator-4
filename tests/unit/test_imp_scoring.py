@@ -22,7 +22,6 @@ from backend.modules.imp_scoring import (
     interpret_imp_score,
     calculate_imp_score,
     calculate_imp_score_phase1,
-    calculate_imp_score_phase2,
     WEIGHT_EFFICIENCY,
     WEIGHT_DISTANCE,
     WEIGHT_ANGLE,

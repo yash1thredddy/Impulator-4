@@ -45,12 +45,6 @@ WEIGHT_ANGLE = 0.15           # Development Angle Score
 WEIGHT_INTERFERENCE = 0.15    # Assay Interference Score
 WEIGHT_PDB = 0.05             # PDB Structural Evidence Score
 
-# Backward-compatible aliases (deprecated)
-WEIGHT_EFFICIENCY_RAW = WEIGHT_EFFICIENCY
-WEIGHT_ANGLE_RAW = WEIGHT_ANGLE
-WEIGHT_DISTANCE_RAW = WEIGHT_DISTANCE
-WEIGHT_PDB_RAW = WEIGHT_PDB
-
 # QED Multiplier constants
 QED_MULTIPLIER_FLOOR = 0.75   # Minimum multiplier when QED=0
 QED_MULTIPLIER_SCALE = 0.25   # Additional multiplier per QED unit
@@ -276,16 +270,16 @@ def calculate_imp_score_phase1(
     use_normalized_weights: bool = True
 ) -> pd.DataFrame:
     """
+    Deprecated: Use calculate_imp_score(use_pdb=False) instead.
+
     Calculate IMP score using Phase 1 components (1-3) only.
 
     Phase 1 weights (raw -> normalized):
-    - Efficiency: 40% -> 53.33%
-    - Angle: 15% -> 20%
-    - Distance: 20% -> 26.67%
+    - Efficiency: 45% -> 56.25%
+    - Angle: 15% -> 18.75%
+    - Distance: 20% -> 25%
 
     QED Multiplier: 0.75 + 0.25 * QED
-    - QED=0 gives 75% floor
-    - QED=1 gives 100% max
 
     Args:
         df: DataFrame with efficiency metrics and plane geometry
@@ -306,12 +300,12 @@ def calculate_imp_score_phase1(
     df['Distance_Score'] = calculate_distance_to_best_score(df)
 
     if use_normalized_weights:
-        total_phase1_weight = WEIGHT_EFFICIENCY_RAW + WEIGHT_ANGLE_RAW + WEIGHT_DISTANCE_RAW
-        w1 = WEIGHT_EFFICIENCY_RAW / total_phase1_weight
-        w2 = WEIGHT_ANGLE_RAW / total_phase1_weight
-        w3 = WEIGHT_DISTANCE_RAW / total_phase1_weight
+        total_phase1_weight = WEIGHT_EFFICIENCY + WEIGHT_ANGLE + WEIGHT_DISTANCE
+        w1 = WEIGHT_EFFICIENCY / total_phase1_weight
+        w2 = WEIGHT_ANGLE / total_phase1_weight
+        w3 = WEIGHT_DISTANCE / total_phase1_weight
     else:
-        w1, w2, w3 = WEIGHT_EFFICIENCY_RAW, WEIGHT_ANGLE_RAW, WEIGHT_DISTANCE_RAW
+        w1, w2, w3 = WEIGHT_EFFICIENCY, WEIGHT_ANGLE, WEIGHT_DISTANCE
 
     df['IMP_Base_Score'] = (
         w1 * df['Efficiency_Score'] +
@@ -486,17 +480,17 @@ def calculate_imp_score_phase2(
     progress_callback: Optional[ProgressCallback] = None
 ) -> pd.DataFrame:
     """
-    Calculate IMP score using Phase 2 components (1-4).
+    Deprecated: Use calculate_imp_score() instead.
+
+    Calculate IMP score using Phase 2 components (1-4, no interference).
 
     Phase 2 weights (raw -> normalized):
-    - Efficiency: 40% -> 50%
-    - Angle: 15% -> 18.75%
-    - Distance: 20% -> 25%
-    - PDB: 5% -> 6.25%
+    - Efficiency: 45% -> 52.94%
+    - Angle: 15% -> 17.65%
+    - Distance: 20% -> 23.53%
+    - PDB: 5% -> 5.88%
 
     QED Multiplier: 0.75 + 0.25 * QED
-    - QED=0 gives 75% floor
-    - QED=1 gives 100% max
 
     Args:
         df: DataFrame with efficiency metrics, plane geometry, and SMILES
@@ -519,11 +513,11 @@ def calculate_imp_score_phase2(
 
     df = calculate_pdb_evidence_score(df, use_pdb=use_pdb, progress_callback=progress_callback)
 
-    total_phase2_weight = WEIGHT_EFFICIENCY_RAW + WEIGHT_ANGLE_RAW + WEIGHT_DISTANCE_RAW + WEIGHT_PDB_RAW
-    w1 = WEIGHT_EFFICIENCY_RAW / total_phase2_weight
-    w2 = WEIGHT_ANGLE_RAW / total_phase2_weight
-    w3 = WEIGHT_DISTANCE_RAW / total_phase2_weight
-    w4 = WEIGHT_PDB_RAW / total_phase2_weight
+    total_phase2_weight = WEIGHT_EFFICIENCY + WEIGHT_ANGLE + WEIGHT_DISTANCE + WEIGHT_PDB
+    w1 = WEIGHT_EFFICIENCY / total_phase2_weight
+    w2 = WEIGHT_ANGLE / total_phase2_weight
+    w3 = WEIGHT_DISTANCE / total_phase2_weight
+    w4 = WEIGHT_PDB / total_phase2_weight
 
     df['IMP_Base_Score'] = (
         w1 * df['Efficiency_Score'] +

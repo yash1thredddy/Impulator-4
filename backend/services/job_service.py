@@ -609,6 +609,27 @@ class JobService:
             db.commit()
             db.refresh(job)
 
+        # All network I/O happens OUTSIDE the lock to avoid blocking other threads
+
+        # Clean up replaced compound's files (Azure + local)
+        replace_entry_id = job_params.get('replace_entry_id')
+        if replace_entry_id:
+            try:
+                from backend.core.azure_sync import delete_result_from_azure_by_entry_id
+                delete_result_from_azure_by_entry_id(replace_entry_id)
+            except Exception as e:
+                logger.warning(f"Failed to delete Azure result for replaced compound: {e}")
+
+            try:
+                from backend.config import settings
+                prefix = replace_entry_id[:2].lower()
+                local_zip = settings.RESULTS_DIR / prefix / f"{replace_entry_id}.zip"
+                if local_zip.exists():
+                    local_zip.unlink()
+                    logger.debug(f"Deleted local result for replaced compound: {local_zip}")
+            except Exception as e:
+                logger.warning(f"Failed to delete local result for replaced compound: {e}")
+
         # Immediate sync to Azure (outside lock - this is network I/O)
         sync_db_to_azure()
 
@@ -787,14 +808,13 @@ class JobService:
 
             # Delete old compound AFTER replacement succeeds (deferred from job creation)
             # This prevents data loss: if the job had failed, the old compound would remain
+            # NOTE: Azure/local file cleanup is deferred to AFTER the lock is released
+            # (see complete_job) to avoid blocking other threads on network I/O.
             if replace_entry_id:
                 old_compound = db.query(Compound).filter(
                     Compound.entry_id == replace_entry_id
                 ).first()
                 if old_compound:
-                    from backend.core.azure_sync import delete_result_from_azure_by_entry_id
-                    from backend.config import settings
-
                     old_name = old_compound.compound_name
 
                     # Promote children before deleting (prevents orphans)
@@ -811,23 +831,7 @@ class JobService:
                                 f"compound to new entry {new_id}"
                             )
 
-                    # Delete from Azure
-                    try:
-                        delete_result_from_azure_by_entry_id(replace_entry_id)
-                    except Exception as e:
-                        logger.warning(f"Failed to delete Azure result for replaced compound: {e}")
-
-                    # Delete local ZIP
-                    try:
-                        prefix = replace_entry_id[:2].lower()
-                        local_zip = settings.RESULTS_DIR / prefix / f"{replace_entry_id}.zip"
-                        if local_zip.exists():
-                            local_zip.unlink()
-                            logger.debug(f"Deleted local result for replaced compound: {local_zip}")
-                    except Exception as e:
-                        logger.warning(f"Failed to delete local result for replaced compound: {e}")
-
-                    # Delete from database
+                    # Delete from database (DB operation - safe inside lock)
                     db.delete(old_compound)
                     logger.info(
                         f"Replacement complete: deleted old compound '{old_name}' "

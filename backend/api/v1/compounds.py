@@ -296,7 +296,15 @@ async def batch_delete_compounds(
     deleted = []
     not_found = []
 
+    # Deduplicate to prevent same ID appearing in both deleted and not_found
+    seen = set()
+    unique_entry_ids = []
     for eid in entry_ids:
+        if eid not in seen:
+            seen.add(eid)
+            unique_entry_ids.append(eid)
+
+    for eid in unique_entry_ids:
         compound = db.query(Compound).filter(Compound.entry_id == eid).first()
 
         if not compound:
