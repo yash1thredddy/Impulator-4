@@ -324,6 +324,10 @@ class CompoundStructure(BaseModel):
     compound_name: str = Field(..., min_length=1, max_length=100)
     smiles: Optional[str] = Field(None, description="SMILES string for the compound")
     inchi: Optional[str] = Field(None, description="InChI string for the compound (converted to SMILES if smiles not provided)")
+    inchikey: Optional[str] = Field(
+        None,
+        description="InChIKey for the compound (used directly when SMILES/InChI are unavailable)"
+    )
 
 
 class CheckDuplicatesRequest(BaseModel):
@@ -331,7 +335,7 @@ class CheckDuplicatesRequest(BaseModel):
 
     Supports two modes:
     1. Name-only check (legacy): Just provide compound_names
-    2. Structure-based check (recommended): Provide compounds with SMILES/InChI for InChIKey-based detection
+    2. Structure-based check (recommended): Provide compounds with SMILES/InChI/InChIKey for InChIKey-based detection
     """
 
     # Legacy: name-only list (for backward compatibility)
@@ -348,7 +352,8 @@ class CheckDuplicatesRequest(BaseModel):
                 "compounds": [
                     {"compound_name": "Aspirin", "smiles": "CC(=O)OC1=CC=CC=C1C(=O)O"},
                     {"compound_name": "Quercetin", "smiles": "O=C1C(O)=C(O)C(=O)C2=C1C=C(O)C(O)=C2O"},
-                    {"compound_name": "Unknown", "inchi": "InChI=1S/C9H8O4/c1-6(10)13-8-5-3-2-4-7(8)9(11)12/h2-5H,1H3,(H,11,12)"}
+                    {"compound_name": "Unknown", "inchi": "InChI=1S/C9H8O4/c1-6(10)13-8-5-3-2-4-7(8)9(11)12/h2-5H,1H3,(H,11,12)"},
+                    {"compound_name": "KnownByKey", "inchikey": "BSYNRYMUTXBXSQ-UHFFFAOYSA-N"}
                 ]
             }
         }
@@ -389,6 +394,15 @@ class DuplicateMatch(BaseModel):
     )
 
 
+class InternalDuplicateMatch(BaseModel):
+    """Information about a duplicate found within the submitted payload itself."""
+
+    compound_name: str = Field(..., description="Duplicate compound name in the submitted payload")
+    duplicate_of: str = Field(..., description="First-seen compound name this duplicates in the same payload")
+    match_type: str = Field(..., description="'exact' (same name+structure) or 'structure_only' (same structure)")
+    inchikey: Optional[str] = Field(None, description="Generated InChIKey when available")
+
+
 class CheckDuplicatesResponse(BaseModel):
     """Response schema for duplicate check."""
 
@@ -399,6 +413,10 @@ class CheckDuplicatesResponse(BaseModel):
     structure_matches: List[DuplicateMatch] = Field(
         default_factory=list,
         description="Compounds that match existing compounds by InChIKey (structure)"
+    )
+    internal_duplicates: List[InternalDuplicateMatch] = Field(
+        default_factory=list,
+        description="Compounds duplicated within the submitted payload itself (same name or structure)"
     )
     # Suggested version names for existing compounds (computed from full database state)
     suggested_versions: Dict[str, str] = Field(
@@ -669,6 +687,7 @@ class BatchResponse(BaseModel):
     jobs: List[JobResponse]
     skipped_existing: List[str] = []
     skipped_processing: List[str] = []
+    skipped_internal_duplicates: List[str] = []
     replaced: List[str] = []  # Compounds that were replaced (existing deleted)
     failed_compounds: List[FailedCompound] = []  # Compounds that failed during job creation
     total_submitted: int

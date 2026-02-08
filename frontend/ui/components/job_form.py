@@ -66,7 +66,7 @@ def render_job_form() -> Optional[str]:
     # Input type selection
     input_type = st.radio(
         "Structure Input Type",
-        ["SMILES", "InChI"],
+        ["SMILES", "InChI", "InChIKey"],
         horizontal=True,
         help="Choose the format of your chemical structure input"
     )
@@ -79,12 +79,19 @@ def render_job_form() -> Optional[str]:
             placeholder="e.g., CC(=O)OC1=CC=CC=C1C(=O)O (Aspirin)",
             help="Simplified Molecular Input Line Entry System notation"
         )
-    else:
+    elif input_type == "InChI":
         structure_input = st.text_area(
             "InChI String",
             height=80,
             placeholder="e.g., InChI=1S/C9H8O4/c1-6(10)13-8-5-3-2-4-7(8)9(11)12/h2-5H,1H3,(H,11,12)",
             help="International Chemical Identifier"
+        )
+    else:  # InChIKey
+        structure_input = st.text_area(
+            "InChIKey String",
+            height=80,
+            placeholder="e.g., BSYNRYMUTXBXSQ-UHFFFAOYSA-N (Aspirin)",
+            help="27-character International Chemical Identifier Key"
         )
 
     # Configuration section
@@ -109,8 +116,10 @@ def render_job_form() -> Optional[str]:
     if compound_name and structure_input:
         if input_type == "SMILES":
             result = InputValidator.validate_smiles(structure_input)
-        else:
+        elif input_type == "InChI":
             result = InputValidator.validate_inchi(structure_input)
+        else:  # InChIKey
+            result = InputValidator.validate_inchi_key(structure_input)
 
         if not result.is_valid:
             st.error(f"Invalid {input_type}: {result.errors[0]}")
@@ -214,7 +223,7 @@ def _submit_job(
     if sanitized_name != compound_name.strip():
         st.info(f"Compound name sanitized: '{compound_name}' -> '{sanitized_name}'")
 
-    # Convert InChI to SMILES if needed (backend expects SMILES)
+    # Convert InChI/InChIKey to SMILES if needed (backend expects SMILES)
     smiles = structure_input.strip()
     if input_type == "inchi":
         with st.spinner("Converting InChI to SMILES..."):
@@ -223,6 +232,14 @@ def _submit_job(
                 st.error("Failed to convert InChI to SMILES")
                 return None
             st.success(f"Converted to SMILES: {smiles[:50]}...")
+    elif input_type == "inchikey":
+        with st.spinner("Resolving InChIKey via PubChem..."):
+            client = get_api_client()
+            smiles = client.resolve_inchikey_to_smiles(structure_input.strip())
+            if not smiles:
+                st.error("Could not resolve InChIKey. Compound may not exist in PubChem.")
+                return None
+            st.success(f"Resolved to SMILES: {smiles[:50]}...")
 
     # Submit to backend
     SessionState.start_processing(sanitized_name)
@@ -373,10 +390,14 @@ def _detect_column_mappings(df) -> Dict[str, Optional[str]]:
     ]
 
     inchi_variants = [
-        'inchi', 'inchikey', 'inchi_key', 'standard_inchi', 'standardinchi',
+        'inchi', 'standard_inchi', 'standardinchi',
     ]
 
-    result = {'compound_name': None, 'smiles': None, 'inchi': None}
+    inchikey_variants = [
+        'inchikey', 'inchi_key', 'inchikeystandard', 'standard_inchikey',
+    ]
+
+    result = {'compound_name': None, 'smiles': None, 'inchi': None, 'inchikey': None}
 
     for col in df.columns:
         col_lower = col.lower().strip()
@@ -392,6 +413,10 @@ def _detect_column_mappings(df) -> Dict[str, Optional[str]]:
         # Check InChI variants
         if result['inchi'] is None and col_lower in inchi_variants:
             result['inchi'] = col
+
+        # Check InChIKey variants
+        if result['inchikey'] is None and col_lower in inchikey_variants:
+            result['inchikey'] = col
 
     return result
 
@@ -453,26 +478,40 @@ def _render_column_mapping_ui(df) -> Optional[Dict[str, str]]:
             help="Column containing SMILES strings"
         )
 
-    # InChI dropdown
-    selected_inchi = st.selectbox(
-        "InChI Column (optional if SMILES selected)",
-        columns_with_none,
-        index=get_default_index('inchi', 'inchi'),
-        key="csv_col_inchi_select",
-        help="Column containing InChI strings"
-    )
+    col3, col4 = st.columns(2)
+
+    with col3:
+        # InChI dropdown
+        selected_inchi = st.selectbox(
+            "InChI Column (optional)",
+            columns_with_none,
+            index=get_default_index('inchi', 'inchi'),
+            key="csv_col_inchi_select",
+            help="Column containing InChI strings"
+        )
+
+    with col4:
+        # InChIKey dropdown
+        selected_inchikey = st.selectbox(
+            "InChIKey Column (optional)",
+            columns_with_none,
+            index=get_default_index('inchikey', 'inchikey'),
+            key="csv_col_inchikey_select",
+            help="Column containing InChIKey strings (resolved via PubChem)"
+        )
 
     # Validate selections
     has_name = selected_name != "-- Select --"
     has_smiles = selected_smiles != "-- Select --"
     has_inchi = selected_inchi != "-- Select --"
+    has_inchikey = selected_inchikey != "-- Select --"
 
     if not has_name:
         st.warning("Please select a Compound Name column")
         return None
 
-    if not has_smiles and not has_inchi:
-        st.warning("Please select either a SMILES or InChI column")
+    if not has_smiles and not has_inchi and not has_inchikey:
+        st.warning("Please select a SMILES, InChI, or InChIKey column")
         return None
 
     # Build mapping
@@ -481,6 +520,8 @@ def _render_column_mapping_ui(df) -> Optional[Dict[str, str]]:
         mapping['smiles'] = selected_smiles
     if has_inchi:
         mapping['inchi'] = selected_inchi
+    if has_inchikey:
+        mapping['inchikey'] = selected_inchikey
 
     return mapping
 
@@ -507,6 +548,8 @@ def _apply_column_mapping(df, mapping: Dict[str, str]):
         result['smiles'] = df[mapping['smiles']]
     if mapping.get('inchi'):
         result['inchi'] = df[mapping['inchi']]
+    if mapping.get('inchikey'):
+        result['inchikey'] = df[mapping['inchikey']]
 
     return result
 
@@ -586,7 +629,7 @@ def render_csv_upload_form() -> Optional[str]:
         Optional[str]: Batch job ID if submitted, None otherwise
     """
     st.subheader("Batch Upload")
-    st.info("Upload a CSV file with compound names and SMILES/InChI structures")
+    st.info("Upload a CSV file with compound names and SMILES/InChI/InChIKey structures")
 
     uploaded_file = st.file_uploader(
         "Choose CSV file",
@@ -705,6 +748,7 @@ def render_csv_upload_form() -> Optional[str]:
             # Build compounds list with structures for InChIKey-based duplicate detection
             df_has_smiles = 'smiles' in df_mapped.columns
             df_has_inchi = 'inchi' in df_mapped.columns
+            df_has_inchikey = 'inchikey' in df_mapped.columns
 
             compounds_for_check = []
             for _, row in df_mapped.iterrows():
@@ -725,6 +769,11 @@ def render_csv_upload_form() -> Optional[str]:
                     inchi_val = str(row.get('inchi', '')).strip()
                     if inchi_val and inchi_val.lower() not in ('nan', 'none', ''):
                         compound_data["inchi"] = inchi_val
+
+                if df_has_inchikey:
+                    inchikey_val = str(row.get('inchikey', '')).strip()
+                    if inchikey_val and inchikey_val.lower() not in ('nan', 'none', ''):
+                        compound_data["inchikey"] = inchikey_val.upper()
 
                 compounds_for_check.append(compound_data)
 
@@ -749,6 +798,8 @@ def render_csv_upload_form() -> Optional[str]:
                     st.session_state['batch_new'] = result.get('new', [])
                     # Store structure matches for enhanced duplicate handling
                     st.session_state['batch_structure_matches'] = result.get('structure_matches', [])
+                    # Store duplicates found within the uploaded file itself
+                    st.session_state['batch_internal_duplicates'] = result.get('internal_duplicates', [])
                     # Store backend-computed suggested version names (avoids collision issues)
                     st.session_state['batch_suggested_versions'] = result.get('suggested_versions', {})
                     st.rerun()
@@ -762,6 +813,7 @@ def render_csv_upload_form() -> Optional[str]:
         processing = st.session_state.get('batch_processing', [])
         new_compounds = st.session_state.get('batch_new', [])
         structure_matches = st.session_state.get('batch_structure_matches', [])
+        internal_duplicates = st.session_state.get('batch_internal_duplicates', [])
 
         def _normalize_name(name: str) -> str:
             return (name or "").strip().lower()
@@ -788,7 +840,7 @@ def render_csv_upload_form() -> Optional[str]:
         structure_only_matches = [m for m in structure_matches if m.get('match_type') != 'exact']
         structure_only_count = len(structure_only_matches)
 
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
             st.metric("New Compounds", len(new_compounds))
         with col2:
@@ -797,10 +849,25 @@ def render_csv_upload_form() -> Optional[str]:
             st.metric("Currently Processing", len(processing))
         with col4:
             st.metric("Structure-only Matches", structure_only_count)
+        with col5:
+            st.metric("In-File Duplicates", len(internal_duplicates))
         if exact_count > 0:
             st.caption(
                 f"{exact_count} exact name+structure match(es) are counted in **Already Processed**."
             )
+
+        if internal_duplicates:
+            with st.expander(f"🧬 In-file duplicates - will be skipped ({len(internal_duplicates)})", expanded=False):
+                for dup in internal_duplicates[:20]:
+                    dup_name = html.escape(dup.get('compound_name', ''))
+                    dup_of = html.escape(dup.get('duplicate_of', ''))
+                    match_type = dup.get('match_type', 'structure_only')
+                    if match_type == "exact":
+                        st.markdown(f"- `{dup_name}` duplicates `{dup_of}` (same name and structure)")
+                    else:
+                        st.markdown(f"- `{dup_name}` duplicates `{dup_of}` (same structure)")
+                if len(internal_duplicates) > 20:
+                    st.caption(f"...and {len(internal_duplicates) - 20} more")
 
         # Show structure matches (InChIKey-based, more accurate)
         if structure_matches:
@@ -883,7 +950,6 @@ def render_csv_upload_form() -> Optional[str]:
 
             existing_name = match.get('existing_compound_name', 'Unknown')
             match_type = match.get('match_type', 'structure_only')
-            config_match = match.get('config_match')
             processed_at = match.get('existing_processed_at')
             existing_threshold = match.get('existing_similarity_threshold')
             existing_activities = match.get('existing_activity_types')
@@ -1126,12 +1192,14 @@ def render_csv_upload_form() -> Optional[str]:
         st.markdown("#### Summary")
         st.success(f"**{len(compounds_to_process)}** compounds will be processed")
         skipped_existing_names = [name for name, action in duplicate_decisions.items() if action == 'skip']
-        if skipped_existing_names or processing:
+        if skipped_existing_names or processing or internal_duplicates:
             skip_parts = []
             if skipped_existing_names:
                 skip_parts.append(f"⏭️ {len(skipped_existing_names)} existing skipped")
             if processing:
                 skip_parts.append(f"⏳ {len(processing)} currently processing skipped")
+            if internal_duplicates:
+                skip_parts.append(f"🧬 {len(internal_duplicates)} in-file duplicates skipped")
             st.info("Will be skipped: " + " | ".join(skip_parts))
 
         with st.expander("View all compounds to process", expanded=False):
@@ -1188,6 +1256,7 @@ def _clear_duplicate_check_state():
         'batch_processing',
         'batch_new',
         'batch_structure_matches',  # InChIKey-based structure matches
+        'batch_internal_duplicates',  # Duplicates found within uploaded file
         'batch_duplicate_decisions',
         'batch_duplicate_new_names',
         'batch_default_duplicate_action',
@@ -1208,6 +1277,7 @@ def _clear_column_mapping_state():
         'csv_col_name_select',
         'csv_col_smiles_select',
         'csv_col_inchi_select',
+        'csv_col_inchikey_select',
         'csv_mapped',
     ]
     for key in keys_to_clear:
@@ -1249,6 +1319,25 @@ def _submit_batch(
     # Check which columns are available
     df_has_smiles = 'smiles' in df.columns
     df_has_inchi = 'inchi' in df.columns
+    df_has_inchikey = 'inchikey' in df.columns
+
+    # Pre-resolve all InChIKeys via PubChem batch API
+    inchikey_smiles_map = {}
+    if df_has_inchikey:
+        inchikeys_to_resolve = []
+        for _, row in df.iterrows():
+            key_val = str(row.get('inchikey', '')).strip()
+            if key_val and key_val.lower() not in ('nan', 'none', ''):
+                inchikeys_to_resolve.append(key_val.upper())
+
+        if inchikeys_to_resolve:
+            unique_keys = list(set(inchikeys_to_resolve))
+            with st.spinner(f"Resolving {len(unique_keys)} InChIKeys via PubChem..."):
+                api_client = get_api_client()
+                inchikey_smiles_map = api_client.resolve_inchikeys_batch(unique_keys)
+            resolved_count = len(inchikey_smiles_map)
+            if resolved_count < len(unique_keys):
+                st.warning(f"PubChem resolved {resolved_count}/{len(unique_keys)} InChIKeys")
 
     # Build compounds list for batch submission
     # Include the per-compound duplicate action and new names
@@ -1290,10 +1379,18 @@ def _submit_batch(
                 else:
                     logger.warning(f"Could not convert InChI for {compound_name}")
 
+        # If still no SMILES, try InChIKey column and resolve via PubChem
+        if not smiles and df_has_inchikey:
+            key_val = str(row.get('inchikey', '')).strip().upper()
+            if key_val and key_val.lower() not in ('nan', 'none', ''):
+                smiles = inchikey_smiles_map.get(key_val)
+                if not smiles:
+                    logger.warning(f"PubChem could not resolve InChIKey for {compound_name}")
+
         # Skip if no valid structure found
         if not smiles:
             skipped_no_structure.append(safe_name)
-            logger.warning(f"No valid SMILES or InChI for {compound_name}, skipping")
+            logger.warning(f"No valid SMILES, InChI, or InChIKey for {compound_name}, skipping")
             continue
 
         # For duplicates, use the new name if provided
@@ -1355,6 +1452,7 @@ def _submit_batch(
                 jobs = result.get("jobs", [])
                 skipped_existing = result.get("skipped_existing", [])
                 skipped_processing = result.get("skipped_processing", [])
+                skipped_internal_duplicates = result.get("skipped_internal_duplicates", [])
                 replaced = result.get("replaced", [])
 
                 # Show summary
@@ -1368,6 +1466,14 @@ def _submit_batch(
 
                 if skipped_processing:
                     st.info(f"⏳ Skipped {len(skipped_processing)} currently processing: {', '.join(skipped_processing[:5])}{'...' if len(skipped_processing) > 5 else ''}")
+
+                if skipped_internal_duplicates:
+                    st.info(
+                        "🧬 Skipped "
+                        f"{len(skipped_internal_duplicates)} duplicates from the same uploaded file: "
+                        f"{', '.join(skipped_internal_duplicates[:5])}"
+                        f"{'...' if len(skipped_internal_duplicates) > 5 else ''}"
+                    )
 
                 # Start polling for job updates
                 start_polling()

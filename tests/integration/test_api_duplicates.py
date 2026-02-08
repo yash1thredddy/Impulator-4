@@ -461,6 +461,97 @@ class TestCheckDuplicates:
         assert match["existing_similarity_threshold"] == 90
         assert match["existing_activity_types"] == "EC50,IC50,Kd,Ki"
 
+    def test_check_duplicates_detects_internal_structure_duplicates(self, client_with_db):
+        """Duplicate check should detect duplicate rows within the submitted payload itself."""
+        response = client_with_db.post(
+            "/api/v1/jobs/check-duplicates",
+            json={
+                "compounds": [
+                    {"compound_name": "Quercetin", "smiles": "CCO"},
+                    {"compound_name": "QuercetinAlias", "smiles": "CCO"},
+                    {"compound_name": "Caffeine", "smiles": "CCN"},
+                ],
+                "similarity_threshold": 90,
+                "activity_types": ["EC50", "IC50", "Kd", "Ki"],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["existing"] == []
+        assert data["processing"] == []
+        assert set(data["new"]) == {"Quercetin", "Caffeine"}
+        assert len(data["internal_duplicates"]) == 1
+        internal_dup = data["internal_duplicates"][0]
+        assert internal_dup["compound_name"] == "QuercetinAlias"
+        assert internal_dup["duplicate_of"] == "Quercetin"
+        assert internal_dup["match_type"] == "structure_only"
+
+    def test_check_duplicates_detects_internal_name_duplicates(self, client_with_db):
+        """Duplicate check should treat repeated submitted names as in-file duplicates."""
+        response = client_with_db.post(
+            "/api/v1/jobs/check-duplicates",
+            json={
+                "compounds": [
+                    {"compound_name": "CAFFEIC ACID", "smiles": "CCO"},
+                    {"compound_name": "CAFFEIC ACID", "smiles": "CCN"},
+                    {"compound_name": "Caffeine", "smiles": "CCN"},
+                ],
+                "similarity_threshold": 90,
+                "activity_types": ["EC50", "IC50", "Kd", "Ki"],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert set(data["new"]) == {"CAFFEIC ACID", "Caffeine"}
+        assert len(data["internal_duplicates"]) == 1
+        internal_dup = data["internal_duplicates"][0]
+        assert internal_dup["compound_name"] == "CAFFEIC ACID"
+        assert internal_dup["duplicate_of"] == "CAFFEIC ACID"
+        assert internal_dup["match_type"] == "exact"
+
+    def test_check_duplicates_supports_inchikey_only_payload(self, test_engine, client_with_db):
+        """Structure duplicate detection should work when payload contains only InChIKey."""
+        from backend.models.database import Compound
+        from backend.services.job_service import generate_inchikey
+
+        smiles = "CC(=O)OC1=CC=CC=C1C(=O)O"  # Aspirin
+        inchikey = generate_inchikey(smiles)
+        assert inchikey is not None
+
+        Session = sessionmaker(bind=test_engine)
+        session = Session()
+        session.add(Compound(
+            entry_id="entry-aspirin",
+            compound_name="Aspirin",
+            smiles=smiles,
+            inchikey=inchikey,
+            similarity_threshold=90,
+            activity_types="EC50,IC50,Kd,Ki",
+        ))
+        session.commit()
+        session.close()
+
+        response = client_with_db.post(
+            "/api/v1/jobs/check-duplicates",
+            json={
+                "compounds": [{"compound_name": "AspirinAlias", "inchikey": inchikey}],
+                "similarity_threshold": 90,
+                "activity_types": ["EC50", "IC50", "Kd", "Ki"],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["existing"] == []
+        assert data["processing"] == []
+        assert data["new"] == []
+        assert len(data["structure_matches"]) == 1
+        match = data["structure_matches"][0]
+        assert match["existing_compound_name"] == "Aspirin"
+        assert match["match_type"] == "structure_only"
+
 
 class TestDuplicateActionValidation:
     """Tests for validation of duplicate actions."""

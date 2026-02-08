@@ -397,7 +397,7 @@ class CompoundService:
             List of processed compound data
         """
         if activity_types is None:
-            activity_types = ['IC50', 'Ki', 'Kd', 'EC50']
+            activity_types = ['IC50', 'Ki', 'Kd', 'EC50', 'AC50', 'GI50', 'MIC']
 
         # Extract ChEMBL IDs from dict format
         all_chembl_ids = [
