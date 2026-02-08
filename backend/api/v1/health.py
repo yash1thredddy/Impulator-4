@@ -13,7 +13,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -66,8 +66,8 @@ async def readiness_check(db: Session = Depends(get_db)) -> dict:
         db.execute(text("SELECT 1"))
         return {"status": "ready"}
     except Exception:
-        # Don't expose internal error details
-        return {"status": "not ready", "error": "Database connection failed"}
+        # Return non-200 so probes/load balancers correctly mark instance unready.
+        raise HTTPException(status_code=503, detail="Database connection failed")
 
 
 @router.get("/live")

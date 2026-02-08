@@ -43,7 +43,7 @@ class JobCreate(BaseModel):
     compound_name: str = Field(..., min_length=1, max_length=100)
     author_name: str = Field(..., min_length=1, max_length=100)
     smiles: str = Field(..., min_length=1, max_length=5000)
-    similarity_threshold: int = Field(default=90, ge=50, le=100)
+    similarity_threshold: int = Field(default=90, ge=30, le=100)
     activity_types: Optional[List[str]] = None
     # Session ID for user isolation (passed from frontend)
     session_id: Optional[str] = None
@@ -338,6 +338,9 @@ class CheckDuplicatesRequest(BaseModel):
     compound_names: Optional[List[str]] = Field(None, max_length=1000)
     # New: compounds with structure data for InChIKey-based duplicate detection
     compounds: Optional[List[CompoundStructure]] = Field(None, max_length=1000)
+    # Optional config context (enables config-aware duplicate messaging in batch mode)
+    similarity_threshold: Optional[int] = Field(default=90, ge=30, le=100)
+    activity_types: Optional[List[str]] = None
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -360,6 +363,30 @@ class DuplicateMatch(BaseModel):
     existing_compound_name: str = Field(..., description="Name of existing compound with same structure")
     existing_entry_id: Optional[str] = Field(None, description="Entry ID of existing compound")
     match_type: str = Field(..., description="'exact' (same name+structure), 'structure_only' (different name, same structure)")
+    config_match: Optional[str] = Field(
+        None,
+        description="'identical', 'different_threshold', 'different_activities', or 'different_both'"
+    )
+    config_diff: Optional[dict] = Field(
+        None,
+        description="Config comparison details when config_match != 'identical'"
+    )
+    existing_similarity_threshold: Optional[int] = Field(
+        None,
+        description="Similarity threshold used by existing compound"
+    )
+    existing_activity_types: Optional[str] = Field(
+        None,
+        description="Normalized activity types used by existing compound"
+    )
+    existing_author_name: Optional[str] = Field(
+        None,
+        description="Author name of the existing compound record"
+    )
+    existing_processed_at: Optional[str] = Field(
+        None,
+        description="Timestamp when existing compound was processed"
+    )
 
 
 class CheckDuplicatesResponse(BaseModel):
@@ -397,6 +424,7 @@ class ExistingCompoundInfo(BaseModel):
     processed_at: Optional[str] = None
     similarity_threshold: Optional[int] = None
     activity_types: Optional[str] = None  # Comma-separated
+    author_name: Optional[str] = None
 
 
 class DuplicateFoundResponse(BaseModel):
@@ -420,7 +448,8 @@ class ResolveDuplicateRequest(BaseModel):
     author_name: str = Field(..., min_length=1, max_length=100)
     existing_entry_id: Optional[str] = None
     new_compound_name: Optional[str] = Field(None, description="New name if user wants to change it (for exact duplicates)")
-    similarity_threshold: int = Field(default=90, ge=70, le=100)
+    # Keep threshold range aligned with JobCreate and frontend slider (30-100).
+    similarity_threshold: int = Field(default=90, ge=30, le=100)
     activity_types: Optional[List[str]] = None
     session_id: Optional[str] = None
 

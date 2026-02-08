@@ -363,6 +363,40 @@ class TestCheckPendingCompounds:
         assert special_name in result
         assert result[special_name] == job.id
 
+    def test_pending_lookup_is_case_insensitive(self, job_service, db_session):
+        """Pending lookup should match even if submitted casing differs."""
+        from backend.models.database import JobType
+
+        job = job_service.create_job(
+            db_session, JobType.SINGLE,
+            {"compound_name": "Quercetin", "smiles": "CCO"}
+        )
+
+        result = job_service.check_pending_compounds(
+            db_session, ["QUERCETIN"]
+        )
+
+        assert "QUERCETIN" in result
+        assert result["QUERCETIN"] == job.id
+
+
+class TestCheckExistingCompounds:
+    """Tests for case-insensitive existing-compound checks."""
+
+    def test_existing_lookup_is_case_insensitive(self, job_service, db_session):
+        """Existing lookup should match even if submitted casing differs."""
+        from backend.models.database import Compound
+
+        db_session.add(Compound(entry_id="entry-quercetin", compound_name="Quercetin"))
+        db_session.commit()
+
+        result = job_service.check_existing_compounds(
+            db_session, ["QUERCETIN", "NewCompound"]
+        )
+
+        assert result["QUERCETIN"] is True
+        assert result["NewCompound"] is False
+
 
 class TestPaginationStability:
     """Tests for issue 1.10: Pagination with stable sort order."""

@@ -18,6 +18,7 @@ from collections import defaultdict
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Header
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
@@ -124,13 +125,13 @@ def get_next_version_name(db: Session, base_name: str) -> str:
     version_pattern = re.compile(r'^(.+?)(_v(\d+))?$')
     match = version_pattern.match(base_name)
     if match:
-        true_base = match.group(1)
+        true_base = match.group(1).strip()
     else:
-        true_base = base_name
+        true_base = base_name.strip()
 
     # Query all compound names that start with the base name
     existing_names = db.query(Compound.compound_name).filter(
-        Compound.compound_name.like(f"{true_base}%")
+        func.lower(func.trim(Compound.compound_name)).like(f"{true_base.lower()}%")
     ).all()
 
     existing_names = [name[0] for name in existing_names]
@@ -138,7 +139,10 @@ def get_next_version_name(db: Session, base_name: str) -> str:
     # Find highest existing version number
     max_version = 1  # Start at 1 (original has no suffix, v2 is first duplicate)
 
-    version_suffix_pattern = re.compile(rf'^{re.escape(true_base)}(_v(\d+))?$')
+    version_suffix_pattern = re.compile(
+        rf'^{re.escape(true_base)}(_v(\d+))?$',
+        re.IGNORECASE,
+    )
 
     for name in existing_names:
         match = version_suffix_pattern.match(name)
@@ -178,49 +182,59 @@ def get_next_version_names_bulk(db: Session, compound_names: List[str]) -> Dict[
 
     # Extract true base names (strip any existing _vN suffix)
     version_pattern = re.compile(r'^(.+?)(_v(\d+))?$')
-    name_to_base = {}  # original_name -> true_base
+    name_to_base: Dict[str, str] = {}  # original input name -> true_base
+    normalized_base_to_sample: Dict[str, str] = {}  # lower(base) -> representative base
 
-    for name in compound_names:
-        match = version_pattern.match(name)
-        true_base = match.group(1) if match else name
-        name_to_base[name] = true_base
+    for original_name in compound_names:
+        clean_name = (original_name or "").strip()
+        if not clean_name:
+            continue
 
-    # Get unique base names
-    unique_bases = list(set(name_to_base.values()))
+        match = version_pattern.match(clean_name)
+        true_base = (match.group(1) if match else clean_name).strip()
+        normalized_base = true_base.lower()
 
-    # Build OR conditions for all base names (single query)
-    # Using LIKE for each base to catch versioned names
-    like_conditions = [Compound.compound_name.like(f"{base}%") for base in unique_bases]
+        name_to_base[original_name] = true_base
+        if normalized_base not in normalized_base_to_sample:
+            normalized_base_to_sample[normalized_base] = true_base
 
-    # Single query to get all matching compound names
-    all_existing = db.query(Compound.compound_name).filter(
-        or_(*like_conditions)
-    ).all()
+    if not name_to_base:
+        return {}
 
-    existing_names = {row[0] for row in all_existing}
+    # Build OR conditions for all bases (single query), case-insensitive
+    like_conditions = [
+        func.lower(func.trim(Compound.compound_name)).like(f"{base_norm}%")
+        for base_norm in normalized_base_to_sample.keys()
+    ]
 
-    # Compute max version for each base name
-    base_max_versions = {base: 1 for base in unique_bases}  # Default to 1
+    all_existing = db.query(Compound.compound_name).filter(or_(*like_conditions)).all()
+    existing_names = {row[0] for row in all_existing if row[0]}
 
-    for base in unique_bases:
-        suffix_pattern = re.compile(rf'^{re.escape(base)}(_v(\d+))?$')
+    # Compute max version for each normalized base name
+    base_max_versions = {base_norm: 1 for base_norm in normalized_base_to_sample.keys()}
 
-        for name in existing_names:
-            match = suffix_pattern.match(name)
+    for base_norm, sample_base in normalized_base_to_sample.items():
+        suffix_pattern = re.compile(
+            rf'^{re.escape(sample_base)}(_v(\d+))?$',
+            re.IGNORECASE,
+        )
+
+        for existing_name in existing_names:
+            match = suffix_pattern.match(existing_name)
             if match:
                 if match.group(2):
-                    # Has version suffix like _v2, _v3
                     version = int(match.group(2))
-                    base_max_versions[base] = max(base_max_versions[base], version)
+                    base_max_versions[base_norm] = max(base_max_versions[base_norm], version)
                 else:
-                    # Original name (no suffix) counts as version 1
-                    base_max_versions[base] = max(base_max_versions[base], 1)
+                    base_max_versions[base_norm] = max(base_max_versions[base_norm], 1)
 
-    # Build result dict
-    result = {}
+    # Build result dict using original input names as keys
+    result: Dict[str, str] = {}
     for original_name in compound_names:
-        true_base = name_to_base[original_name]
-        next_version = base_max_versions[true_base] + 1
+        true_base = name_to_base.get(original_name)
+        if not true_base:
+            continue
+        next_version = base_max_versions.get(true_base.lower(), 1) + 1
         result[original_name] = f"{true_base}_v{next_version}"
 
     logger.debug(f"Bulk version names: computed {len(result)} versions in 1 query")
@@ -497,6 +511,7 @@ async def create_job(
                 processed_at=existing_compound.processed_at.isoformat() if existing_compound.processed_at else None,
                 similarity_threshold=existing_compound.similarity_threshold,
                 activity_types=_normalize_activity_types_str(existing_compound.activity_types),
+                author_name=existing_compound.author_name,
             ),
             submitted={
                 "compound_name": request.compound_name,
@@ -689,22 +704,33 @@ async def resolve_duplicate(
 
     # Handle DUPLICATE action - create with duplicate tag
     if request.action == DuplicateAction.DUPLICATE:
+        # Duplicate action must always reference an existing parent entry.
+        if not request.existing_entry_id:
+            raise HTTPException(
+                status_code=422,
+                detail="existing_entry_id is required for duplicate action.",
+            )
+
+        existing = db.query(Compound).filter(
+            Compound.entry_id == request.existing_entry_id
+        ).first()
+        if not existing:
+            raise HTTPException(
+                status_code=422,
+                detail="Invalid existing_entry_id for duplicate action.",
+            )
+
         # Block duplicate action for identical configs (server-side validation)
-        if request.existing_entry_id:
-            existing = db.query(Compound).filter(
-                Compound.entry_id == request.existing_entry_id
-            ).first()
-            if existing:
-                submitted_at = _normalize_activity_types(request.activity_types)
-                config = _compute_config_match(
-                    existing, request.similarity_threshold or 90, submitted_at
-                )
-                if config == "identical":
-                    raise HTTPException(
-                        status_code=422,
-                        detail="Cannot create duplicate with identical configuration. "
-                               "Use 'replace' to reprocess or 'skip' to keep existing.",
-                    )
+        submitted_at = _normalize_activity_types(request.activity_types)
+        config = _compute_config_match(
+            existing, request.similarity_threshold or 90, submitted_at
+        )
+        if config == "identical":
+            raise HTTPException(
+                status_code=422,
+                detail="Cannot create duplicate with identical configuration. "
+                       "Use 'replace' to reprocess or 'skip' to keep existing.",
+            )
 
         # Use new_compound_name if provided (for exact duplicates where user changes name)
         compound_name = request.new_compound_name or request.compound_name
@@ -721,7 +747,7 @@ async def resolve_duplicate(
                 "activity_types": request.activity_types,
                 # Store duplicate metadata in input_params
                 "is_duplicate": True,
-                "duplicate_of": request.existing_entry_id,
+                "duplicate_of": existing.entry_id,
             },
             session_id=session_id,
         )
@@ -773,6 +799,11 @@ async def check_duplicates(
         - structure_matches: Compounds that match existing compounds by InChIKey (structure)
     """
     structure_matches: List[DuplicateMatch] = []
+    submitted_threshold = request.similarity_threshold or 90
+    submitted_at = _normalize_activity_types(request.activity_types)
+
+    def _normalize_name(name: Optional[str]) -> str:
+        return (name or "").strip().lower()
 
     # Determine which mode we're in
     if request.compounds:
@@ -790,14 +821,49 @@ async def check_duplicates(
                 inchikey = generate_inchikey(smiles)
                 if inchikey:
                     # Check if any existing compound has this InChIKey
-                    existing_compound = db.query(Compound).filter(
+                    existing_candidates = db.query(Compound).filter(
                         Compound.inchikey == inchikey
-                    ).first()
+                    ).all()
 
-                    if existing_compound:
-                        # Determine match type
-                        name_matches = existing_compound.compound_name.lower().strip() == compound.compound_name.lower().strip()
-                        match_type = "exact" if name_matches else "structure_only"
+                    if existing_candidates:
+                        # Prefer same-name candidates when available for better UX parity with single mode.
+                        same_name_candidates = [
+                            c for c in existing_candidates
+                            if _normalize_name(c.compound_name) == _normalize_name(compound.compound_name)
+                        ]
+                        candidates_for_selection = same_name_candidates or existing_candidates
+
+                        # Prioritize: exact config > first non-duplicate > first overall
+                        exact_config_match = None
+                        first_non_duplicate = None
+                        for candidate in candidates_for_selection:
+                            config = _compute_config_match(candidate, submitted_threshold, submitted_at)
+                            if config == "identical":
+                                exact_config_match = candidate
+                                break
+                            if not candidate.is_duplicate and first_non_duplicate is None:
+                                first_non_duplicate = candidate
+
+                        existing_compound = exact_config_match or first_non_duplicate or candidates_for_selection[0]
+                        config_match = _compute_config_match(existing_compound, submitted_threshold, submitted_at)
+                        config_diff = None
+                        if config_match != "identical":
+                            config_diff = {
+                                "similarity_threshold": {
+                                    "existing": existing_compound.similarity_threshold or 90,
+                                    "submitted": submitted_threshold,
+                                },
+                                "activity_types": {
+                                    "existing": _normalize_activity_types_str(existing_compound.activity_types),
+                                    "submitted": submitted_at,
+                                },
+                            }
+
+                        match_type = (
+                            "exact"
+                            if _normalize_name(existing_compound.compound_name) == _normalize_name(compound.compound_name)
+                            else "structure_only"
+                        )
 
                         structure_matches.append(DuplicateMatch(
                             compound_name=compound.compound_name,
@@ -805,10 +871,19 @@ async def check_duplicates(
                             existing_compound_name=existing_compound.compound_name,
                             existing_entry_id=existing_compound.entry_id,
                             match_type=match_type,
+                            config_match=config_match,
+                            config_diff=config_diff,
+                            existing_similarity_threshold=existing_compound.similarity_threshold or 90,
+                            existing_activity_types=_normalize_activity_types_str(existing_compound.activity_types),
+                            existing_author_name=existing_compound.author_name,
+                            existing_processed_at=(
+                                existing_compound.processed_at.isoformat()
+                                if existing_compound.processed_at else None
+                            ),
                         ))
                         logger.debug(
                             f"InChIKey match: {compound.compound_name} matches "
-                            f"{existing_compound.compound_name} ({match_type})"
+                            f"{existing_compound.compound_name} ({match_type}, config={config_match})"
                         )
     elif request.compound_names:
         # Legacy mode: name-only checking
@@ -840,8 +915,23 @@ async def check_duplicates(
         f"{len(structure_matches)} structure matches, {len(new)} new"
     )
 
-    # Compute suggested version names for existing compounds (bulk query - avoids N+1)
-    suggested_versions = get_next_version_names_bulk(db, existing) if existing else {}
+    # Compute suggested version names for both existing-name and structure-match compounds.
+    # Priority: preserve submitted structure-match names as keys, since frontend lookups
+    # are keyed by submitted compound names.
+    version_targets: List[str] = []
+    seen_targets = set()
+    for m in structure_matches:
+        name = m.compound_name
+        normalized = _normalize_name(name)
+        if normalized and normalized not in seen_targets:
+            seen_targets.add(normalized)
+            version_targets.append(name)
+    for name in existing:
+        normalized = _normalize_name(name)
+        if normalized and normalized not in seen_targets:
+            seen_targets.add(normalized)
+            version_targets.append(name)
+    suggested_versions = get_next_version_names_bulk(db, version_targets) if version_targets else {}
 
     return CheckDuplicatesResponse(
         existing=existing,
@@ -990,9 +1080,17 @@ async def create_batch_job(
 
                 # Fallback when InChIKey lookup fails/unavailable: try exact name match
                 if not dup_existing:
+                    parent_lookup_name = (
+                        getattr(compound, "original_compound_name", None)
+                        or compound_name
+                    )
+                    parent_lookup_name = (parent_lookup_name or "").strip()
                     name_candidates = (
                         db.query(Compound)
-                        .filter(Compound.compound_name == compound_name)
+                        .filter(
+                            func.lower(func.trim(Compound.compound_name))
+                            == parent_lookup_name.lower()
+                        )
                         .order_by(Compound.processed_at.desc())
                         .all()
                     )
@@ -1004,6 +1102,20 @@ async def create_batch_job(
                 # Only mark as duplicate when a valid parent entry_id exists.
                 # Otherwise, process as a new compound to avoid orphan duplicate records.
                 if dup_existing and dup_existing.entry_id:
+                    submitted_threshold = compound.similarity_threshold or 90
+                    submitted_at = _normalize_activity_types(compound.activity_types)
+                    config_match = _compute_config_match(dup_existing, submitted_threshold, submitted_at)
+
+                    # Keep batch behavior aligned with single-compound duplicate resolution:
+                    # identical config duplicates are not meaningful and should be skipped.
+                    if config_match == "identical":
+                        skipped_existing.append(compound_name)
+                        logger.info(
+                            f"Batch duplicate requested for '{compound_name}' with identical config; "
+                            f"skipping instead of creating duplicate"
+                        )
+                        continue
+
                     job_params["is_duplicate"] = True
                     job_params["duplicate_of"] = dup_existing.entry_id
                     marked_duplicate.append(compound_name)

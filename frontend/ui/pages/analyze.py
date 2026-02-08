@@ -135,12 +135,23 @@ def render_batch_analysis() -> None:
 def _clear_batch_form_state():
     """Clear batch form related session state."""
     keys_to_clear = [
+        'uploaded_file_hash',
         'csv_preview',
+        'csv_mapped',
+        'csv_col_name_select',
+        'csv_col_smiles_select',
+        'csv_col_inchi_select',
         'batch_duplicate_check_done',
+        'batch_duplicate_check_signature',
         'batch_user_confirmed',
         'batch_existing',
         'batch_processing',
-        'batch_new'
+        'batch_new',
+        'batch_structure_matches',
+        'batch_duplicate_decisions',
+        'batch_duplicate_new_names',
+        'batch_default_duplicate_action',
+        'batch_suggested_versions',
     ]
     for key in keys_to_clear:
         st.session_state.pop(key, None)

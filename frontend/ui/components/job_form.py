@@ -95,7 +95,7 @@ def render_job_form() -> Optional[str]:
     with col1:
         similarity_threshold = st.slider(
             "Similarity Threshold (%)",
-            min_value=50,
+            min_value=30,
             max_value=100,
             value=config.DEFAULT_SIMILARITY_THRESHOLD,
             help="Minimum similarity for ChEMBL compound search"
@@ -598,6 +598,7 @@ def render_csv_upload_form() -> Optional[str]:
         # Clear state when no file
         _clear_duplicate_check_state()
         _clear_column_mapping_state()
+        st.session_state.pop('uploaded_file_hash', None)
         return None
 
     # Check if file changed
@@ -656,7 +657,7 @@ def render_csv_upload_form() -> Optional[str]:
 
     similarity_threshold = st.slider(
         "Similarity Threshold (%)",
-        min_value=50,
+        min_value=30,
         max_value=100,
         value=config.DEFAULT_SIMILARITY_THRESHOLD,
         key="batch_similarity"
@@ -664,8 +665,34 @@ def render_csv_upload_form() -> Optional[str]:
 
     selected_activities = render_activity_checkboxes(key_prefix="batch")
 
+    def _build_duplicate_check_signature(
+        threshold: int,
+        activities: List[str],
+        mapping: Dict[str, str],
+    ) -> tuple:
+        """Create a stable signature for duplicate-check configuration."""
+        normalized_activities = tuple(sorted({a.strip() for a in activities if a and a.strip()}))
+        mapping_signature = tuple(
+            sorted((key, (value or "").strip()) for key, value in (mapping or {}).items())
+        )
+        return (threshold, normalized_activities, mapping_signature)
+
+    current_check_signature = _build_duplicate_check_signature(
+        similarity_threshold,
+        selected_activities,
+        column_mapping,
+    )
+
     # Check for duplicates before showing submit
     duplicate_check_done = st.session_state.get('batch_duplicate_check_done', False)
+    checked_signature = st.session_state.get('batch_duplicate_check_signature')
+    if duplicate_check_done and checked_signature != current_check_signature:
+        _clear_duplicate_check_state()
+        duplicate_check_done = False
+        st.info(
+            "Batch configuration changed (threshold/activity types). "
+            "Duplicate check results were cleared; run **Check & Submit Batch** again."
+        )
 
     if not duplicate_check_done:
         # Step 1: Check for duplicates first
@@ -708,10 +735,15 @@ def render_csv_upload_form() -> Optional[str]:
             with st.spinner("Checking for existing compounds (by structure)..."):
                 api_client = get_api_client()
                 # Use new structure-based checking for InChIKey duplicate detection
-                result = api_client.check_duplicates(compounds=compounds_for_check)
+                result = api_client.check_duplicates(
+                    compounds=compounds_for_check,
+                    similarity_threshold=similarity_threshold,
+                    activity_types=selected_activities,
+                )
 
                 if result.get("success"):
                     st.session_state['batch_duplicate_check_done'] = True
+                    st.session_state['batch_duplicate_check_signature'] = current_check_signature
                     st.session_state['batch_existing'] = result.get('existing', [])
                     st.session_state['batch_processing'] = result.get('processing', [])
                     st.session_state['batch_new'] = result.get('new', [])
@@ -731,33 +763,75 @@ def render_csv_upload_form() -> Optional[str]:
         new_compounds = st.session_state.get('batch_new', [])
         structure_matches = st.session_state.get('batch_structure_matches', [])
 
+        def _normalize_name(name: str) -> str:
+            return (name or "").strip().lower()
+
+        # Case-insensitive exact matches should count as already processed.
+        exact_match_names = [
+            m.get('compound_name')
+            for m in structure_matches
+            if m.get('match_type') == 'exact'
+        ]
+        already_processed = []
+        seen_processed = set()
+        for name in list(existing) + exact_match_names:
+            normalized = _normalize_name(name)
+            if normalized and normalized not in seen_processed:
+                seen_processed.add(normalized)
+                already_processed.append(name)
+
         # Show summary with colored boxes
         st.divider()
         st.markdown("### Duplicate Check Results")
 
         col1, col2, col3, col4 = st.columns(4)
+        structure_only_matches = [m for m in structure_matches if m.get('match_type') != 'exact']
         with col1:
             st.metric("New Compounds", len(new_compounds))
         with col2:
-            st.metric("Already Processed", len(existing))
+            st.metric("Already Processed", len(already_processed))
         with col3:
             st.metric("Currently Processing", len(processing))
         with col4:
-            st.metric("Structure Matches", len(structure_matches))
+            st.metric("Structure Matches", len(structure_only_matches))
 
         # Show structure matches (InChIKey-based, more accurate)
         if structure_matches:
-            with st.expander(f"🔬 Structure Matches - same molecule, different name ({len(structure_matches)})", expanded=True):
-                st.caption("These compounds have the **same chemical structure** (InChIKey) as existing compounds:")
+            exact_count = sum(1 for m in structure_matches if m.get('match_type') == 'exact')
+            structure_only_count = len(structure_matches) - exact_count
+            with st.expander(f"🔬 Structure Matches (InChIKey) ({len(structure_matches)})", expanded=True):
+                st.caption(
+                    "These compounds share structure with existing records "
+                    f"({exact_count} exact name+structure, {structure_only_count} structure-only)."
+                )
                 for match in structure_matches[:20]:
                     match_type = match.get('match_type', 'structure_only')
+                    config_match = match.get('config_match', '')
                     your_name = html.escape(match.get('compound_name', ''))
                     existing_name = html.escape(match.get('existing_compound_name', ''))
 
                     if match_type == 'exact':
-                        st.markdown(f"- `{your_name}` matches exactly")
+                        if config_match == 'identical':
+                            st.markdown(
+                                f"- `{your_name}` matches **{existing_name}** exactly "
+                                "(same name, structure, and configuration)"
+                            )
+                        else:
+                            st.markdown(
+                                f"- `{your_name}` matches **{existing_name}** by name+structure "
+                                "(configuration differs)"
+                            )
                     else:
-                        st.markdown(f"- `{your_name}` → same structure as **{existing_name}**")
+                        if config_match == 'identical':
+                            st.markdown(
+                                f"- `{your_name}` has the same structure as **{existing_name}** "
+                                "(same configuration)"
+                            )
+                        else:
+                            st.markdown(
+                                f"- `{your_name}` → same structure as **{existing_name}** "
+                                "(configuration differs)"
+                            )
                 if len(structure_matches) > 20:
                     st.caption(f"...and {len(structure_matches) - 20} more")
 
@@ -774,18 +848,124 @@ def render_csv_upload_form() -> Optional[str]:
         duplicate_decisions = {}  # compound_name -> action ('skip', 'replace', 'duplicate')
         duplicate_new_names = {}  # compound_name -> new_name (for 'duplicate' action)
 
-        # Get compound names from structure matches that aren't in existing list
-        structure_match_names = [m.get('compound_name') for m in structure_matches]
-        all_existing = list(set(existing) | set(structure_match_names))
+        # Build a case-insensitive lookup for structure match metadata.
+        structure_match_by_name = {}
+        for match in structure_matches:
+            normalized = _normalize_name(match.get('compound_name', ''))
+            if normalized and normalized not in structure_match_by_name:
+                structure_match_by_name[normalized] = match
+
+        # Get compound names from structure matches that aren't in existing list.
+        # Preserve order: first existing, then structure matches.
+        structure_match_names = [m.get('compound_name') for m in structure_matches if m.get('compound_name')]
+        all_existing = []
+        seen_existing = set()
+        for name in list(existing) + structure_match_names:
+            normalized = _normalize_name(name)
+            if normalized and normalized not in seen_existing:
+                seen_existing.add(normalized)
+                all_existing.append(name)
+
+        def _render_match_details(compound_name: str, match: dict, allow_duplicate: bool) -> None:
+            """Render per-compound duplicate context near the action selector."""
+            if not match:
+                st.markdown("**Match Details**")
+                st.caption("Name-based duplicate match found. Structure/config details are unavailable for this row.")
+                return
+
+            existing_name = match.get('existing_compound_name', 'Unknown')
+            match_type = match.get('match_type', 'structure_only')
+            config_match = match.get('config_match')
+            processed_at = match.get('existing_processed_at')
+            existing_threshold = match.get('existing_similarity_threshold')
+            existing_activities = match.get('existing_activity_types')
+            existing_author = match.get('existing_author_name')
+            your_name = compound_name
+
+            def _format_processed_datetime(raw_timestamp: str) -> str:
+                """Format ISO-like timestamp into readable local format."""
+                if not raw_timestamp:
+                    return "N/A"
+                ts = str(raw_timestamp).strip()
+                if ts.endswith("Z"):
+                    ts = ts[:-1] + "+00:00"
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(ts)
+                    return dt.strftime("%b %d, %Y at %I:%M:%S %p")
+                except (ValueError, TypeError):
+                    return str(raw_timestamp).replace("T", " ")
+
+            st.markdown("**Match Details**")
+
+            # Row 1 (left): structure match summary with chip styling
+            if match_type == 'exact':
+                summary_text = f"`{your_name}` matches `{existing_name}` by name and structure."
+            else:
+                summary_text = f"`{your_name}` shares structure with `{existing_name}`."
+
+            st.caption(summary_text)
+
+            activities_display = ""
+            if existing_activities:
+                activities_display = ", ".join(
+                    part.strip() for part in str(existing_activities).split(",") if part.strip()
+                )
+
+            # Row 2: existing config (left) and activity types (right)
+            existing_config_text = (
+                f"Existing config: threshold {existing_threshold}%"
+                if existing_threshold is not None
+                else "Existing config: N/A"
+            )
+            activity_types_text = (
+                f"Activity types: `{activities_display}`"
+                if activities_display
+                else "Activity types: N/A"
+            )
+            row2_left, row2_right = st.columns(2, gap="medium")
+            with row2_left:
+                st.caption(existing_config_text)
+            with row2_right:
+                st.caption(activity_types_text)
+
+            # Row 3: allowed actions (left) and processed info (right)
+            allowed_text = "skip or replace" if not allow_duplicate else "skip, replace, or duplicate"
+            processed_display = _format_processed_datetime(processed_at) if processed_at else "N/A"
+            author_label = (existing_author or "Unknown").strip()
+            row3_left, row3_right = st.columns(2, gap="medium")
+            with row3_left:
+                st.caption(f"Allowed actions: {allowed_text}")
+            with row3_right:
+                st.caption(f"Processed: {processed_display} by {author_label}")
 
         if all_existing:
             st.markdown("#### Handle Existing Compounds")
             st.caption("Choose what to do with each compound that already has results:")
 
+            duplicate_blocked = {
+                name: (
+                    structure_match_by_name.get(_normalize_name(name), {}).get("config_match") == "identical"
+                )
+                for name in all_existing
+            }
+            blocked_count = sum(1 for blocked in duplicate_blocked.values() if blocked)
+            if blocked_count > 0:
+                st.info(
+                    f"{blocked_count} compounds already exist with identical configuration. "
+                    "For those, duplicate is disabled (replace or skip only)."
+                )
+
+            # Keep all default options available globally. Per-compound controls and
+            # the post-selection safety guard handle blocked identical-config rows.
+            default_options = ["skip", "replace", "duplicate"]
+            if st.session_state.get("batch_default_duplicate_action") not in default_options:
+                st.session_state.pop("batch_default_duplicate_action", None)
+
             # Default action selector (applies to all not individually set)
             default_action = st.selectbox(
                 "Default action for all existing compounds:",
-                options=["skip", "replace", "duplicate"],
+                options=default_options,
                 format_func=lambda x: {
                     "skip": "⏭️ Skip (don't reprocess)",
                     "replace": "🔄 Replace (delete and reprocess)",
@@ -797,32 +977,71 @@ def render_csv_upload_form() -> Optional[str]:
 
             # Show individual compound controls in an expander
             with st.expander(f"📦 Customize per compound ({len(all_existing)} compounds)", expanded=len(all_existing) <= 10):
+                def _get_config_status_note(match: dict) -> tuple[str, str]:
+                    """Return (level, text) for config status note in batch per-compound rows."""
+                    if not match:
+                        return ("none", "")
+                    config_match = match.get("config_match")
+                    existing_threshold = match.get("existing_similarity_threshold", 90)
+                    if config_match == "identical":
+                        return (
+                            "warning",
+                            f"Same threshold ({existing_threshold}%) and activity types — results would be identical.",
+                        )
+                    if config_match:
+                        if config_match == "different_threshold":
+                            return ("info", "Different threshold selected — results may differ from existing analysis.")
+                        if config_match == "different_activities":
+                            return ("info", "Different activity types selected — results may differ from existing analysis.")
+                        if config_match == "different_both":
+                            return ("info", "Threshold and activity types differ — results will likely differ.")
+                        return ("info", "Configuration differs from existing analysis — results may differ.")
+                    return ("caption", "Configuration details unavailable.")
+
                 # For smaller lists, show individual selects with name input for duplicates
                 if len(all_existing) <= 20:
                     for i, compound_name in enumerate(all_existing):
                         safe_name = html.escape(compound_name)
+                        match_details = structure_match_by_name.get(_normalize_name(compound_name), {})
+                        note_level, note_text = _get_config_status_note(match_details)
+
                         st.markdown(f"**{safe_name}**")
+
                         col1, col2 = st.columns([2, 3])
+                        allow_duplicate = not duplicate_blocked.get(compound_name, False)
+                        action_options = ["default", "skip", "replace"] + (["duplicate"] if allow_duplicate else [])
+                        action_key = f"dup_action_{i}"
+                        if st.session_state.get(action_key) not in action_options:
+                            st.session_state.pop(action_key, None)
+
                         with col1:
                             action = st.selectbox(
                                 f"Action for {compound_name}",
-                                options=["default", "skip", "replace", "duplicate"],
+                                options=action_options,
                                 format_func=lambda x: {
                                     "default": f"Use default ({default_action})",
                                     "skip": "⏭️ Skip",
                                     "replace": "🔄 Replace",
                                     "duplicate": "📋 Duplicate",
                                 }.get(x, x),
-                                key=f"dup_action_{i}",
+                                key=action_key,
                                 label_visibility="collapsed"
                             )
                             if action != "default":
                                 duplicate_decisions[compound_name] = action
+                            # Show config-status note under action control (left column)
+                            if note_text:
+                                if note_level == "warning":
+                                    st.warning(note_text, icon="⚠️")
+                                elif note_level == "info":
+                                    st.info(note_text, icon="ℹ️")
+                                else:
+                                    st.caption(note_text)
 
                         # Show name input when duplicate is selected
                         effective_action = action if action != "default" else default_action
                         with col2:
-                            if effective_action == "duplicate":
+                            if effective_action == "duplicate" and allow_duplicate:
                                 new_name = st.text_input(
                                     f"New name for {compound_name}",
                                     value=f"{compound_name}_v2",
@@ -832,8 +1051,7 @@ def render_csv_upload_form() -> Optional[str]:
                                 )
                                 if new_name and new_name != compound_name:
                                     duplicate_new_names[compound_name] = new_name
-                            else:
-                                st.empty()  # Placeholder for alignment
+                            _render_match_details(compound_name, match_details, allow_duplicate)
                         st.divider()
                 else:
                     # For larger lists, show summary with option to expand
@@ -849,6 +1067,8 @@ def render_csv_upload_form() -> Optional[str]:
             for compound_name in all_existing:
                 if compound_name not in duplicate_decisions:
                     duplicate_decisions[compound_name] = default_action
+                if duplicate_blocked.get(compound_name) and duplicate_decisions.get(compound_name) == "duplicate":
+                    duplicate_decisions[compound_name] = "skip"
                 # Use backend-provided version name for duplicates (computed from full database state)
                 if duplicate_decisions.get(compound_name) == "duplicate" and compound_name not in duplicate_new_names:
                     # Prefer backend-computed version name, fallback to local generation
@@ -888,7 +1108,9 @@ def render_csv_upload_form() -> Optional[str]:
             st.info("All compounds already exist or are being processed. Nothing new to submit.")
             if st.button("↩️ Upload Different File", width='stretch'):
                 _clear_duplicate_check_state()
+                _clear_column_mapping_state()
                 st.session_state.pop('csv_preview', None)
+                st.session_state.pop('uploaded_file_hash', None)
                 st.rerun()
             return None
 
@@ -933,7 +1155,9 @@ def render_csv_upload_form() -> Optional[str]:
         with col2:
             if st.button("❌ Cancel", width='stretch'):
                 _clear_duplicate_check_state()
+                _clear_column_mapping_state()
                 st.session_state.pop('csv_preview', None)
+                st.session_state.pop('uploaded_file_hash', None)
                 st.rerun()
 
     return None
@@ -951,6 +1175,8 @@ def _clear_duplicate_check_state():
         'batch_duplicate_decisions',
         'batch_duplicate_new_names',
         'batch_default_duplicate_action',
+        'batch_suggested_versions',
+        'batch_duplicate_check_signature',
     ]
     for key in keys_to_clear:
         st.session_state.pop(key, None)
@@ -1134,6 +1360,7 @@ def _submit_batch(
                 _clear_duplicate_check_state()
                 st.session_state.pop('csv_preview', None)
                 st.session_state.pop('csv_mapped', None)
+                st.session_state.pop('uploaded_file_hash', None)
 
                 return batch_id
             else:
