@@ -10,9 +10,9 @@ Tests all external APIs used by IMPULATOR with the current config:
   6. NPClassifier         - natural product classification
 
 Usage:
-    python tests/integration/test_external_apis.py
-    python tests/integration/test_external_apis.py --verbose
-    python tests/integration/test_external_apis.py --api chembl
+    python scripts/diagnostics/test_external_apis.py
+    python scripts/diagnostics/test_external_apis.py --verbose
+    python scripts/diagnostics/test_external_apis.py --api chembl
 """
 
 import sys

@@ -784,8 +784,11 @@ def render_csv_upload_form() -> Optional[str]:
         st.divider()
         st.markdown("### Duplicate Check Results")
 
-        col1, col2, col3, col4 = st.columns(4)
+        exact_count = len(exact_match_names)
         structure_only_matches = [m for m in structure_matches if m.get('match_type') != 'exact']
+        structure_only_count = len(structure_only_matches)
+
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("New Compounds", len(new_compounds))
         with col2:
@@ -793,12 +796,14 @@ def render_csv_upload_form() -> Optional[str]:
         with col3:
             st.metric("Currently Processing", len(processing))
         with col4:
-            st.metric("Structure Matches", len(structure_only_matches))
+            st.metric("Structure-only Matches", structure_only_count)
+        if exact_count > 0:
+            st.caption(
+                f"{exact_count} exact name+structure match(es) are counted in **Already Processed**."
+            )
 
         # Show structure matches (InChIKey-based, more accurate)
         if structure_matches:
-            exact_count = sum(1 for m in structure_matches if m.get('match_type') == 'exact')
-            structure_only_count = len(structure_matches) - exact_count
             with st.expander(f"🔬 Structure Matches (InChIKey) ({len(structure_matches)})", expanded=True):
                 st.caption(
                     "These compounds share structure with existing records "
@@ -847,6 +852,9 @@ def render_csv_upload_form() -> Optional[str]:
         # Combine name-based existing and structure matches
         duplicate_decisions = {}  # compound_name -> action ('skip', 'replace', 'duplicate')
         duplicate_new_names = {}  # compound_name -> new_name (for 'duplicate' action)
+        skip_count = 0
+        replace_count = 0
+        dup_count = 0
 
         # Build a case-insensitive lookup for structure match metadata.
         structure_match_by_name = {}
@@ -1087,7 +1095,7 @@ def render_csv_upload_form() -> Optional[str]:
             replace_count = sum(1 for a in duplicate_decisions.values() if a == 'replace')
             dup_count = sum(1 for a in duplicate_decisions.values() if a == 'duplicate')
 
-            if replace_count > 0 or dup_count > 0:
+            if skip_count > 0 or replace_count > 0 or dup_count > 0:
                 st.divider()
                 action_summary = []
                 if skip_count > 0:
@@ -1117,6 +1125,14 @@ def render_csv_upload_form() -> Optional[str]:
         # Show final summary
         st.markdown("#### Summary")
         st.success(f"**{len(compounds_to_process)}** compounds will be processed")
+        skipped_existing_names = [name for name, action in duplicate_decisions.items() if action == 'skip']
+        if skipped_existing_names or processing:
+            skip_parts = []
+            if skipped_existing_names:
+                skip_parts.append(f"⏭️ {len(skipped_existing_names)} existing skipped")
+            if processing:
+                skip_parts.append(f"⏳ {len(processing)} currently processing skipped")
+            st.info("Will be skipped: " + " | ".join(skip_parts))
 
         with st.expander("View all compounds to process", expanded=False):
             if new_compounds:

@@ -12,6 +12,9 @@ import time
 import pytest
 import logging
 
+# Benchmarks require live external APIs and should not run in core CI.
+pytestmark = [pytest.mark.benchmark, pytest.mark.network]
+
 # Configure logging for test visibility
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
