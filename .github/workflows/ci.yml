@@ -43,7 +43,7 @@ jobs:
             --cov=backend \
             --cov-report=xml \
             --cov-report=term-missing \
-            -m "not azure and not benchmark" \
+            -m "not azure and not benchmark and not network and not slow" \
             --ignore=tests/e2e \
             --ignore=tests/performance
         env:

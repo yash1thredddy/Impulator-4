@@ -41,6 +41,7 @@ from backend.modules.api_client import (  # noqa: E402
 # API Connectivity Test (runs first to diagnose issues)
 # =============================================================================
 
+@pytest.mark.network
 class TestApiConnectivity:
     """Test basic API connectivity - runs first to diagnose issues."""
 
@@ -194,6 +195,7 @@ def check_api_available():
         pytest.skip(f"ChEMBL API check failed: {type(e).__name__}: {e}")
 
 
+@pytest.mark.network
 class TestRestApiGet:
     """Test _rest_api_get function."""
 
@@ -217,6 +219,7 @@ class TestRestApiGet:
         assert 'page_meta' in result or 'molecules' in result
 
 
+@pytest.mark.network
 class TestRestApiSimilaritySearch:
     """Test rest_api_similarity_search function."""
 
@@ -240,6 +243,7 @@ class TestRestApiSimilaritySearch:
         assert result == []
 
 
+@pytest.mark.network
 class TestRestApiFetchMolecule:
     """Test rest_api_fetch_molecule function."""
 
@@ -261,6 +265,7 @@ class TestRestApiFetchMolecule:
         assert 'molecule_chembl_id' in result
 
 
+@pytest.mark.network
 class TestRestApiFetchMoleculesBatch:
     """Test rest_api_fetch_molecules_batch function."""
 
@@ -283,6 +288,7 @@ class TestRestApiFetchMoleculesBatch:
         assert result == {}
 
 
+@pytest.mark.network
 class TestRestApiFetchTarget:
     """Test rest_api_fetch_target function."""
 
@@ -304,6 +310,7 @@ class TestRestApiFetchTarget:
         assert "Acetylcholinesterase" in result
 
 
+@pytest.mark.network
 class TestRestApiFetchTargetsBatch:
     """Test rest_api_fetch_targets_batch function."""
 
@@ -325,6 +332,7 @@ class TestRestApiFetchTargetsBatch:
         assert result == {}
 
 
+@pytest.mark.network
 class TestRestApiFetchActivities:
     """Test rest_api_fetch_activities function."""
 
@@ -354,6 +362,7 @@ class TestRestApiFetchActivities:
         assert result == []
 
 
+@pytest.mark.network
 class TestRestApiFetchDrugIndicationsBatch:
     """Test rest_api_fetch_drug_indications_batch function."""
 

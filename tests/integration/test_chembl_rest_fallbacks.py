@@ -16,6 +16,10 @@ import sys
 import os
 import time
 import logging
+import pytest
+
+# This module is a live API validation/diagnostic suite.
+pytestmark = pytest.mark.network
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
