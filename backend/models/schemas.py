@@ -389,6 +389,15 @@ class DuplicateMatch(BaseModel):
     )
 
 
+class InternalDuplicateMatch(BaseModel):
+    """Information about a duplicate found within the submitted batch itself."""
+
+    compound_name: str = Field(..., description="Duplicate compound name in the submitted payload")
+    duplicate_of: str = Field(..., description="First-seen compound name this duplicates in the same payload")
+    match_type: str = Field(..., description="'exact' (same name+structure) or 'structure_only' (same structure)")
+    inchikey: Optional[str] = Field(None, description="Generated InChIKey when available")
+
+
 class CheckDuplicatesResponse(BaseModel):
     """Response schema for duplicate check."""
 
@@ -399,6 +408,10 @@ class CheckDuplicatesResponse(BaseModel):
     structure_matches: List[DuplicateMatch] = Field(
         default_factory=list,
         description="Compounds that match existing compounds by InChIKey (structure)"
+    )
+    internal_duplicates: List[InternalDuplicateMatch] = Field(
+        default_factory=list,
+        description="Compounds duplicated within the submitted payload itself (same structure)"
     )
     # Suggested version names for existing compounds (computed from full database state)
     suggested_versions: Dict[str, str] = Field(
@@ -669,6 +682,7 @@ class BatchResponse(BaseModel):
     jobs: List[JobResponse]
     skipped_existing: List[str] = []
     skipped_processing: List[str] = []
+    skipped_internal_duplicates: List[str] = []
     replaced: List[str] = []  # Compounds that were replaced (existing deleted)
     failed_compounds: List[FailedCompound] = []  # Compounds that failed during job creation
     total_submitted: int

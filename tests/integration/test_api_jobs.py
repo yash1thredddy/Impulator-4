@@ -382,3 +382,21 @@ class TestBatchJobOperations:
         """Test getting non-existent batch returns 404."""
         response = client.get("/api/v1/jobs/batch/nonexistent-batch-id")
         assert response.status_code == 404
+
+    def test_batch_skips_internal_structure_duplicates(self, client):
+        """Batch submission should skip duplicate rows within the same uploaded payload."""
+        response = client.post("/api/v1/jobs/batch", json={
+            "compounds": [
+                {"compound_name": "Quercetin", "author_name": "Test Author", "smiles": "CCO"},
+                {"compound_name": "QuercetinAlias", "author_name": "Test Author", "smiles": "CCO"},
+                {"compound_name": "Caffeine", "author_name": "Test Author", "smiles": "CCN"},
+            ],
+            "similarity_threshold": 90
+        })
+
+        assert response.status_code == 201
+        data = response.json()
+        assert len(data["jobs"]) == 2
+        assert data["total_submitted"] == 2
+        assert data["total_skipped"] == 1
+        assert data["skipped_internal_duplicates"] == ["QuercetinAlias"]

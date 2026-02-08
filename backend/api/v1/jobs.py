@@ -46,6 +46,7 @@ from backend.models.schemas import (
     DeleteResponse,
     CancelResponse,
     DuplicateMatch,
+    InternalDuplicateMatch,
 )
 from backend.services.job_service import job_service, generate_inchikey
 from backend.models.database import Compound, DeletedCompound, Job
@@ -59,8 +60,8 @@ from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Default activity types (matches compound_service.py defaults)
-_DEFAULT_ACTIVITY_TYPES = "EC50,IC50,Kd,Ki"
+# Default activity types (matches api_client.py and frontend config)
+_DEFAULT_ACTIVITY_TYPES = "AC50,EC50,GI50,IC50,Kd,Ki,MIC"
 
 
 def _normalize_activity_types(activity_types: Optional[List[str]]) -> str:
@@ -799,6 +800,7 @@ async def check_duplicates(
         - structure_matches: Compounds that match existing compounds by InChIKey (structure)
     """
     structure_matches: List[DuplicateMatch] = []
+    internal_duplicates: List[InternalDuplicateMatch] = []
     submitted_threshold = request.similarity_threshold or 90
     submitted_at = _normalize_activity_types(request.activity_types)
 
@@ -808,86 +810,147 @@ async def check_duplicates(
     # Determine which mode we're in
     if request.compounds:
         # New mode: structure-based checking with InChIKey
-        compound_names = [c.compound_name for c in request.compounds]
+        compound_names: List[str] = []
+
+        # Track first-seen compounds within the submitted payload to detect in-file duplicates.
+        seen_inchikey_to_name: Dict[str, str] = {}
+        seen_name_fallback: Dict[str, str] = {}
 
         # Generate InChIKeys and check for structure matches
         for compound in request.compounds:
+            submitted_name = compound.compound_name
+            normalized_submitted_name = _normalize_name(submitted_name)
+
             smiles = compound.smiles
             # Convert InChI to SMILES if needed
             if not smiles and compound.inchi:
                 smiles = _inchi_to_smiles(compound.inchi)
 
-            if smiles:
-                inchikey = generate_inchikey(smiles)
-                if inchikey:
-                    # Check if any existing compound has this InChIKey
-                    existing_candidates = db.query(Compound).filter(
-                        Compound.inchikey == inchikey
-                    ).all()
+            inchikey = generate_inchikey(smiles) if smiles else None
 
-                    if existing_candidates:
-                        # Prefer same-name candidates when available for better UX parity with single mode.
-                        same_name_candidates = [
-                            c for c in existing_candidates
-                            if _normalize_name(c.compound_name) == _normalize_name(compound.compound_name)
-                        ]
-                        candidates_for_selection = same_name_candidates or existing_candidates
+            # First detect duplicates within the uploaded payload itself.
+            internal_parent_name = None
+            internal_match_type = "exact"
 
-                        # Prioritize: exact config > first non-duplicate > first overall
-                        exact_config_match = None
-                        first_non_duplicate = None
-                        for candidate in candidates_for_selection:
-                            config = _compute_config_match(candidate, submitted_threshold, submitted_at)
-                            if config == "identical":
-                                exact_config_match = candidate
-                                break
-                            if not candidate.is_duplicate and first_non_duplicate is None:
-                                first_non_duplicate = candidate
+            if inchikey:
+                internal_parent_name = seen_inchikey_to_name.get(inchikey)
+                if internal_parent_name:
+                    internal_match_type = (
+                        "exact"
+                        if _normalize_name(internal_parent_name) == normalized_submitted_name
+                        else "structure_only"
+                    )
+                else:
+                    seen_inchikey_to_name[inchikey] = submitted_name
+            elif normalized_submitted_name:
+                # Fallback for rows where structure normalization/InChIKey generation is unavailable.
+                internal_parent_name = seen_name_fallback.get(normalized_submitted_name)
+                if not internal_parent_name:
+                    seen_name_fallback[normalized_submitted_name] = submitted_name
 
-                        existing_compound = exact_config_match or first_non_duplicate or candidates_for_selection[0]
-                        config_match = _compute_config_match(existing_compound, submitted_threshold, submitted_at)
-                        config_diff = None
-                        if config_match != "identical":
-                            config_diff = {
-                                "similarity_threshold": {
-                                    "existing": existing_compound.similarity_threshold or 90,
-                                    "submitted": submitted_threshold,
-                                },
-                                "activity_types": {
-                                    "existing": _normalize_activity_types_str(existing_compound.activity_types),
-                                    "submitted": submitted_at,
-                                },
-                            }
+            if internal_parent_name:
+                internal_duplicates.append(
+                    InternalDuplicateMatch(
+                        compound_name=submitted_name,
+                        duplicate_of=internal_parent_name,
+                        match_type=internal_match_type,
+                        inchikey=inchikey,
+                    )
+                )
+                logger.debug(
+                    f"Internal duplicate in upload: {submitted_name} duplicates "
+                    f"{internal_parent_name} ({internal_match_type})"
+                )
+                continue
 
-                        match_type = (
-                            "exact"
-                            if _normalize_name(existing_compound.compound_name) == _normalize_name(compound.compound_name)
-                            else "structure_only"
-                        )
+            # Keep only non-duplicate upload entries for DB duplicate checks.
+            compound_names.append(submitted_name)
 
-                        structure_matches.append(DuplicateMatch(
-                            compound_name=compound.compound_name,
-                            inchikey=inchikey,
-                            existing_compound_name=existing_compound.compound_name,
-                            existing_entry_id=existing_compound.entry_id,
-                            match_type=match_type,
-                            config_match=config_match,
-                            config_diff=config_diff,
-                            existing_similarity_threshold=existing_compound.similarity_threshold or 90,
-                            existing_activity_types=_normalize_activity_types_str(existing_compound.activity_types),
-                            existing_author_name=existing_compound.author_name,
-                            existing_processed_at=(
-                                existing_compound.processed_at.isoformat()
-                                if existing_compound.processed_at else None
-                            ),
-                        ))
-                        logger.debug(
-                            f"InChIKey match: {compound.compound_name} matches "
-                            f"{existing_compound.compound_name} ({match_type}, config={config_match})"
-                        )
+            if inchikey:
+                # Check if any existing compound has this InChIKey
+                existing_candidates = db.query(Compound).filter(
+                    Compound.inchikey == inchikey
+                ).all()
+
+                if existing_candidates:
+                    # Prefer same-name candidates when available for better UX parity with single mode.
+                    same_name_candidates = [
+                        c for c in existing_candidates
+                        if _normalize_name(c.compound_name) == normalized_submitted_name
+                    ]
+                    candidates_for_selection = same_name_candidates or existing_candidates
+
+                    # Prioritize: exact config > first non-duplicate > first overall
+                    exact_config_match = None
+                    first_non_duplicate = None
+                    for candidate in candidates_for_selection:
+                        config = _compute_config_match(candidate, submitted_threshold, submitted_at)
+                        if config == "identical":
+                            exact_config_match = candidate
+                            break
+                        if not candidate.is_duplicate and first_non_duplicate is None:
+                            first_non_duplicate = candidate
+
+                    existing_compound = exact_config_match or first_non_duplicate or candidates_for_selection[0]
+                    config_match = _compute_config_match(existing_compound, submitted_threshold, submitted_at)
+                    config_diff = None
+                    if config_match != "identical":
+                        config_diff = {
+                            "similarity_threshold": {
+                                "existing": existing_compound.similarity_threshold or 90,
+                                "submitted": submitted_threshold,
+                            },
+                            "activity_types": {
+                                "existing": _normalize_activity_types_str(existing_compound.activity_types),
+                                "submitted": submitted_at,
+                            },
+                        }
+
+                    match_type = (
+                        "exact"
+                        if _normalize_name(existing_compound.compound_name) == normalized_submitted_name
+                        else "structure_only"
+                    )
+
+                    structure_matches.append(DuplicateMatch(
+                        compound_name=submitted_name,
+                        inchikey=inchikey,
+                        existing_compound_name=existing_compound.compound_name,
+                        existing_entry_id=existing_compound.entry_id,
+                        match_type=match_type,
+                        config_match=config_match,
+                        config_diff=config_diff,
+                        existing_similarity_threshold=existing_compound.similarity_threshold or 90,
+                        existing_activity_types=_normalize_activity_types_str(existing_compound.activity_types),
+                        existing_author_name=existing_compound.author_name,
+                        existing_processed_at=(
+                            existing_compound.processed_at.isoformat()
+                            if existing_compound.processed_at else None
+                        ),
+                    ))
+                    logger.debug(
+                        f"InChIKey match: {submitted_name} matches "
+                        f"{existing_compound.compound_name} ({match_type}, config={config_match})"
+                    )
     elif request.compound_names:
         # Legacy mode: name-only checking
-        compound_names = request.compound_names
+        compound_names = []
+        seen_names = {}
+        for name in request.compound_names:
+            normalized = _normalize_name(name)
+            if normalized and normalized in seen_names:
+                internal_duplicates.append(
+                    InternalDuplicateMatch(
+                        compound_name=name,
+                        duplicate_of=seen_names[normalized],
+                        match_type="exact",
+                        inchikey=None,
+                    )
+                )
+                continue
+            if normalized:
+                seen_names[normalized] = name
+            compound_names.append(name)
     else:
         raise HTTPException(
             status_code=422,
@@ -912,7 +975,8 @@ async def check_duplicates(
 
     logger.info(
         f"Duplicate check: {len(existing)} existing (name), {len(processing)} processing, "
-        f"{len(structure_matches)} structure matches, {len(new)} new"
+        f"{len(structure_matches)} structure matches, {len(internal_duplicates)} internal duplicates, "
+        f"{len(new)} new"
     )
 
     # Compute suggested version names for both existing-name and structure-match compounds.
@@ -938,6 +1002,7 @@ async def check_duplicates(
         processing=processing,
         new=new,
         structure_matches=structure_matches,
+        internal_duplicates=internal_duplicates,
         suggested_versions=suggested_versions,
     )
 
@@ -1008,7 +1073,10 @@ async def create_batch_job(
     skipped_existing = []  # Compounds skipped by user choice
     replaced = []  # Compounds replaced (existing deleted)
     marked_duplicate = []  # Compounds marked as duplicates
+    skipped_internal_duplicates = []  # Compounds skipped because they duplicate another row in this batch
     failed_compounds = []  # Compounds that failed during job creation
+    seen_inchikey_to_name: Dict[str, str] = {}  # In-file structure dedupe guard
+    seen_name_fallback: Dict[str, str] = {}  # Fallback when InChIKey generation fails
 
     # Create all jobs in SQLite (status: PENDING)
     # Scheduler will pick them up and process 2 at a time
@@ -1028,6 +1096,30 @@ async def create_batch_job(
             if compound_action == 'skip':
                 skipped_existing.append(compound_name)
                 continue
+
+            # Skip duplicates inside the submitted batch itself.
+            # We keep the first occurrence and skip subsequent rows with the same structure.
+            row_inchikey = generate_inchikey(compound.smiles) if compound.smiles else None
+            normalized_compound_name = (compound_name or "").strip().lower()
+            if row_inchikey:
+                first_seen_name = seen_inchikey_to_name.get(row_inchikey)
+                if first_seen_name:
+                    skipped_internal_duplicates.append(compound_name)
+                    logger.info(
+                        f"Batch internal duplicate skipped: '{compound_name}' duplicates '{first_seen_name}'"
+                    )
+                    continue
+                seen_inchikey_to_name[row_inchikey] = compound_name
+            elif normalized_compound_name:
+                first_seen_name = seen_name_fallback.get(normalized_compound_name)
+                if first_seen_name:
+                    skipped_internal_duplicates.append(compound_name)
+                    logger.info(
+                        f"Batch internal duplicate skipped by name fallback: "
+                        f"'{compound_name}' duplicates '{first_seen_name}'"
+                    )
+                    continue
+                seen_name_fallback[normalized_compound_name] = compound_name
 
             # Defer deletion until job COMPLETES (not just creation) to prevent data loss
             replace_entry_id = None
@@ -1155,12 +1247,15 @@ async def create_batch_job(
     if jobs:
         job_scheduler.trigger()
 
-    total_skipped = len(skipped_existing) + len(skipped_processing)
+    total_skipped = len(skipped_existing) + len(skipped_processing) + len(skipped_internal_duplicates)
     total_failed = len(failed_compounds)
     logger.info(
         f"Batch {batch_id}: {len(jobs)} jobs queued, "
         f"{len(replaced)} replaced, {len(marked_duplicate)} as duplicates, "
-        f"{total_skipped} skipped, {total_failed} failed (session={truncate_session_id(session_id)})"
+        f"{total_skipped} skipped "
+        f"({len(skipped_existing)} existing, {len(skipped_processing)} processing, "
+        f"{len(skipped_internal_duplicates)} internal duplicates), "
+        f"{total_failed} failed (session={truncate_session_id(session_id)})"
     )
     if failed_compounds:
         logger.warning(f"Batch {batch_id} had {total_failed} compound failures: {[f['compound_name'] for f in failed_compounds]}")
@@ -1170,6 +1265,7 @@ async def create_batch_job(
         jobs=jobs,
         skipped_existing=skipped_existing,
         skipped_processing=skipped_processing,
+        skipped_internal_duplicates=skipped_internal_duplicates,
         replaced=replaced,
         total_submitted=len(jobs),
         total_skipped=total_skipped,

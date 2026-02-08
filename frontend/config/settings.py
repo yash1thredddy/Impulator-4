@@ -113,6 +113,13 @@ class ImpulatorConfig:
     MAX_ROWS_WARNING: int = 100
     MAX_CATEGORICAL_CARDINALITY: int = 50
 
+    # PubChem API (InChIKey -> SMILES resolution)
+    PUBCHEM_BASE_URL: str = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
+    PUBCHEM_TIMEOUT_SECONDS: int = field(
+        default_factory=lambda: _get_int_env('PUBCHEM_TIMEOUT_SECONDS', 10)
+    )
+    PUBCHEM_BATCH_SIZE: int = 100
+
     @property
     def MAX_CSV_SIZE_BYTES(self) -> int:
         """Get maximum file size in bytes."""

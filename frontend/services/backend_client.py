@@ -753,6 +753,85 @@ class ImpulatorAPIClient:
 
             time.sleep(poll_interval)
 
+    # PubChem InChIKey Resolution
+
+    @staticmethod
+    def _extract_pubchem_smiles(props: dict) -> str:
+        """Extract SMILES from a PubChem property dict.
+
+        PubChem renamed response fields (old URL params still accepted):
+          CanonicalSMILES  -> ConnectivitySMILES
+          IsomericSMILES   -> SMILES
+        """
+        for key in ("ConnectivitySMILES", "SMILES", "CanonicalSMILES", "IsomericSMILES"):
+            val = props.get(key, "")
+            if val:
+                return str(val)
+        return ""
+
+    def resolve_inchikey_to_smiles(self, inchikey: str) -> Optional[str]:
+        """Resolve a single InChIKey to SMILES via PubChem.
+
+        Args:
+            inchikey: 27-character InChIKey string
+
+        Returns:
+            SMILES string, or None if not found / error
+        """
+        url = f"{config.PUBCHEM_BASE_URL}/compound/inchikey/{inchikey}/property/ConnectivitySMILES/JSON"
+        try:
+            resp = requests.get(url, timeout=config.PUBCHEM_TIMEOUT_SECONDS)
+            if resp.status_code != 200:
+                logger.warning(f"PubChem lookup failed for {inchikey}: HTTP {resp.status_code}")
+                return None
+            data = resp.json()
+            props_list = data.get("PropertyTable", {}).get("Properties", [])
+            if not props_list:
+                return None
+            smiles = self._extract_pubchem_smiles(props_list[0])
+            return smiles or None
+        except Exception as e:
+            logger.error(f"PubChem resolution error for {inchikey}: {e}")
+            return None
+
+    def resolve_inchikeys_batch(self, inchikeys: List[str]) -> Dict[str, str]:
+        """Resolve multiple InChIKeys to SMILES via PubChem batch POST.
+
+        Args:
+            inchikeys: List of InChIKey strings
+
+        Returns:
+            Dict mapping InChIKey -> SMILES (only successful resolutions)
+        """
+        if not inchikeys:
+            return {}
+
+        url = f"{config.PUBCHEM_BASE_URL}/compound/inchikey/property/ConnectivitySMILES,InChIKey/JSON"
+        results = {}
+
+        # Process in chunks of PUBCHEM_BATCH_SIZE
+        for i in range(0, len(inchikeys), config.PUBCHEM_BATCH_SIZE):
+            chunk = inchikeys[i:i + config.PUBCHEM_BATCH_SIZE]
+            try:
+                resp = requests.post(
+                    url,
+                    data={"inchikey": ",".join(chunk)},
+                    timeout=config.PUBCHEM_TIMEOUT_SECONDS,
+                )
+                if resp.status_code != 200:
+                    logger.warning(f"PubChem batch lookup failed: HTTP {resp.status_code}")
+                    continue
+                data = resp.json()
+                for props in data.get("PropertyTable", {}).get("Properties", []):
+                    key = props.get("InChIKey", "")
+                    smiles = self._extract_pubchem_smiles(props)
+                    if key and smiles:
+                        results[key] = smiles
+            except Exception as e:
+                logger.error(f"PubChem batch resolution error: {e}")
+
+        return results
+
 
 # Singleton pattern with thread-safe initialization
 _api_client: Optional[ImpulatorAPIClient] = None

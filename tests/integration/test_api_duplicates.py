@@ -461,6 +461,32 @@ class TestCheckDuplicates:
         assert match["existing_similarity_threshold"] == 90
         assert match["existing_activity_types"] == "EC50,IC50,Kd,Ki"
 
+    def test_check_duplicates_detects_internal_structure_duplicates(self, client_with_db):
+        """Duplicate check should detect duplicate rows within the submitted payload itself."""
+        response = client_with_db.post(
+            "/api/v1/jobs/check-duplicates",
+            json={
+                "compounds": [
+                    {"compound_name": "Quercetin", "smiles": "CCO"},
+                    {"compound_name": "QuercetinAlias", "smiles": "CCO"},
+                    {"compound_name": "Caffeine", "smiles": "CCN"},
+                ],
+                "similarity_threshold": 90,
+                "activity_types": ["EC50", "IC50", "Kd", "Ki"],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["existing"] == []
+        assert data["processing"] == []
+        assert set(data["new"]) == {"Quercetin", "Caffeine"}
+        assert len(data["internal_duplicates"]) == 1
+        internal_dup = data["internal_duplicates"][0]
+        assert internal_dup["compound_name"] == "QuercetinAlias"
+        assert internal_dup["duplicate_of"] == "Quercetin"
+        assert internal_dup["match_type"] == "structure_only"
+
 
 class TestDuplicateActionValidation:
     """Tests for validation of duplicate actions."""
