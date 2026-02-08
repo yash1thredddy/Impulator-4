@@ -324,6 +324,10 @@ class CompoundStructure(BaseModel):
     compound_name: str = Field(..., min_length=1, max_length=100)
     smiles: Optional[str] = Field(None, description="SMILES string for the compound")
     inchi: Optional[str] = Field(None, description="InChI string for the compound (converted to SMILES if smiles not provided)")
+    inchikey: Optional[str] = Field(
+        None,
+        description="InChIKey for the compound (used directly when SMILES/InChI are unavailable)"
+    )
 
 
 class CheckDuplicatesRequest(BaseModel):
@@ -331,7 +335,7 @@ class CheckDuplicatesRequest(BaseModel):
 
     Supports two modes:
     1. Name-only check (legacy): Just provide compound_names
-    2. Structure-based check (recommended): Provide compounds with SMILES/InChI for InChIKey-based detection
+    2. Structure-based check (recommended): Provide compounds with SMILES/InChI/InChIKey for InChIKey-based detection
     """
 
     # Legacy: name-only list (for backward compatibility)
@@ -348,7 +352,8 @@ class CheckDuplicatesRequest(BaseModel):
                 "compounds": [
                     {"compound_name": "Aspirin", "smiles": "CC(=O)OC1=CC=CC=C1C(=O)O"},
                     {"compound_name": "Quercetin", "smiles": "O=C1C(O)=C(O)C(=O)C2=C1C=C(O)C(O)=C2O"},
-                    {"compound_name": "Unknown", "inchi": "InChI=1S/C9H8O4/c1-6(10)13-8-5-3-2-4-7(8)9(11)12/h2-5H,1H3,(H,11,12)"}
+                    {"compound_name": "Unknown", "inchi": "InChI=1S/C9H8O4/c1-6(10)13-8-5-3-2-4-7(8)9(11)12/h2-5H,1H3,(H,11,12)"},
+                    {"compound_name": "KnownByKey", "inchikey": "BSYNRYMUTXBXSQ-UHFFFAOYSA-N"}
                 ]
             }
         }

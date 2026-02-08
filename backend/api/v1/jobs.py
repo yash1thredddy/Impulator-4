@@ -78,6 +78,16 @@ def _normalize_activity_types_str(stored: Optional[str]) -> str:
     return ",".join(sorted(at.strip() for at in stored.split(",")))
 
 
+def _normalize_inchikey_input(inchikey: Optional[str]) -> Optional[str]:
+    """Normalize optional InChIKey input from request payload."""
+    if not inchikey:
+        return None
+    normalized = inchikey.strip().upper()
+    if not normalized or normalized in {"NAN", "NONE"}:
+        return None
+    return normalized
+
+
 def _inchikey_structure_key(inchikey: Optional[str]) -> Optional[str]:
     """Return a protonation-insensitive structure key from an InChIKey.
 
@@ -804,7 +814,7 @@ async def check_duplicates(
 
     Supports two modes:
     1. **Name-only check (legacy)**: Provide `compound_names` list - checks by name only
-    2. **Structure-based check (recommended)**: Provide `compounds` list with SMILES/InChI
+    2. **Structure-based check (recommended)**: Provide `compounds` list with SMILES/InChI/InChIKey
        - Generates InChIKey for each compound
        - Checks for existing compounds with same InChIKey (100% accurate structure match)
        - Returns `structure_matches` with details about which compounds match by structure
@@ -842,7 +852,11 @@ async def check_duplicates(
             if not smiles and compound.inchi:
                 smiles = _inchi_to_smiles(compound.inchi)
 
-            inchikey = generate_inchikey(smiles) if smiles else None
+            # Prefer generated InChIKey from structure input when available;
+            # fall back to provided InChIKey for InChIKey-only uploads.
+            provided_inchikey = _normalize_inchikey_input(getattr(compound, "inchikey", None))
+            generated_inchikey = generate_inchikey(smiles) if smiles else None
+            inchikey = generated_inchikey or provided_inchikey
             structure_key = _inchikey_structure_key(inchikey)
 
             # First detect duplicates within the uploaded payload itself.

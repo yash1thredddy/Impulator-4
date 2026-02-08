@@ -102,13 +102,21 @@ def chembl_get(url: str, params: dict, timeout: int) -> Optional[requests.Respon
 # ═══════════════════════════════════════════════════════════════════════════
 
 def resolve_inchikey_to_smiles(inchikey: str) -> Optional[str]:
-    url = f"{PUBCHEM_BASE}/compound/inchikey/{inchikey}/property/CanonicalSMILES,IsomericSMILES/JSON"
+    # Keep property list aligned with app-side PubChem handling.
+    url = (
+        f"{PUBCHEM_BASE}/compound/inchikey/{inchikey}/property/"
+        "ConnectivitySMILES,CanonicalSMILES,IsomericSMILES,SMILES/JSON"
+    )
     try:
         resp = SESSION.get(url, timeout=GENERAL_TIMEOUT)
         if resp.status_code == 200:
             props = resp.json().get("PropertyTable", {}).get("Properties", [{}])[0]
-            return (props.get("CanonicalSMILES") or props.get("IsomericSMILES") or
-                    props.get("ConnectivitySMILES") or props.get("SMILES"))
+            return (
+                props.get("ConnectivitySMILES")
+                or props.get("SMILES")
+                or props.get("CanonicalSMILES")
+                or props.get("IsomericSMILES")
+            )
     except Exception as e:
         print(f"    [PubChem] {e}")
     # Fallback: ChEMBL
@@ -126,13 +134,20 @@ def resolve_inchikey_to_smiles(inchikey: str) -> Optional[str]:
 
 
 def resolve_inchi_to_smiles(inchi: str) -> Optional[str]:
-    url = f"{PUBCHEM_BASE}/compound/inchi/property/CanonicalSMILES,IsomericSMILES/JSON"
+    url = (
+        f"{PUBCHEM_BASE}/compound/inchi/property/"
+        "ConnectivitySMILES,CanonicalSMILES,IsomericSMILES,SMILES/JSON"
+    )
     try:
         resp = SESSION.post(url, data={"inchi": inchi}, timeout=GENERAL_TIMEOUT)
         if resp.status_code == 200:
             props = resp.json().get("PropertyTable", {}).get("Properties", [{}])[0]
-            return (props.get("CanonicalSMILES") or props.get("IsomericSMILES") or
-                    props.get("ConnectivitySMILES") or props.get("SMILES"))
+            return (
+                props.get("ConnectivitySMILES")
+                or props.get("SMILES")
+                or props.get("CanonicalSMILES")
+                or props.get("IsomericSMILES")
+            )
     except Exception as e:
         print(f"    [PubChem] {e}")
     return None
@@ -380,41 +395,45 @@ def client_fetch_activities(client, chembl_ids: List[str], activity_types: List[
     start = time.perf_counter()
     types_set = set(activity_types)
     targets = set()
+    max_per_req = 50
+    chunks = [chembl_ids[i:i + max_per_req] for i in range(0, len(chembl_ids), max_per_req)]
 
-    try:
-        results = client.activity.filter(
-            molecule_chembl_id__in=chembl_ids
-        ).only(['molecule_chembl_id', 'standard_type', 'standard_value', 'standard_units', 'target_chembl_id'])
+    for ci, chunk in enumerate(chunks):
+        try:
+            results = client.activity.filter(
+                molecule_chembl_id__in=chunk
+            ).only(['molecule_chembl_id', 'standard_type', 'standard_value', 'standard_units', 'target_chembl_id'])
 
-        for act in results:
-            counts.raw_total += 1
-            stype = act.get("standard_type", "")
-            counts.by_type_raw[stype] = counts.by_type_raw.get(stype, 0) + 1
+            for act in results:
+                counts.raw_total += 1
+                stype = act.get("standard_type", "")
+                counts.by_type_raw[stype] = counts.by_type_raw.get(stype, 0) + 1
 
-            if stype not in types_set:
-                counts.dropped_wrong_type += 1
-                continue
-            counts.type_filtered += 1
+                if stype not in types_set:
+                    counts.dropped_wrong_type += 1
+                    continue
+                counts.type_filtered += 1
 
-            reason = classify_drop_reason(act)
-            if reason == "no_value":
-                counts.dropped_no_value += 1
-                continue
-            elif reason == "bad_value":
-                counts.dropped_bad_value += 1
-                continue
-            elif reason == "bad_units":
-                counts.dropped_bad_units += 1
-                continue
+                reason = classify_drop_reason(act)
+                if reason == "no_value":
+                    counts.dropped_no_value += 1
+                    continue
+                elif reason == "bad_value":
+                    counts.dropped_bad_value += 1
+                    continue
+                elif reason == "bad_units":
+                    counts.dropped_bad_units += 1
+                    continue
 
-            counts.value_filtered += 1
-            counts.by_type_filtered[stype] = counts.by_type_filtered.get(stype, 0) + 1
-            tgt = act.get("target_chembl_id")
-            if tgt:
-                targets.add(tgt)
+                counts.value_filtered += 1
+                counts.by_type_filtered[stype] = counts.by_type_filtered.get(stype, 0) + 1
+                tgt = act.get("target_chembl_id")
+                if tgt:
+                    targets.add(tgt)
 
-    except Exception as e:
-        counts.error = str(e)
+        except Exception as e:
+            counts.error = f"Failed at chunk {ci + 1}/{len(chunks)}: {e}"
+            break
 
     counts.unique_targets = len(targets)
     counts.time_ms = (time.perf_counter() - start) * 1000
@@ -516,7 +535,7 @@ def print_counts_comparison(label: str, rest: Counts, client: Counts):
     # Type breakdown (after value filter)
     all_types = sorted(set(list(rest.by_type_filtered.keys()) + list(client.by_type_filtered.keys())))
     if all_types:
-        print(f"\n  Activity Type Breakdown (after all filters):")
+        print("\n  Activity Type Breakdown (after all filters):")
         print(f"  {'Type':<12} | {'REST':>8} | {'Client':>8}")
         print(f"  {'-' * 35}")
         for t in all_types:
@@ -529,7 +548,7 @@ def print_counts_comparison(label: str, rest: Counts, client: Counts):
     all_raw_types = sorted(set(list(rest.by_type_raw.keys()) + list(client.by_type_raw.keys())),
                            key=lambda t: -(rest.by_type_raw.get(t, 0) + client.by_type_raw.get(t, 0)))
     if all_raw_types:
-        print(f"\n  All Activity Types (raw, top 15):")
+        print("\n  All Activity Types (raw, top 15):")
         print(f"  {'Type':<12} | {'REST':>8} | {'Client':>8}")
         print(f"  {'-' * 35}")
         for t in all_raw_types[:15]:
@@ -537,7 +556,7 @@ def print_counts_comparison(label: str, rest: Counts, client: Counts):
             cv = client.by_type_raw.get(t, 0)
             in_filter = " *" if t in APP_ACTIVITY_TYPES else ""
             print(f"  {t:<12} | {rv:>8} | {cv:>8}{in_filter}")
-        print(f"  (* = included in app filter)")
+        print("  (* = included in app filter)")
 
 
 def run_compound(name: str, smiles: str, threshold: int, client) -> CompoundResult:
@@ -576,7 +595,7 @@ def run_compound(name: str, smiles: str, threshold: int, client) -> CompoundResu
             if only_client:
                 print(f"  [DIFF] Only in Client: {', '.join(sorted(only_client))}")
         else:
-            print(f"  [OK] Similarity results match between REST and Client")
+            print("  [OK] Similarity results match between REST and Client")
 
     # ── Activities: REST ──
     if r.rest_compounds and not r.sim_rest_error:
@@ -604,7 +623,7 @@ def run_compound(name: str, smiles: str, threshold: int, client) -> CompoundResu
         print_counts_comparison(type_label, r.rest_counts, r.client_counts)
 
     # ── PDB ──
-    print(f"  [PDB] Searching structural entries...", end="", flush=True)
+    print("  [PDB] Searching structural entries...", end="", flush=True)
     r.pdb_entries, r.pdb_time_ms, r.pdb_error = search_pdb(smiles)
     if r.pdb_error:
         print(f" ERROR: {r.pdb_error}")
@@ -614,7 +633,7 @@ def run_compound(name: str, smiles: str, threshold: int, client) -> CompoundResu
     # ── Drug Indications ──
     ids_for_ind = r.rest_compounds or r.client_compounds
     if ids_for_ind:
-        print(f"  [REST] Fetching drug indications...", end="", flush=True)
+        print("  [REST] Fetching drug indications...", end="", flush=True)
         r.drug_indications, r.indication_details, r.ind_time_ms, r.ind_error = fetch_drug_indications(ids_for_ind)
         if r.ind_error:
             print(f" ERROR: {r.ind_error}")
@@ -668,15 +687,15 @@ def main():
     print(f"  Threshold:       {threshold}%")
     print(f"  App filter:      {', '.join(APP_ACTIVITY_TYPES)} ({len(APP_ACTIVITY_TYPES)} types, matching app default)")
     print(f"  Value filter:    standard_value > 0, units in {VALID_UNITS}")
-    print(f"  Sources:         ChEMBL REST + WebClient, RCSB PDB, PubChem")
+    print("  Sources:         ChEMBL REST + WebClient, RCSB PDB, PubChem")
 
     # Initialize webclient
-    print(f"\n  Initializing chembl_webresource_client...", end="", flush=True)
+    print("\n  Initializing chembl_webresource_client...", end="", flush=True)
     client = get_webclient()
     if client:
-        print(f" OK (MAX_LIMIT=1000, TIMEOUT=90)")
+        print(" OK (MAX_LIMIT=1000, TIMEOUT=90)")
     else:
-        print(f" NOT AVAILABLE (install chembl_webresource_client)")
+        print(" NOT AVAILABLE (install chembl_webresource_client)")
 
     # Collect compounds
     compounds_to_run: List[Tuple[str, str]] = []
@@ -691,7 +710,7 @@ def main():
             print(f" -> {smiles[:60]}")
             compounds_to_run.append((name, smiles))
         else:
-            print(f" FAILED")
+            print(" FAILED")
     if args.inchi:
         name = args.name or "InChI compound"
         print(f"\n  Resolving InChI: {args.inchi[:60]}...", end="", flush=True)
@@ -700,7 +719,7 @@ def main():
             print(f" -> {smiles[:60]}")
             compounds_to_run.append((name, smiles))
         else:
-            print(f" FAILED")
+            print(" FAILED")
 
     # Built-in compounds
     default_compounds = ["ursolic", "caffeine", "kaempferol", "quercetin"]
@@ -720,7 +739,7 @@ def main():
                 print(f" -> {smiles[:60]}")
                 compounds_to_run.append((info["name"], smiles))
             else:
-                print(f" FAILED")
+                print(" FAILED")
         elif info.get("inchi"):
             print(f"\n  Resolving {info['name']} InChI...", end="", flush=True)
             smiles = resolve_inchi_to_smiles(info["inchi"])
@@ -728,7 +747,7 @@ def main():
                 print(f" -> {smiles[:60]}")
                 compounds_to_run.append((info["name"], smiles))
             else:
-                print(f" FAILED")
+                print(" FAILED")
 
     if not compounds_to_run:
         print("\n  No compounds. Use --compound, --smiles, --inchikey, or --inchi.")

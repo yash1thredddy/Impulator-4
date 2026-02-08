@@ -748,6 +748,7 @@ def render_csv_upload_form() -> Optional[str]:
             # Build compounds list with structures for InChIKey-based duplicate detection
             df_has_smiles = 'smiles' in df_mapped.columns
             df_has_inchi = 'inchi' in df_mapped.columns
+            df_has_inchikey = 'inchikey' in df_mapped.columns
 
             compounds_for_check = []
             for _, row in df_mapped.iterrows():
@@ -768,6 +769,11 @@ def render_csv_upload_form() -> Optional[str]:
                     inchi_val = str(row.get('inchi', '')).strip()
                     if inchi_val and inchi_val.lower() not in ('nan', 'none', ''):
                         compound_data["inchi"] = inchi_val
+
+                if df_has_inchikey:
+                    inchikey_val = str(row.get('inchikey', '')).strip()
+                    if inchikey_val and inchikey_val.lower() not in ('nan', 'none', ''):
+                        compound_data["inchikey"] = inchikey_val.upper()
 
                 compounds_for_check.append(compound_data)
 
@@ -944,7 +950,6 @@ def render_csv_upload_form() -> Optional[str]:
 
             existing_name = match.get('existing_compound_name', 'Unknown')
             match_type = match.get('match_type', 'structure_only')
-            config_match = match.get('config_match')
             processed_at = match.get('existing_processed_at')
             existing_threshold = match.get('existing_similarity_threshold')
             existing_activities = match.get('existing_activity_types')

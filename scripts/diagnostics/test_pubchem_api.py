@@ -442,7 +442,7 @@ def run_tests(api_filter: Optional[str] = None, verbose: bool = False) -> bool:
     print(f"\n{'=' * 72}")
     print(f"  {passed}/{total} PASSED")
     if all_passed:
-        print(f"  ALL TESTS PASSED")
+        print("  ALL TESTS PASSED")
     else:
         failed_names = [r.name for r in results if not r.passed]
         print(f"  FAILED: {', '.join(failed_names)}")
