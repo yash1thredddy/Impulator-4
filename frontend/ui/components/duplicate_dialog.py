@@ -8,6 +8,7 @@ from different-config duplicates (genuinely different analysis).
 """
 
 import logging
+from datetime import datetime
 from typing import Optional, Tuple
 
 import streamlit as st
@@ -46,6 +47,99 @@ def _render_config_comparison(config_diff: dict) -> None:
             st.markdown(f"Activities: {submitted_activities}")
 
 
+def _format_processed_datetime(raw_timestamp: Optional[str]) -> str:
+    """Format ISO-like timestamp into a human-readable form."""
+    if not raw_timestamp:
+        return "N/A"
+
+    ts = str(raw_timestamp).strip()
+    if ts.endswith("Z"):
+        ts = ts[:-1] + "+00:00"
+
+    try:
+        dt = datetime.fromisoformat(ts)
+        return dt.strftime("%b %d, %Y at %I:%M:%S %p")
+    except (ValueError, TypeError):
+        return str(raw_timestamp).replace("T", " ")
+
+
+def _get_allowed_actions_text(dup_type: str, is_identical_config: bool) -> str:
+    """Get human-readable allowed-actions summary for the current duplicate context."""
+    if is_identical_config:
+        return "replace or skip"
+    if dup_type == "exact":
+        return "replace, change name, or skip"
+    return "replace, duplicate, or skip"
+
+
+def _render_match_details(
+    existing: dict,
+    submitted: dict,
+    dup_type: str,
+    config_match: str,
+    is_identical_config: bool,
+    config_diff: Optional[dict],
+) -> None:
+    """Render compact match details in 3 aligned lines."""
+    existing_name = existing.get("compound_name", "Unknown")
+    submitted_name = submitted.get("compound_name", "Unknown")
+    processed_at = _format_processed_datetime(existing.get("processed_at"))
+    author_name = (existing.get("author_name") or "Unknown").strip()
+    existing_threshold = existing.get("similarity_threshold", 90)
+    existing_activities = existing.get("activity_types") or "N/A"
+
+    # Header + config status
+    st.markdown("**Match Details**")
+    if is_identical_config:
+        st.info(
+            f"Same threshold ({existing_threshold}%) and activity types — results would be identical.",
+            icon="ℹ️",
+        )
+    else:
+        # Use suggestion-style info note for config differences.
+        if config_match == "different_threshold":
+            note_text = "Different threshold selected — results may differ from the existing analysis."
+        elif config_match == "different_activities":
+            note_text = "Different activity types selected — results may differ from the existing analysis."
+        elif config_match == "different_both":
+            note_text = "Threshold and activity types differ — results will likely differ."
+        else:
+            note_text = "Configuration differs from the existing analysis — results may differ."
+        st.info(note_text, icon="ℹ️")
+
+    # Row 1: match sentence
+    if dup_type == "exact":
+        st.caption(f"`{submitted_name}` matches `{existing_name}` by name and structure.")
+    else:
+        st.caption(f"`{submitted_name}` shares structure with `{existing_name}`.")
+
+    # Row 2: existing config + activity types
+    row2_left, row2_right = st.columns(2, gap="medium")
+    with row2_left:
+        st.caption(f"Existing config: threshold {existing_threshold}%")
+    with row2_right:
+        st.caption(f"Activity types: `{existing_activities}`")
+
+    # Row 3: allowed actions + processed info
+    row3_left, row3_right = st.columns(2, gap="medium")
+    with row3_left:
+        st.caption(f"Allowed actions: {_get_allowed_actions_text(dup_type, is_identical_config)}")
+    with row3_right:
+        st.caption(f"Processed: {processed_at} by {author_name}")
+
+    # Optional concise diff details for non-identical configs.
+    if not is_identical_config and config_diff:
+        threshold = config_diff.get("similarity_threshold", {})
+        activities = config_diff.get("activity_types", {})
+        parts = []
+        if threshold:
+            parts.append(f"threshold {threshold.get('existing')}% -> {threshold.get('submitted')}%")
+        if activities:
+            parts.append(f"activity types `{activities.get('existing')}` -> `{activities.get('submitted')}`")
+        if parts:
+            st.caption("Submitted vs existing: " + " | ".join(parts))
+
+
 def render_duplicate_dialog(duplicate_info: dict) -> Tuple[Optional[str], Optional[str]]:
     """Render the duplicate detection dialog.
 
@@ -70,7 +164,6 @@ def render_duplicate_dialog(duplicate_info: dict) -> Tuple[Optional[str], Option
 
     existing_name = existing.get("compound_name", "Unknown")
     submitted_name = submitted.get("compound_name", "Unknown")
-    processed_at = existing.get("processed_at", "Unknown")
     # Get suggested name from backend (calculates next available version, e.g., _v3 if _v2 exists)
     suggested_name = duplicate_info.get("suggested_name", f"{existing_name}_v2")
 
@@ -92,12 +185,6 @@ def render_duplicate_dialog(duplicate_info: dict) -> Tuple[Optional[str], Option
                     f"with the same configuration."
                 )
                 st.markdown(f"You entered: **{submitted_name}**")
-
-            st.info(
-                f"Same threshold ({existing.get('similarity_threshold', 90)}%) "
-                f"and activity types — results would be identical.",
-                icon="ℹ️",
-            )
         else:
             st.warning("**Structure Already Exists**")
             if dup_type == "exact":
@@ -112,12 +199,14 @@ def render_duplicate_dialog(duplicate_info: dict) -> Tuple[Optional[str], Option
                 )
                 st.markdown(f"You entered: **{submitted_name}**")
 
-            # Show config comparison
-            if config_diff:
-                with st.expander("Configuration Comparison", expanded=True):
-                    _render_config_comparison(config_diff)
-
-        st.caption(f"Processed: {processed_at if processed_at != 'Unknown' else 'Previously processed'}")
+        _render_match_details(
+            existing=existing,
+            submitted=submitted,
+            dup_type=dup_type,
+            config_match=config_match,
+            is_identical_config=is_identical_config,
+            config_diff=config_diff,
+        )
 
         st.divider()
 

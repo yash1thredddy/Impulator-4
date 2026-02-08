@@ -198,7 +198,9 @@ class ImpulatorAPIClient:
     def check_duplicates(
         self,
         compound_names: List[str] = None,
-        compounds: List[Dict[str, Any]] = None
+        compounds: List[Dict[str, Any]] = None,
+        similarity_threshold: Optional[int] = None,
+        activity_types: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Check which compounds already exist or are being processed.
 
@@ -211,6 +213,8 @@ class ImpulatorAPIClient:
             compound_names: List of compound names to check (legacy mode)
             compounds: List of dicts with compound_name, smiles, and/or inchi (new mode)
                       Example: [{"compound_name": "Aspirin", "smiles": "CC(=O)OC1=CC=CC=C1C(=O)O"}]
+            similarity_threshold: Optional submitted threshold for config-aware matching
+            activity_types: Optional submitted activity types for config-aware matching
 
         Returns:
             Dict with:
@@ -223,7 +227,11 @@ class ImpulatorAPIClient:
         """
         if compounds:
             # New mode: structure-based checking with InChIKey
-            payload = {"compounds": compounds}
+            payload = {
+                "compounds": compounds,
+                "similarity_threshold": similarity_threshold,
+                "activity_types": activity_types,
+            }
         elif compound_names:
             # Legacy mode: name-only checking
             payload = {"compound_names": compound_names}

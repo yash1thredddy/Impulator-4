@@ -400,6 +400,67 @@ class TestCheckDuplicates:
         assert set(data["existing"]) == {"Aspirin", "Ibuprofen"}
         assert set(data["new"]) == {"Caffeine", "Quercetin"}
 
+    def test_check_duplicates_name_match_is_case_insensitive(self, test_engine, client_with_db):
+        """Name-based duplicate check should match regardless of case."""
+        from backend.models.database import Compound
+
+        Session = sessionmaker(bind=test_engine)
+        session = Session()
+        session.add(Compound(entry_id="entry-quercetin", compound_name="Quercetin"))
+        session.commit()
+        session.close()
+
+        response = client_with_db.post(
+            "/api/v1/jobs/check-duplicates",
+            json={"compound_names": ["QUERCETIN", "NewCompound"]},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert set(data["existing"]) == {"QUERCETIN"}
+        assert set(data["new"]) == {"NewCompound"}
+
+    def test_check_duplicates_structure_match_includes_config_context(self, test_engine, client_with_db):
+        """Structure-based duplicate check should include config-aware match details."""
+        from backend.models.database import Compound
+        from backend.services.job_service import generate_inchikey
+
+        smiles = "CCO"
+        inchikey = generate_inchikey(smiles)
+        assert inchikey is not None
+
+        Session = sessionmaker(bind=test_engine)
+        session = Session()
+        session.add(Compound(
+            entry_id="entry-ethanol",
+            compound_name="Quercetin",
+            smiles=smiles,
+            inchikey=inchikey,
+            similarity_threshold=90,
+            activity_types="EC50,IC50,Kd,Ki",
+        ))
+        session.commit()
+        session.close()
+
+        response = client_with_db.post(
+            "/api/v1/jobs/check-duplicates",
+            json={
+                "compounds": [{"compound_name": "QUERCETIN", "smiles": smiles}],
+                "similarity_threshold": 90,
+                "activity_types": ["Ki", "IC50", "EC50", "Kd"],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "QUERCETIN" in data["existing"]
+        assert len(data["structure_matches"]) == 1
+        match = data["structure_matches"][0]
+        assert match["match_type"] == "exact"
+        assert match["config_match"] == "identical"
+        assert match["existing_similarity_threshold"] == 90
+        assert match["existing_activity_types"] == "EC50,IC50,Kd,Ki"
+
 
 class TestDuplicateActionValidation:
     """Tests for validation of duplicate actions."""

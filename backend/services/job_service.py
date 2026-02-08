@@ -454,17 +454,24 @@ class JobService:
         """
         from backend.models.database import Compound
 
-        # Batch query: get all matching compounds in a single query
+        def _normalize_name(name: str) -> str:
+            return (name or "").strip().lower()
+
+        normalized_input = {_normalize_name(name) for name in compound_names if _normalize_name(name)}
+        if not normalized_input:
+            return {name: False for name in compound_names}
+
+        # Case-insensitive batch query so CSV casing differences still match
         existing_compounds = (
-            db.query(Compound.compound_name)
-            .filter(Compound.compound_name.in_(compound_names))
+            db.query(func.lower(func.trim(Compound.compound_name)))
+            .filter(func.lower(func.trim(Compound.compound_name)).in_(list(normalized_input)))
             .all()
         )
-        local_existing = {row[0] for row in existing_compounds}
+        local_existing = {row[0] for row in existing_compounds if row[0]}
 
         result = {}
         for name in compound_names:
-            result[name] = name in local_existing
+            result[name] = _normalize_name(name) in local_existing
 
         return result
 
@@ -489,8 +496,17 @@ class JobService:
         if not compound_names:
             return {}
 
-        # Convert to set for O(1) lookups
-        names_to_check = set(compound_names)
+        def _normalize_name(name: str) -> str:
+            return (name or "").strip().lower()
+
+        # Track normalized input names while preserving the original key users submitted.
+        normalized_to_original: Dict[str, str] = {}
+        for name in compound_names:
+            normalized = _normalize_name(name)
+            if normalized and normalized not in normalized_to_original:
+                normalized_to_original[normalized] = name
+
+        names_to_check = set(normalized_to_original.keys())
         result = {}
 
         # Fetch all pending/processing jobs in one query
@@ -507,10 +523,12 @@ class JobService:
             try:
                 params = json.loads(job.input_params)
                 job_compound_name = params.get('compound_name')
-                if job_compound_name and job_compound_name in names_to_check:
-                    result[job_compound_name] = job.id
+                normalized_job_name = _normalize_name(job_compound_name) if job_compound_name else ""
+                if normalized_job_name and normalized_job_name in names_to_check:
+                    original_name = normalized_to_original[normalized_job_name]
+                    result[original_name] = job.id
                     # Remove from set to avoid duplicate matches
-                    names_to_check.discard(job_compound_name)
+                    names_to_check.discard(normalized_job_name)
                     # Early exit if all found
                     if not names_to_check:
                         break

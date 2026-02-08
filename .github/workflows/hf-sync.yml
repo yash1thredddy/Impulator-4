@@ -1,18 +1,29 @@
 name: Sync to Hugging Face Space
 
 on:
-  push:
-    branches:
-      - master
+  workflow_run:
+    workflows:
+      - CI - Tests
+    types:
+      - completed
   workflow_dispatch:  # Allows manual triggering from GitHub Actions UI
 
 jobs:
   sync:
+    # Auto-sync only after CI tests succeed on master pushes.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'master')
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # For workflow_run, sync exactly the commit that passed CI.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -38,6 +49,6 @@ jobs:
               repo_type="space",
               revision="main",
               create_pr=False,
-              commit_message="Auto-sync from GitHub (master)",
+              commit_message="Auto-sync after CI pass",
           )
           EOF
