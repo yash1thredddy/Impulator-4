@@ -390,7 +390,7 @@ class DuplicateMatch(BaseModel):
 
 
 class InternalDuplicateMatch(BaseModel):
-    """Information about a duplicate found within the submitted batch itself."""
+    """Information about a duplicate found within the submitted payload itself."""
 
     compound_name: str = Field(..., description="Duplicate compound name in the submitted payload")
     duplicate_of: str = Field(..., description="First-seen compound name this duplicates in the same payload")
@@ -411,7 +411,7 @@ class CheckDuplicatesResponse(BaseModel):
     )
     internal_duplicates: List[InternalDuplicateMatch] = Field(
         default_factory=list,
-        description="Compounds duplicated within the submitted payload itself (same structure)"
+        description="Compounds duplicated within the submitted payload itself (same name or structure)"
     )
     # Suggested version names for existing compounds (computed from full database state)
     suggested_versions: Dict[str, str] = Field(

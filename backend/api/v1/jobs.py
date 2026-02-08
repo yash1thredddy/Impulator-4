@@ -78,6 +78,22 @@ def _normalize_activity_types_str(stored: Optional[str]) -> str:
     return ",".join(sorted(at.strip() for at in stored.split(",")))
 
 
+def _inchikey_structure_key(inchikey: Optional[str]) -> Optional[str]:
+    """Return a protonation-insensitive structure key from an InChIKey.
+
+    InChIKey format is typically AAAA...-BBBB...-C where the last block encodes
+    protonation/version information. For in-file duplicate detection we ignore the
+    last block so acid/base forms can be treated as the same underlying structure.
+    """
+    if not inchikey:
+        return None
+    normalized = inchikey.strip().upper()
+    parts = normalized.split("-")
+    if len(parts) >= 2 and parts[0] and parts[1]:
+        return f"{parts[0]}-{parts[1]}"
+    return normalized or None
+
+
 def _compute_config_match(
     existing: Compound,
     submitted_threshold: int,
@@ -813,8 +829,8 @@ async def check_duplicates(
         compound_names: List[str] = []
 
         # Track first-seen compounds within the submitted payload to detect in-file duplicates.
-        seen_inchikey_to_name: Dict[str, str] = {}
-        seen_name_fallback: Dict[str, str] = {}
+        seen_structure_key_to_name: Dict[str, str] = {}
+        seen_name_to_name: Dict[str, str] = {}
 
         # Generate InChIKeys and check for structure matches
         for compound in request.compounds:
@@ -827,13 +843,24 @@ async def check_duplicates(
                 smiles = _inchi_to_smiles(compound.inchi)
 
             inchikey = generate_inchikey(smiles) if smiles else None
+            structure_key = _inchikey_structure_key(inchikey)
 
             # First detect duplicates within the uploaded payload itself.
             internal_parent_name = None
             internal_match_type = "exact"
 
-            if inchikey:
-                internal_parent_name = seen_inchikey_to_name.get(inchikey)
+            # Always treat repeated submitted names as in-file duplicates.
+            if normalized_submitted_name:
+                internal_parent_name = seen_name_to_name.get(normalized_submitted_name)
+                if internal_parent_name:
+                    internal_match_type = "exact"
+                else:
+                    seen_name_to_name[normalized_submitted_name] = submitted_name
+
+            # Also treat repeated structure keys as in-file duplicates. This catches
+            # rows that differ only by protonation/charge layer in InChI.
+            if not internal_parent_name and structure_key:
+                internal_parent_name = seen_structure_key_to_name.get(structure_key)
                 if internal_parent_name:
                     internal_match_type = (
                         "exact"
@@ -841,12 +868,7 @@ async def check_duplicates(
                         else "structure_only"
                     )
                 else:
-                    seen_inchikey_to_name[inchikey] = submitted_name
-            elif normalized_submitted_name:
-                # Fallback for rows where structure normalization/InChIKey generation is unavailable.
-                internal_parent_name = seen_name_fallback.get(normalized_submitted_name)
-                if not internal_parent_name:
-                    seen_name_fallback[normalized_submitted_name] = submitted_name
+                    seen_structure_key_to_name[structure_key] = submitted_name
 
             if internal_parent_name:
                 internal_duplicates.append(
@@ -1075,8 +1097,8 @@ async def create_batch_job(
     marked_duplicate = []  # Compounds marked as duplicates
     skipped_internal_duplicates = []  # Compounds skipped because they duplicate another row in this batch
     failed_compounds = []  # Compounds that failed during job creation
-    seen_inchikey_to_name: Dict[str, str] = {}  # In-file structure dedupe guard
-    seen_name_fallback: Dict[str, str] = {}  # Fallback when InChIKey generation fails
+    seen_structure_key_to_name: Dict[str, str] = {}  # In-file structure dedupe guard
+    seen_name_to_name: Dict[str, str] = {}  # In-file name dedupe guard
 
     # Create all jobs in SQLite (status: PENDING)
     # Scheduler will pick them up and process 2 at a time
@@ -1098,28 +1120,33 @@ async def create_batch_job(
                 continue
 
             # Skip duplicates inside the submitted batch itself.
-            # We keep the first occurrence and skip subsequent rows with the same structure.
+            # We keep the first occurrence and skip subsequent rows with the same name
+            # or same structure.
             row_inchikey = generate_inchikey(compound.smiles) if compound.smiles else None
+            row_structure_key = _inchikey_structure_key(row_inchikey)
             normalized_compound_name = (compound_name or "").strip().lower()
-            if row_inchikey:
-                first_seen_name = seen_inchikey_to_name.get(row_inchikey)
+
+            if normalized_compound_name:
+                first_seen_name = seen_name_to_name.get(normalized_compound_name)
                 if first_seen_name:
                     skipped_internal_duplicates.append(compound_name)
                     logger.info(
-                        f"Batch internal duplicate skipped: '{compound_name}' duplicates '{first_seen_name}'"
-                    )
-                    continue
-                seen_inchikey_to_name[row_inchikey] = compound_name
-            elif normalized_compound_name:
-                first_seen_name = seen_name_fallback.get(normalized_compound_name)
-                if first_seen_name:
-                    skipped_internal_duplicates.append(compound_name)
-                    logger.info(
-                        f"Batch internal duplicate skipped by name fallback: "
+                        f"Batch internal duplicate skipped by name: "
                         f"'{compound_name}' duplicates '{first_seen_name}'"
                     )
                     continue
-                seen_name_fallback[normalized_compound_name] = compound_name
+                seen_name_to_name[normalized_compound_name] = compound_name
+
+            if row_structure_key:
+                first_seen_name = seen_structure_key_to_name.get(row_structure_key)
+                if first_seen_name:
+                    skipped_internal_duplicates.append(compound_name)
+                    logger.info(
+                        f"Batch internal duplicate skipped by structure: "
+                        f"'{compound_name}' duplicates '{first_seen_name}'"
+                    )
+                    continue
+                seen_structure_key_to_name[row_structure_key] = compound_name
 
             # Defer deletion until job COMPLETES (not just creation) to prevent data loss
             replace_entry_id = None

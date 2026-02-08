@@ -400,3 +400,21 @@ class TestBatchJobOperations:
         assert data["total_submitted"] == 2
         assert data["total_skipped"] == 1
         assert data["skipped_internal_duplicates"] == ["QuercetinAlias"]
+
+    def test_batch_skips_internal_name_duplicates(self, client):
+        """Batch submission should skip repeated names in the same uploaded payload."""
+        response = client.post("/api/v1/jobs/batch", json={
+            "compounds": [
+                {"compound_name": "CAFFEIC ACID", "author_name": "Test Author", "smiles": "CCO"},
+                {"compound_name": "CAFFEIC ACID", "author_name": "Test Author", "smiles": "CCN"},
+                {"compound_name": "Caffeine", "author_name": "Test Author", "smiles": "CCN"},
+            ],
+            "similarity_threshold": 90
+        })
+
+        assert response.status_code == 201
+        data = response.json()
+        assert len(data["jobs"]) == 2
+        assert data["total_submitted"] == 2
+        assert data["total_skipped"] == 1
+        assert data["skipped_internal_duplicates"] == ["CAFFEIC ACID"]

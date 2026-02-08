@@ -487,6 +487,30 @@ class TestCheckDuplicates:
         assert internal_dup["duplicate_of"] == "Quercetin"
         assert internal_dup["match_type"] == "structure_only"
 
+    def test_check_duplicates_detects_internal_name_duplicates(self, client_with_db):
+        """Duplicate check should treat repeated submitted names as in-file duplicates."""
+        response = client_with_db.post(
+            "/api/v1/jobs/check-duplicates",
+            json={
+                "compounds": [
+                    {"compound_name": "CAFFEIC ACID", "smiles": "CCO"},
+                    {"compound_name": "CAFFEIC ACID", "smiles": "CCN"},
+                    {"compound_name": "Caffeine", "smiles": "CCN"},
+                ],
+                "similarity_threshold": 90,
+                "activity_types": ["EC50", "IC50", "Kd", "Ki"],
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert set(data["new"]) == {"CAFFEIC ACID", "Caffeine"}
+        assert len(data["internal_duplicates"]) == 1
+        internal_dup = data["internal_duplicates"][0]
+        assert internal_dup["compound_name"] == "CAFFEIC ACID"
+        assert internal_dup["duplicate_of"] == "CAFFEIC ACID"
+        assert internal_dup["match_type"] == "exact"
+
 
 class TestDuplicateActionValidation:
     """Tests for validation of duplicate actions."""
