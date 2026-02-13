@@ -18,6 +18,26 @@ from frontend.ui.components.molecule_viewer import (
 )
 
 
+def get_plotly_theme() -> dict:
+    """Return Plotly layout kwargs matching the current Streamlit theme."""
+    try:
+        is_dark = st.context.theme.base == "dark"
+    except Exception:
+        is_dark = False
+
+    if is_dark:
+        return {
+            "template": "plotly_dark",
+            "legend_bgcolor": "rgba(30,30,30,0.8)",
+            "legend_bordercolor": "rgba(255,255,255,0.15)",
+        }
+    return {
+        "template": "plotly_white",
+        "legend_bgcolor": "rgba(255,255,255,0.8)",
+        "legend_bordercolor": "rgba(0,0,0,0.1)",
+    }
+
+
 def _apply_subtitle(fig: go.Figure, subtitle: str) -> None:
     """Apply a subtitle to a Plotly figure (Plotly v6+).
 
@@ -93,10 +113,11 @@ def create_scatter_plot(
         fig.update_traces(marker=dict(size=marker_size))
 
     # Update layout
+    theme = get_plotly_theme()
     fig.update_layout(
         xaxis_title=x_col.replace('_', ' '),
         yaxis_title=y_col.replace('_', ' '),
-        template="plotly_white",
+        template=theme["template"],
         hovermode="closest"
     )
 
@@ -127,13 +148,14 @@ def create_histogram(
     Returns:
         Plotly Figure
     """
+    theme = get_plotly_theme()
     fig = px.histogram(
         df,
         x=column,
         color=color_col,
         nbins=bins,
         title=title or f"Distribution of {column}",
-        template="plotly_white"
+        template=theme["template"]
     )
 
     fig.update_layout(
@@ -168,13 +190,14 @@ def create_box_plot(
     Returns:
         Plotly Figure
     """
+    theme = get_plotly_theme()
     fig = px.box(
         df,
         x=x_col,
         y=y_col,
         color=color_col,
         title=title or f"Distribution of {y_col}",
-        template="plotly_white"
+        template=theme["template"]
     )
 
     if subtitle:
@@ -204,6 +227,7 @@ def create_violin_plot(
     Returns:
         Plotly Figure
     """
+    theme = get_plotly_theme()
     fig = px.violin(
         df,
         x=x_col,
@@ -211,7 +235,7 @@ def create_violin_plot(
         color=color_col,
         box=True,
         title=title or f"Distribution of {y_col}",
-        template="plotly_white"
+        template=theme["template"]
     )
 
     if subtitle:
@@ -243,13 +267,14 @@ def create_bar_chart(
     Returns:
         Plotly Figure
     """
+    theme = get_plotly_theme()
     fig = px.bar(
         df,
         x=x_col,
         y=y_col,
         color=color_col,
         title=title or f"{y_col} by {x_col}",
-        template="plotly_white",
+        template=theme["template"],
         orientation=orientation
     )
 
@@ -395,12 +420,13 @@ def create_pair_plot(
     Returns:
         Plotly Figure
     """
+    theme = get_plotly_theme()
     fig = px.scatter_matrix(
         df,
         dimensions=columns,
         color=color_col,
         title=title,
-        template="plotly_white"
+        template=theme["template"]
     )
 
     if subtitle:

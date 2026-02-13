@@ -38,6 +38,7 @@ from frontend.ui.components.duplicate_dialog import (
     render_duplicate_dialog,
     clear_duplicate_dialog_state,
 )
+from frontend.ui.components.plotly_legend import plotly_legend_monitor
 
 __all__ = [
     # Charts
@@ -71,4 +72,6 @@ __all__ = [
     # Duplicate dialog
     "render_duplicate_dialog",
     "clear_duplicate_dialog_state",
+    # Plotly legend stats
+    "plotly_legend_monitor",
 ]
