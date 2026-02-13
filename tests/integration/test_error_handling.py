@@ -13,24 +13,49 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import NullPool
+
+
+def _force_stop_scheduler_thread() -> None:
+    """Stop global scheduler thread between tests to avoid DB races."""
+    from backend.core.scheduler import job_scheduler
+
+    job_scheduler._running = False
+    if job_scheduler._thread and job_scheduler._thread.is_alive():
+        # Poll interval is 6s; wait slightly longer for graceful exit.
+        job_scheduler._thread.join(timeout=7)
+    job_scheduler._thread = None
+
+
+@pytest.fixture(autouse=True)
+def isolate_scheduler():
+    """Ensure no scheduler thread leaks across tests in this module."""
+    _force_stop_scheduler_thread()
+    yield
+    _force_stop_scheduler_thread()
 
 
 @pytest.fixture(scope="function")
-def test_engine():
-    """Create a test database engine with tables using shared in-memory DB."""
+def test_engine(tmp_path):
+    """Create a per-test SQLite engine isolated by file path.
+
+    A file-backed DB + NullPool avoids shared single-connection races under
+    concurrent request tests.
+    """
     from backend.core.database import Base
     # Import models BEFORE create_all to register them with Base
     from backend.models.database import Job, Compound  # noqa: F401
 
+    db_path = tmp_path / "test_error_handling.sqlite"
     engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False, "timeout": 30},
+        poolclass=NullPool,
     )
     Base.metadata.create_all(bind=engine)
     yield engine
-    Base.metadata.drop_all(bind=engine)
+    # Using per-test db files; dispose only to avoid teardown lock flakes.
+    engine.dispose()
 
 
 @pytest.fixture
@@ -75,8 +100,8 @@ def client_with_db(test_engine, mock_azure):
 
     # Mock the scheduler to prevent background job processing after test teardown
     with patch('backend.core.scheduler.job_scheduler.trigger'):
-        client = TestClient(app)
-        yield client
+        with TestClient(app) as client:
+            yield client
 
     # Restore original values
     app.dependency_overrides.clear()
@@ -334,11 +359,12 @@ class TestDatabaseErrorHandling:
         app.dependency_overrides[get_db] = broken_db
 
         try:
-            client = TestClient(app, raise_server_exceptions=False)
-            response = client.get("/api/v1/jobs")
+            with patch('backend.core.scheduler.job_scheduler.trigger'):
+                with TestClient(app, raise_server_exceptions=False) as client:
+                    response = client.get("/api/v1/jobs")
 
-            # Should return 500 or handle gracefully
-            assert response.status_code in [500, 503]
+                    # Should return 500 or handle gracefully
+                    assert response.status_code in [500, 503]
         finally:
             app.dependency_overrides.clear()
 
@@ -377,6 +403,11 @@ class TestExternalServiceFailures:
 class TestConcurrentRequests:
     """Tests for concurrent request handling."""
 
+    @staticmethod
+    def _stop_scheduler_thread():
+        """Best-effort stop for global scheduler thread between tests."""
+        _force_stop_scheduler_thread()
+
     def test_concurrent_job_creation(self, test_engine, mock_azure):
         """Test creating multiple jobs concurrently."""
         from backend.main import app
@@ -405,32 +436,34 @@ class TestConcurrentRequests:
         app.dependency_overrides[get_db] = override_get_db
 
         try:
-            client = TestClient(app)
-            results = []
+            with patch('backend.core.scheduler.job_scheduler.trigger'):
+                with TestClient(app) as client:
+                    results = []
 
-            def create_job(i):
-                # Use valid UUID format for session ID (auth.py validates UUID v4 format)
-                session_id = str(uuid.uuid4())
-                response = client.post(
-                    "/api/v1/jobs",
-                    json={
-                        "compound_name": f"Compound{i}",
-                        "author_name": "Test Author",
-                        "smiles": "CCO",
-                        "similarity_threshold": 90
-                    },
-                    headers={"X-Session-ID": session_id}
-                )
-                with lock:
-                    results.append(response.status_code)
+                    def create_job(i):
+                        # Use valid UUID format for session ID (auth.py validates UUID v4 format)
+                        session_id = str(uuid.uuid4())
+                        response = client.post(
+                            "/api/v1/jobs",
+                            json={
+                                "compound_name": f"Compound{i}",
+                                "author_name": "Test Author",
+                                "smiles": "CCO",
+                                "similarity_threshold": 90
+                            },
+                            headers={"X-Session-ID": session_id}
+                        )
+                        with lock:
+                            results.append(response.status_code)
 
-            # Create 5 jobs concurrently
-            with ThreadPoolExecutor(max_workers=5) as executor:
-                executor.map(create_job, range(5))
+                    # Create 5 jobs concurrently
+                    with ThreadPoolExecutor(max_workers=5) as executor:
+                        executor.map(create_job, range(5))
 
             # All should succeed
             assert all(status == 201 for status in results)
         finally:
+            self._stop_scheduler_thread()
             app.dependency_overrides.clear()
             db_module.engine = original_engine
             db_module.SessionLocal = original_session_local
@@ -462,21 +495,23 @@ class TestConcurrentRequests:
         app.dependency_overrides[get_db] = override_get_db
 
         try:
-            client = TestClient(app)
-            results = []
+            with patch('backend.core.scheduler.job_scheduler.trigger'):
+                with TestClient(app) as client:
+                    results = []
 
-            def query_jobs():
-                response = client.get("/api/v1/jobs")
-                with lock:
-                    results.append(response.status_code)
+                    def query_jobs():
+                        response = client.get("/api/v1/jobs")
+                        with lock:
+                            results.append(response.status_code)
 
-            # Query 10 times concurrently
-            with ThreadPoolExecutor(max_workers=10) as executor:
-                executor.map(lambda _: query_jobs(), range(10))
+                    # Query 10 times concurrently
+                    with ThreadPoolExecutor(max_workers=10) as executor:
+                        executor.map(lambda _: query_jobs(), range(10))
 
             # All should succeed
             assert all(status == 200 for status in results)
         finally:
+            self._stop_scheduler_thread()
             app.dependency_overrides.clear()
             db_module.engine = original_engine
             db_module.SessionLocal = original_session_local
