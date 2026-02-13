@@ -23,6 +23,8 @@ from frontend.services import (
 )
 from frontend.utils import SessionState, sanitize_compound_name
 from frontend.ui.components import render_2d_structure, embed_structure_viewer, render_structure_viewer_hint
+from frontend.ui.components.charts import get_plotly_theme
+from frontend.ui.components.plotly_legend import plotly_legend_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -813,10 +815,12 @@ def _render_activity_analysis(df: pd.DataFrame) -> None:
 
     with col2:
         # Larger pie chart with legend
+        theme = get_plotly_theme()
         fig = px.pie(counts, values='Count', names='Type', hole=0.4,
                      color_discrete_sequence=px.colors.qualitative.Set2)
         fig.update_layout(
             title=dict(text='Bioactivity Distribution', subtitle=dict(text=f'{len(counts)} activity types')),
+            template=theme["template"],
             margin=dict(t=55, b=30, l=30, r=30),
             height=370,
             showlegend=True,
@@ -826,7 +830,10 @@ def _render_activity_analysis(df: pd.DataFrame) -> None:
                 y=0.5,
                 xanchor="left",
                 x=1.02,
-                title_text="Activity Types"
+                title_text="Activity Types",
+                bgcolor=theme["legend_bgcolor"],
+                bordercolor=theme["legend_bordercolor"],
+                borderwidth=1
             )
         )
         fig.update_traces(textposition='inside', textinfo='percent+label')
@@ -946,12 +953,13 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
                 hover_data=['ChEMBL_ID', 'Molecule_Name'] if all(c in plot_df.columns for c in ['ChEMBL_ID', 'Molecule_Name']) else None,
                 custom_data=customdata_cols
             )
+            theme = get_plotly_theme()
             fig.update_layout(
                 title=dict(text=f'{metric_choice} Distribution', subtitle=dict(text=f'Grouped by {color_by}')),
+                template=theme["template"],
                 height=470,
                 margin=dict(t=55, b=80, r=10),
                 xaxis_tickangle=-45,
-                # Vertical legend on right side, inside chart area
                 legend=dict(
                     orientation="v",
                     yanchor="top",
@@ -959,8 +967,8 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
                     xanchor="left",
                     x=1.02,
                     title_text="",
-                    bgcolor="rgba(255,255,255,0.8)",
-                    bordercolor="rgba(0,0,0,0.1)",
+                    bgcolor=theme["legend_bgcolor"],
+                    bordercolor=theme["legend_bordercolor"],
                     borderwidth=1
                 )
             )
@@ -1929,9 +1937,10 @@ def _plot_activity_distribution(df: pd.DataFrame) -> None:
         hover_data=['ChEMBL_ID', 'Molecule_Name'] if all(c in plot_df.columns for c in ['ChEMBL_ID', 'Molecule_Name']) else None,
         custom_data=customdata_cols if customdata_cols else None
     )
+    theme = get_plotly_theme()
     fig.update_layout(
         title=dict(text='Bioactivity Distribution', subtitle=dict(text='pActivity = -log10(M) — higher = more potent')),
-        template='plotly_white',
+        template=theme["template"],
         height=520,
         showlegend=True,
         yaxis=dict(exponentformat="SI"),
@@ -1942,8 +1951,8 @@ def _plot_activity_distribution(df: pd.DataFrame) -> None:
             xanchor="left",
             x=1.02,
             title_text="",
-            bgcolor="rgba(255,255,255,0.8)",
-            bordercolor="rgba(0,0,0,0.1)",
+            bgcolor=theme["legend_bgcolor"],
+            bordercolor=theme["legend_bordercolor"],
             borderwidth=1
         )
     )
@@ -2031,31 +2040,7 @@ def _plot_efficiency_scatter(df: pd.DataFrame) -> None:
         st.warning("No valid data for plotting")
         return
 
-    # Show R² and regression statistics at TOP (before chart) if trendline is enabled
-    if show_trendline:
-        try:
-            x_vals = plot_df[x_col].values
-            y_vals = plot_df[y_col].values
-            slope, intercept, r_value, p_value, std_err = scipy_stats.linregress(x_vals, y_vals)
-            r_squared = r_value ** 2
-
-            # Display stats at top in a compact row
-            stats_cols = st.columns([1, 1, 1, 1, 2])
-            with stats_cols[0]:
-                st.metric("R²", f"{r_squared:.4f}")
-            with stats_cols[1]:
-                st.metric("Slope", f"{slope:.4f}")
-            with stats_cols[2]:
-                st.metric("Intercept", f"{intercept:.4f}")
-            with stats_cols[3]:
-                st.metric("p-value", f"{p_value:.2e}")
-            with stats_cols[4]:
-                # Show equation inline
-                sign = "+" if intercept >= 0 else ""
-                st.markdown("**Equation:**")
-                st.caption(f"{y_col} = {slope:.4f} × {x_col} {sign} {intercept:.4f}")
-        except Exception as e:
-            st.caption(f"Could not calculate regression stats: {e}")
+    is_categorical_color = color_by != "None" and color_by not in numeric_cols
 
     # Build customdata for structure viewer (SMILES first, then name, then index)
     if 'SMILES' in plot_df.columns:
@@ -2081,6 +2066,10 @@ def _plot_efficiency_scatter(df: pd.DataFrame) -> None:
     if customdata_cols:
         scatter_args['custom_data'] = customdata_cols
 
+    # Trendline (per-group when colored, single when not)
+    if show_trendline:
+        scatter_args['trendline'] = "ols"
+
     # Color handling
     if color_by != "None":
         scatter_args['color'] = color_by
@@ -2092,20 +2081,18 @@ def _plot_efficiency_scatter(df: pd.DataFrame) -> None:
         scatter_args['size'] = size_by
         scatter_args['size_max'] = point_size * 2
 
-    # Trendline
-    if show_trendline:
-        scatter_args['trendline'] = "ols"
-
     fig = px.scatter(plot_df, **scatter_args)
 
     # Update marker size if no size_by
     if size_by == "None":
         fig.update_traces(marker=dict(size=point_size))
 
-    # Layout
+    # Layout with meta for legend monitor identification
+    theme = get_plotly_theme()
     fig.update_layout(
-        template='plotly_white',
+        template=theme["template"],
         height=520,
+        meta="eff_scatter",
         showlegend=color_by != "None" and not is_numeric_color,
         legend=dict(
             orientation="v",
@@ -2114,17 +2101,32 @@ def _plot_efficiency_scatter(df: pd.DataFrame) -> None:
             xanchor="left",
             x=1.02,
             title_text="",
-            bgcolor="rgba(255,255,255,0.8)",
-            bordercolor="rgba(0,0,0,0.1)",
+            bgcolor=theme["legend_bgcolor"],
+            bordercolor=theme["legend_bordercolor"],
             borderwidth=1
         )
     )
 
-    st.plotly_chart(fig, width='stretch', height=400, key="efficiency_scatter_chart")
+    # Interactive stats bar above chart — computes regression client-side
+    # via jStat, updates instantly on legend clicks (no Python round-trip).
+    # JS polls for the chart so it's safe to render before st.plotly_chart().
+    if show_trendline and len(plot_df) >= 2:
+        x_vals = plot_df[x_col].values
+        y_vals = plot_df[y_col].values
+        slope, intercept, r_value, p_value, std_err = scipy_stats.linregress(x_vals, y_vals)
+        initial = {"r2": r_value ** 2, "slope": slope, "intercept": intercept,
+                   "p": p_value, "n": int(len(x_vals))}
+        plotly_legend_monitor(
+            chart_meta="eff_scatter",
+            key=f"eff_legend_{color_by}",
+            initial_stats=initial,
+            x_col=x_col,
+            y_col=y_col,
+        )
+        if is_categorical_color:
+            st.caption("Click legend items to show/hide groups — stats update instantly.")
 
-    # Hints
-    if color_by != "None" and not is_numeric_color:
-        st.caption("💡 **Click legend items** to show/hide groups. Double-click to isolate.")
+    st.plotly_chart(fig, width='stretch', key="efficiency_scatter_chart")
 
     # Embed structure viewer for click-to-view molecules
     if 'SMILES' in plot_df.columns:
@@ -2219,19 +2221,23 @@ def _plot_custom(df: pd.DataFrame) -> None:
             show_trendline = False
 
     with ctrl_row2[1]:
-        if plot_type in ["Scatter"]:
+        if plot_type == "Scatter":
+            size_by = st.selectbox("Size by", ["None"] + numeric_cols + categorical_cols, key="custom_size_by")
+        elif plot_type == "Histogram":
+            nbins = st.slider("Bins", 10, 50, 30, key="custom_bins")
+            size_by = "None"
+        else:
+            size_by = "None"
+            nbins = 30
+
+    with ctrl_row2[2]:
+        if plot_type == "Scatter":
             point_size = st.slider("Point Size", 3, 15, 8, key="custom_size")
         else:
             point_size = 8
 
-    with ctrl_row2[2]:
-        opacity = st.slider("Opacity", 0.1, 1.0, 0.7, key="custom_opacity")
-
     with ctrl_row2[3]:
-        if plot_type == "Histogram":
-            nbins = st.slider("Bins", 10, 50, 30, key="custom_bins")
-        else:
-            nbins = 30
+        opacity = st.slider("Opacity", 0.1, 1.0, 0.7, key="custom_opacity")
 
     st.markdown("---")
 
@@ -2245,30 +2251,7 @@ def _plot_custom(df: pd.DataFrame) -> None:
         st.warning("No valid data for selected columns")
         return
 
-    # Show R² at TOP (before chart) if trendline is enabled for scatter
-    if plot_type == "Scatter" and show_trendline and y_axis:
-        try:
-            x_vals = plot_df[x_axis].values
-            y_vals = plot_df[y_axis].values
-            slope, intercept, r_value, p_value, std_err = scipy_stats.linregress(x_vals, y_vals)
-            r_squared = r_value ** 2
-
-            # Display stats at top in a compact row
-            stats_cols = st.columns([1, 1, 1, 1, 2])
-            with stats_cols[0]:
-                st.metric("R²", f"{r_squared:.4f}")
-            with stats_cols[1]:
-                st.metric("Slope", f"{slope:.4f}")
-            with stats_cols[2]:
-                st.metric("Intercept", f"{intercept:.4f}")
-            with stats_cols[3]:
-                st.metric("p-value", f"{p_value:.2e}")
-            with stats_cols[4]:
-                sign = "+" if intercept >= 0 else ""
-                st.markdown("**Equation:**")
-                st.caption(f"{y_axis} = {slope:.4f} × {x_axis} {sign} {intercept:.4f}")
-        except Exception as e:
-            st.caption(f"Could not calculate regression stats: {e}")
+    is_custom_categorical = color_by != "None" and color_by in categorical_cols
 
     # Build customdata for structure viewer (for scatter plots)
     customdata_cols = None
@@ -2282,15 +2265,25 @@ def _plot_custom(df: pd.DataFrame) -> None:
     # Create plot based on type
     try:
         if plot_type == "Scatter":
-            fig = px.scatter(
-                plot_df, x=x_axis, y=y_axis,
+            scatter_kw = dict(
+                x=x_axis, y=y_axis,
                 color=color_by if color_by != "None" else None,
                 hover_data=['ChEMBL_ID', 'Molecule_Name'] if all(c in plot_df.columns for c in ['ChEMBL_ID', 'Molecule_Name']) else None,
-                opacity=opacity,
                 trendline="ols" if show_trendline else None,
-                custom_data=customdata_cols
+                opacity=opacity,
+                custom_data=customdata_cols,
             )
-            fig.update_traces(marker=dict(size=point_size))
+            if size_by != "None" and size_by in plot_df.columns:
+                if size_by in categorical_cols:
+                    # Convert categorical → group frequency for sizing
+                    plot_df['_size_num'] = plot_df.groupby(size_by)[size_by].transform('count')
+                    scatter_kw['size'] = '_size_num'
+                else:
+                    scatter_kw['size'] = size_by
+                scatter_kw['size_max'] = point_size * 2
+            fig = px.scatter(plot_df, **scatter_kw)
+            if size_by == "None":
+                fig.update_traces(marker=dict(size=point_size))
 
         elif plot_type == "Box":
             # Build customdata for box plots too
@@ -2333,10 +2326,12 @@ def _plot_custom(df: pd.DataFrame) -> None:
                 nbins=nbins, opacity=opacity
             )
 
-        # Common layout updates
+        # Common layout updates with meta for legend monitor
+        theme = get_plotly_theme()
         fig.update_layout(
-            template='plotly_white',
+            template=theme["template"],
             height=550,
+            meta="custom_scatter",
             showlegend=color_by != "None",
             legend=dict(
                 orientation="v",
@@ -2345,16 +2340,30 @@ def _plot_custom(df: pd.DataFrame) -> None:
                 xanchor="left",
                 x=1.02,
                 title_text="",
-                bgcolor="rgba(255,255,255,0.8)",
-                bordercolor="rgba(0,0,0,0.1)",
+                bgcolor=theme["legend_bgcolor"],
+                bordercolor=theme["legend_bordercolor"],
                 borderwidth=1
             )
         )
 
-        st.plotly_chart(fig, width='stretch', height=400, key="custom_plot_chart")
+        # Interactive stats bar above chart
+        if plot_type == "Scatter" and show_trendline and y_axis and len(plot_df) >= 2:
+            x_vals = plot_df[x_axis].values
+            y_vals = plot_df[y_axis].values
+            slope, intercept, r_value, p_value, std_err = scipy_stats.linregress(x_vals, y_vals)
+            initial = {"r2": r_value ** 2, "slope": slope, "intercept": intercept,
+                       "p": p_value, "n": int(len(x_vals))}
+            plotly_legend_monitor(
+                chart_meta="custom_scatter",
+                key=f"custom_legend_{color_by}",
+                initial_stats=initial,
+                x_col=x_axis,
+                y_col=y_axis,
+            )
+            if is_custom_categorical:
+                st.caption("Click legend items to show/hide groups — stats update instantly.")
 
-        if color_by != "None":
-            st.caption("💡 **Click legend items** to show/hide groups. Double-click to isolate.")
+        st.plotly_chart(fig, width='stretch', key="custom_plot_chart")
 
         # Embed structure viewer for click-to-view molecules (for scatter, box, violin)
         if plot_type in ["Scatter", "Box", "Violin"] and 'SMILES' in plot_df.columns:
@@ -4416,8 +4425,10 @@ def _create_html_bioactivity_donut(df: pd.DataFrame) -> str:
         hole=0.4,
         color_discrete_sequence=px.colors.qualitative.Set2
     )
+    theme = get_plotly_theme()
     fig.update_traces(textposition='inside', textinfo='percent+label')
     fig.update_layout(
+        template=theme["template"],
         height=400,
         margin=dict(t=30, b=30, l=30, r=30),
         showlegend=True
@@ -4526,8 +4537,9 @@ def _create_html_efficiency_scatter(df: pd.DataFrame) -> str:
         hovertemplate=f'Mean SEI: {mean_sei:.2f}<br>Mean BEI: {mean_bei:.2f}<br>Angle: {mean_angle:.1f}°<br>Modulus: {mean_modulus:.2f}<extra></extra>'
     ))
 
+    theme = get_plotly_theme()
     fig.update_layout(
-        template='plotly_white',
+        template=theme["template"],
         height=600,
         margin=dict(t=40, b=50, l=60, r=30),
         xaxis=dict(
@@ -4545,7 +4557,12 @@ def _create_html_efficiency_scatter(df: pd.DataFrame) -> str:
             constrain="domain"
         ),
         showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+            bgcolor=theme["legend_bgcolor"],
+            bordercolor=theme["legend_bordercolor"],
+            borderwidth=1
+        )
     )
 
     return _export_plotly_to_base64(fig, 900, 600)

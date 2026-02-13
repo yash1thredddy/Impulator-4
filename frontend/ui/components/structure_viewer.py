@@ -36,14 +36,14 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
     (function() {{
         'use strict';
         
-        console.log('[Structure Viewer {chart_id}] Initializing component...');
+        console.debug('[Structure Viewer {chart_id}] Initializing component...');
         
         const parentDoc = window.parent.document;
         const parentWin = window.parent;
         
         // Load SmilesDrawer from CDN if not already loaded
         if (typeof parentWin.SmilesDrawer === 'undefined') {{
-            console.log('[Structure Viewer {chart_id}] Loading SmilesDrawer from jsDelivr CDN...');
+            console.debug('[Structure Viewer {chart_id}] Loading SmilesDrawer from jsDelivr CDN...');
             const script = parentDoc.createElement('script');
             // Use jsDelivr CDN which is less likely to be blocked by tracking prevention
             
@@ -63,7 +63,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
             // Revisit: Q1 2026 or when official migration guide is available
             script.src = 'https://cdn.jsdelivr.net/npm/smiles-drawer@2.0.1/dist/smiles-drawer.min.js';
             script.onload = function() {{
-                console.log('[Structure Viewer {chart_id}] ✅ SmilesDrawer v2.0.1 loaded successfully from jsDelivr');
+                console.debug('[Structure Viewer {chart_id}] ✅ SmilesDrawer v2.0.1 loaded successfully from jsDelivr');
                 initViewer();
             }};
             script.onerror = function(err) {{
@@ -72,7 +72,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
             }};
             parentDoc.head.appendChild(script);
         }} else {{
-            console.log('[Structure Viewer {chart_id}] SmilesDrawer already loaded');
+            console.debug('[Structure Viewer {chart_id}] SmilesDrawer already loaded');
             initViewer();
         }}
         
@@ -259,7 +259,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                     }}
                 `;
                 parentDoc.head.appendChild(style);
-                console.log('[Structure Viewer {chart_id}] ✅ Style injected');
+                console.debug('[Structure Viewer {chart_id}] ✅ Style injected');
             }}
             
             // Inject panel HTML into parent document
@@ -290,9 +290,9 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                 const panelContainer = parentDoc.createElement('div');
                 panelContainer.innerHTML = panelHTML;
                 parentDoc.body.appendChild(panelContainer.firstElementChild);
-                console.log('[Structure Viewer {chart_id}] ✅ Panel injected into parent document');
+                console.debug('[Structure Viewer {chart_id}] ✅ Panel injected into parent document');
             }} else {{
-                console.log('[Structure Viewer {chart_id}] Panel already exists');
+                console.debug('[Structure Viewer {chart_id}] Panel already exists');
             }}
             
             // Get references to panel elements
@@ -306,12 +306,12 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                 return;
             }}
             
-            console.log('[Structure Viewer {chart_id}] ✅ Panel elements ready');
+            console.debug('[Structure Viewer {chart_id}] ✅ Panel elements ready');
             
             // Initialize SmilesDrawer
             let drawer = null;
             if (typeof parentWin.SmilesDrawer !== 'undefined') {{
-                console.log('[Structure Viewer {chart_id}] SmilesDrawer object:', Object.keys(parentWin.SmilesDrawer));
+                console.debug('[Structure Viewer {chart_id}] SmilesDrawer object:', Object.keys(parentWin.SmilesDrawer));
                 
                 // v2.0.1 uses SmilesDrawer.Drawer constructor
                 // Note: v2.1.7+ may use different constructor name
@@ -323,7 +323,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                         fontFamily: 'Arial, sans-serif',
                         fontSize: 12
                     }});
-                    console.log('[Structure Viewer {chart_id}] ✅ SmilesDrawer v2.0.1 initialized');
+                    console.debug('[Structure Viewer {chart_id}] ✅ SmilesDrawer v2.0.1 initialized');
                 }} else {{
                     console.error('[Structure Viewer {chart_id}] ❌ Drawer constructor not found');
                     console.error('[Structure Viewer {chart_id}] Available constructors:', Object.keys(parentWin.SmilesDrawer));
@@ -339,7 +339,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                 e.preventDefault();
                 e.stopPropagation();
                 panel.classList.remove('open');
-                console.log('[Structure Viewer {chart_id}] Panel closed');
+                console.debug('[Structure Viewer {chart_id}] Panel closed');
                 return false;
             }};
 
@@ -418,12 +418,12 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                 }}
 
                 if (ourIframe) {{
-                    console.log('[Structure Viewer {chart_id}] Found our iframe');
+                    console.debug('[Structure Viewer {chart_id}] Found our iframe');
 
                     // Find all Plotly charts on the page
                     const allCharts = Array.from(parentDoc.querySelectorAll('.js-plotly-plot'));
                     if (allCharts.length === 0) {{
-                        console.log('[Structure Viewer {chart_id}] No Plotly charts found on page');
+                        console.debug('[Structure Viewer {chart_id}] No Plotly charts found on page');
                         return null;
                     }}
 
@@ -455,10 +455,10 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                             closestChart._fullData[0].customdata.length > 0;
 
                         if (hasCustomData) {{
-                            console.log('[Structure Viewer {chart_id}] Found chart via position (distance: ' + closestDistance + 'px) with customdata');
+                            console.debug('[Structure Viewer {chart_id}] Found chart via position (distance: ' + closestDistance + 'px) with customdata');
                             return closestChart;
                         }} else {{
-                            console.log('[Structure Viewer {chart_id}] Chart found by position has no customdata, checking others...');
+                            console.debug('[Structure Viewer {chart_id}] Chart found by position has no customdata, checking others...');
                         }}
                     }}
 
@@ -469,7 +469,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                         while (sibling) {{
                             const plotlyDiv = sibling.querySelector('.js-plotly-plot');
                             if (plotlyDiv) {{
-                                console.log('[Structure Viewer {chart_id}] Found chart via sibling walk');
+                                console.debug('[Structure Viewer {chart_id}] Found chart via sibling walk');
                                 return plotlyDiv;
                             }}
                             sibling = sibling.previousElementSibling;
@@ -481,7 +481,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                             while (sibling) {{
                                 const plotlyDiv = sibling.querySelector('.js-plotly-plot');
                                 if (plotlyDiv) {{
-                                    console.log('[Structure Viewer {chart_id}] Found chart via parent sibling walk');
+                                    console.debug('[Structure Viewer {chart_id}] Found chart via parent sibling walk');
                                     return plotlyDiv;
                                 }}
                                 sibling = sibling.previousElementSibling;
@@ -515,7 +515,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                     if (found) {{
                         const plotlyDiv = container.querySelector('.js-plotly-plot');
                         if (plotlyDiv) {{
-                            console.log('[Structure Viewer {chart_id}] Found chart by key:', chartKey);
+                            console.debug('[Structure Viewer {chart_id}] Found chart by key:', chartKey);
                             return plotlyDiv;
                         }}
                     }}
@@ -529,7 +529,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                     if (!hasAnyViewer) {{
                         // Check if it has customdata (indicating it was set up for structure viewing)
                         if (div._fullData && div._fullData[0] && div._fullData[0].customdata) {{
-                            console.log('[Structure Viewer {chart_id}] Found unattached chart with customdata');
+                            console.debug('[Structure Viewer {chart_id}] Found unattached chart with customdata');
                             return div;
                         }}
                     }}
@@ -571,12 +571,12 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                 }}
                 
                 if (plotlyDiv._structureViewerAttached_{chart_id}) {{
-                    console.log('[Structure Viewer {chart_id}] Listener already attached');
+                    console.debug('[Structure Viewer {chart_id}] Listener already attached');
                     return;
                 }}
                 plotlyDiv._structureViewerAttached_{chart_id} = true;
                 
-                console.log('[Structure Viewer {chart_id}] ✅ Attaching click listener');
+                console.debug('[Structure Viewer {chart_id}] ✅ Attaching click listener');
                 
                 // Track last mouse position for positioning the popup
                 let lastClickX = 0;
@@ -590,7 +590,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
 
                 // Listen for Plotly click events
                 plotlyDiv.on('plotly_click', function(data) {{
-                    console.log('[Structure Viewer {chart_id}] 🖱️ Click detected!', data);
+                    console.debug('[Structure Viewer {chart_id}] 🖱️ Click detected!', data);
 
                     if (!data.points || data.points.length === 0) {{
                         console.warn('[Structure Viewer {chart_id}] No points in click data');
@@ -598,7 +598,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                     }}
 
                     const point = data.points[0];
-                    console.log('[Structure Viewer {chart_id}] Point data:', point);
+                    console.debug('[Structure Viewer {chart_id}] Point data:', point);
 
                     // Extract data from customdata
                     // Format can be: [SMILES, name, index] or [SMILES, index]
@@ -607,7 +607,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                     let pointIndex = null;
 
                     if (point.customdata) {{
-                        console.log('[Structure Viewer {chart_id}] customdata:', point.customdata);
+                        console.debug('[Structure Viewer {chart_id}] customdata:', point.customdata);
                         smiles = point.customdata[0];
 
                         // Check format: if length is 3, we have [SMILES, name, index]
@@ -635,7 +635,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                         return;
                     }}
 
-                    console.log('[Structure Viewer {chart_id}] Rendering SMILES:', smiles, 'Name:', moleculeName);
+                    console.debug('[Structure Viewer {chart_id}] Rendering SMILES:', smiles, 'Name:', moleculeName);
 
                     // Pass column names for display
                     const columnNames = {{
@@ -648,7 +648,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                     renderStructure(smiles, moleculeName, pointIndex, point, columnNames, lastClickX, lastClickY);
                 }});
                 
-                console.log('[Structure Viewer {chart_id}] ✅ Click listener attached successfully');
+                console.debug('[Structure Viewer {chart_id}] ✅ Click listener attached successfully');
             }}
 
             // Position panel near the clicked point
@@ -689,12 +689,12 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                 panel.style.top = top + 'px';
                 panel.style.right = 'auto';
 
-                console.log('[Structure Viewer {chart_id}] Positioned panel at:', left, top, 'from click:', clickX, clickY);
+                console.debug('[Structure Viewer {chart_id}] Positioned panel at:', left, top, 'from click:', clickX, clickY);
             }}
 
             // Render molecular structure
             function renderStructure(smiles, moleculeName, pointIndex, pointData, columnNames, clickX, clickY) {{
-                console.log('[Structure Viewer {chart_id}] renderStructure called for:', smiles);
+                console.debug('[Structure Viewer {chart_id}] renderStructure called for:', smiles);
 
                 // Position panel near the click point
                 positionPanelNearClick(clickX || 100, clickY || 100);
@@ -723,7 +723,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                             return;
                         }}
                         
-                        console.log('[Structure Viewer {chart_id}] SMILES parsed, drawing...');
+                        console.debug('[Structure Viewer {chart_id}] SMILES parsed, drawing...');
                         
                         // Clear canvas
                         const ctx = canvas.getContext('2d');
@@ -732,7 +732,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                         // Draw structure
                         drawer.draw(tree, canvas, 'light', false);
                         
-                        console.log('[Structure Viewer {chart_id}] ✅ Structure drawn');
+                        console.debug('[Structure Viewer {chart_id}] ✅ Structure drawn');
 
                         // Update molecule title section (prominent display of name and ChEMBL ID)
                         if (moleculeName !== null && moleculeName !== undefined && moleculeName !== '') {{
@@ -911,7 +911,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                 debounceTimer = setTimeout(() => {{
                     const plotlyDiv = findPlotlyChart();
                     if (plotlyDiv && !plotlyDiv._structureViewerAttached_{chart_id}) {{
-                        console.log('[Structure Viewer {chart_id}] Detected plot update, re-attaching');
+                        console.debug('[Structure Viewer {chart_id}] Detected plot update, re-attaching');
                         attachClickListener();
                     }}
                 }}, 100);  // 100ms debounce
@@ -920,7 +920,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
             const container = parentDoc.querySelector('[data-testid="stAppViewContainer"]');
             if (container) {{
                 observer.observe(container, {{ childList: true, subtree: true }});
-                console.log('[Structure Viewer {chart_id}] ✅ Mutation observer active');
+                console.debug('[Structure Viewer {chart_id}] ✅ Mutation observer active');
             }}
         }}
     }})();
