@@ -16,6 +16,8 @@ import sys
 import time
 import logging
 
+import pytest
+
 from backend.modules.api_client import (
     # Main functions (library with REST fallback)
     get_chembl_ids,
@@ -37,6 +39,10 @@ from backend.modules.api_client import (
     rest_api_fetch_activities,
     rest_api_fetch_drug_indications_batch,
 )
+
+# This module performs live ChEMBL network calls and can be long-running.
+# CI excludes `network` tests by marker.
+pytestmark = [pytest.mark.network, pytest.mark.slow]
 
 # Configure logging
 logging.basicConfig(
