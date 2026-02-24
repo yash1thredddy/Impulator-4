@@ -40,7 +40,7 @@ PDB_SEARCH_URL = "https://search.rcsb.org/rcsbsearch/v2/query"
 PDB_DATA_URL = "https://data.rcsb.org/rest/v1/core"
 PDB_GRAPHQL_URL = "https://data.rcsb.org/graphql"
 CLASSYFIRE_URL = "http://classyfire.wishartlab.com/entities"  # HTTP only - no TLS support
-NPCLASSIFIER_URL = "https://npclassifier.ucsd.edu/classify"
+NPCLASSIFIER_URL = "https://npclassifier.gnps2.org/classify"
 
 # Timeouts per API (ChEMBL similarity is notoriously slow)
 TIMEOUT = 30                  # default

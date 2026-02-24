@@ -474,7 +474,7 @@ class ExternalAPITester:
         test_compound = TEST_COMPOUNDS["caffeine"]  # Known natural product
 
         # NPClassifier API endpoint
-        url = "https://npclassifier.ucsd.edu/classify"
+        url = "https://npclassifier.gnps2.org/classify"
 
         params = {
             "smiles": test_compound["smiles"]
