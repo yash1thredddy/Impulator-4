@@ -103,10 +103,9 @@ def get_npclassifier_classification(smiles: str, max_retries: int = 2) -> Option
     Get NPClassifier classification for natural products with retry logic.
 
     NPClassifier is a deep learning tool specialized for natural product classification.
-    API: https://npclassifier.gnps2.org/ (primary), https://npclassifier.ucsd.edu/ (fallback)
+    API: https://npclassifier.ucsd.edu/
 
     Includes retry logic for transient failures (timeouts, connection errors).
-    Uses GNPS2 stable endpoint as primary, with old UCSD endpoint as fallback.
 
     Args:
         smiles: SMILES string
@@ -121,65 +120,57 @@ def get_npclassifier_classification(smiles: str, max_retries: int = 2) -> Option
     """
     import time
 
-    urls = [
-        'https://npclassifier.gnps2.org/classify',   # Primary: GNPS2 stable endpoint
-        'https://npclassifier.ucsd.edu/classify',     # Fallback: original UCSD endpoint
-    ]
+    url = 'https://npclassifier.ucsd.edu/classify'
     params = {'smiles': smiles}
     smiles_preview = smiles[:50] + "..." if len(smiles) > 50 else smiles
 
-    for url_idx, url in enumerate(urls):
-        endpoint_label = "GNPS2" if url_idx == 0 else "UCSD-fallback"
-        retries = max_retries if url_idx == 0 else 1  # Full retries for primary, single attempt for fallback
+    for attempt in range(max_retries):
+        try:
+            response = session.get(url, params=params, timeout=API_TIMEOUT)
 
-        for attempt in range(retries):
-            try:
-                response = session.get(url, params=params, timeout=API_TIMEOUT)
+            if response.status_code == 200:
+                data = response.json()
 
-                if response.status_code == 200:
-                    data = response.json()
-
-                    # Extract first prediction for each level
-                    # NPClassifier returns arrays of predictions
-                    if url_idx > 0:
-                        logger.info(f"NPClassifier {endpoint_label} succeeded for SMILES: {smiles_preview}")
-                    return {
-                        'NP_Pathway': data.get('pathway_results', [None])[0] if data.get('pathway_results') else None,
-                        'NP_Superclass': data.get('superclass_results', [None])[0] if data.get('superclass_results') else None,
-                        'NP_Class': data.get('class_results', [None])[0] if data.get('class_results') else None,
-                        'NP_isglycoside': data.get('isglycoside', False)
-                    }
-                elif response.status_code in [500, 502, 503, 504]:
-                    if attempt < retries - 1:
-                        logger.warning(f"NPClassifier ({endpoint_label}) returned {response.status_code} (attempt {attempt + 1}), retrying...")
-                        time.sleep(1 * (attempt + 1))
-                        continue
-                    else:
-                        logger.warning(f"NPClassifier ({endpoint_label}) returned {response.status_code} after {retries} attempts")
-                        break  # Try next URL
-                else:
-                    logger.warning(f"NPClassifier ({endpoint_label}) returned status {response.status_code}")
-                    break  # Try next URL
-
-            except requests.exceptions.Timeout:
-                if attempt < retries - 1:
-                    logger.warning(f"NPClassifier ({endpoint_label}) timeout (attempt {attempt + 1}) for SMILES: {smiles_preview}")
+                # Extract first prediction for each level
+                # NPClassifier returns arrays of predictions
+                return {
+                    'NP_Pathway': data.get('pathway_results', [None])[0] if data.get('pathway_results') else None,
+                    'NP_Superclass': data.get('superclass_results', [None])[0] if data.get('superclass_results') else None,
+                    'NP_Class': data.get('class_results', [None])[0] if data.get('class_results') else None,
+                    'NP_isglycoside': data.get('isglycoside', False)
+                }
+            elif response.status_code in [500, 502, 503, 504]:
+                # Server error - retry
+                if attempt < max_retries - 1:
+                    logger.warning(f"NPClassifier returned {response.status_code} (attempt {attempt + 1}), retrying...")
                     time.sleep(1 * (attempt + 1))
+                    continue
                 else:
-                    logger.warning(f"NPClassifier ({endpoint_label}) timeout for SMILES: {smiles_preview} after {retries} attempts")
-                    break  # Try next URL
-            except requests.exceptions.ConnectionError:
-                if attempt < retries - 1:
-                    logger.warning(f"NPClassifier ({endpoint_label}) connection error (attempt {attempt + 1}) for SMILES: {smiles_preview}")
-                    time.sleep(1 * (attempt + 1))
-                else:
-                    logger.warning(f"NPClassifier ({endpoint_label}) connection error for SMILES: {smiles_preview} after {retries} attempts")
-                    break  # Try next URL
-            except Exception as e:
-                logger.error(f"NPClassifier ({endpoint_label}) error for SMILES: {str(e)}")
-                break  # Try next URL
+                    logger.error(f"NPClassifier returned {response.status_code} after {max_retries} attempts")
+                    return None
+            else:
+                # 4xx errors - don't retry
+                logger.warning(f"NPClassifier returned status {response.status_code}")
+                return None
 
-    logger.error(f"NPClassifier failed on all endpoints for SMILES: {smiles_preview}")
+        except requests.exceptions.Timeout:
+            if attempt < max_retries - 1:
+                logger.warning(f"NPClassifier timeout (attempt {attempt + 1}) for SMILES: {smiles_preview}")
+                time.sleep(1 * (attempt + 1))
+            else:
+                logger.error(f"NPClassifier timeout for SMILES: {smiles_preview} after {max_retries} attempts")
+                return None
+        except requests.exceptions.ConnectionError:
+            if attempt < max_retries - 1:
+                logger.warning(f"NPClassifier connection error (attempt {attempt + 1}) for SMILES: {smiles_preview}")
+                time.sleep(1 * (attempt + 1))
+            else:
+                logger.error(f"NPClassifier connection error for SMILES: {smiles_preview} after {max_retries} attempts")
+                return None
+        except Exception as e:
+            logger.error(f"NPClassifier error for SMILES: {str(e)}")
+            return None
+
     return None
 
 
