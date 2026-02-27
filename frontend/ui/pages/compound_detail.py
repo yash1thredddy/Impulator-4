@@ -1014,7 +1014,7 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
             st.markdown("<p style='font-size: 11px; font-weight: 600; margin-bottom: 2px;'>Groups</p>", unsafe_allow_html=True)
             group_counts = plot_df[color_by].value_counts()
             for grp, cnt in group_counts.head(6).items():
-                st.markdown(f"<p style='font-size: 10px; margin: 0; color: #666;'>{str(grp)[:12]}: {cnt}</p>", unsafe_allow_html=True)
+                st.markdown(f"<p style='font-size: 10px; margin: 0; color: var(--text-color); opacity: 0.6;'>{str(grp)[:12]}: {cnt}</p>", unsafe_allow_html=True)
 
     # Efficiency Metrics by Target table (after visualization)
     st.markdown("---")
@@ -1165,10 +1165,10 @@ def _render_pains_analysis(df: pd.DataFrame) -> None:
         status_color = '#ffa94d' if is_flagged else '#51cf66'
         escaped_help = html.escape(helptext)
         cards_html += f'''
-        <div title="{escaped_help}" style="flex:1;min-width:110px;background:#1e1e2e;border-left:4px solid {border_color};
+        <div title="{escaped_help}" style="flex:1;min-width:110px;background:var(--secondary-background-color);border-left:4px solid {border_color};
             border-radius:6px;padding:12px 10px;text-align:center;cursor:help;">
             <div style="font-size:1.8em;font-weight:bold;color:{count_color};">{count}</div>
-            <div style="font-size:0.9em;color:#ccc;margin:4px 0;font-weight:600;">{html.escape(name)}</div>
+            <div style="font-size:0.9em;color:var(--text-color);opacity:0.8;margin:4px 0;font-weight:600;">{html.escape(name)}</div>
             <div style="font-size:0.7em;color:{status_color};">{status_text}</div>
         </div>'''
     cards_html += '</div>'
@@ -1374,7 +1374,7 @@ def _render_imp_score_breakdown(df: pd.DataFrame) -> None:
         <div style="text-align: center; padding: 15px; background: linear-gradient(135deg, {score_color}22, {score_color}11); border-radius: 10px; border: 2px solid {score_color}; margin-bottom: 15px;">
             <h2 style="color: {score_color}; margin: 0; font-size: 2.5em;">{final_score:.3f}</h2>
             <p style="color: {score_color}; margin: 5px 0; font-size: 1.1em; font-weight: bold;">{classification}</p>
-            <p style="color: #666; margin: 0; font-size: 0.9em;">Priority: {priority} | Best scoring compound shown</p>
+            <p style="color: var(--text-color); opacity: 0.6; margin: 0; font-size: 0.9em;">Priority: {priority} | Best scoring compound shown</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -3315,7 +3315,7 @@ def _render_report_tab(data: Dict[str, Any]) -> None:
                 key="download_report_btn"
             )
         else:
-            st.markdown("<small style='color: #888;'>Click 'Generate' first</small>", unsafe_allow_html=True)
+            st.markdown("<small style='color: var(--text-color); opacity: 0.5;'>Click 'Generate' first</small>", unsafe_allow_html=True)
 
     with col3:
         st.info("💡 **Tip:** Generate the report, download the HTML, then use Ctrl+P to print to PDF")
@@ -3461,13 +3461,13 @@ def _render_report_executive_summary(df: pd.DataFrame, mean_score: float, mean_q
 
     # Use dark background with colored border and text for better contrast
     st.markdown(f"""
-    <div style="background-color: #1e1e1e; border-left: 5px solid {border_color}; padding: 15px; border-radius: 5px; margin-bottom: 15px;">
+    <div style="background-color: var(--secondary-background-color); border-left: 5px solid {border_color}; padding: 15px; border-radius: 5px; margin-bottom: 15px;">
         <h4 style="color: {border_color}; margin: 0 0 10px 0;">
             {warning_icon} {interpretation['label'].upper()} - {priority_text}
         </h4>
-        <p style="margin: 5px 0; color: #e0e0e0;"><strong style="color: #fff;">IMP Score:</strong> {mean_score:.3f} | <strong style="color: #fff;">QED:</strong> {mean_qed:.3f} | <strong style="color: #fff;">Red Flags:</strong> {red_flag_count} active</p>
-        <p style="margin: 5px 0; color: #e0e0e0;"><strong style="color: #fff;">Risk Level:</strong> {interpretation['risk']}</p>
-        <p style="margin: 5px 0; color: #e0e0e0;"><strong style="color: #fff;">Recommended Action:</strong> {interpretation['action']}</p>
+        <p style="margin: 5px 0; color: var(--text-color); opacity: 0.85;"><strong style="color: var(--text-color);">IMP Score:</strong> {mean_score:.3f} | <strong style="color: var(--text-color);">QED:</strong> {mean_qed:.3f} | <strong style="color: var(--text-color);">Red Flags:</strong> {red_flag_count} active</p>
+        <p style="margin: 5px 0; color: var(--text-color); opacity: 0.85;"><strong style="color: var(--text-color);">Risk Level:</strong> {interpretation['risk']}</p>
+        <p style="margin: 5px 0; color: var(--text-color); opacity: 0.85;"><strong style="color: var(--text-color);">Recommended Action:</strong> {interpretation['action']}</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -3505,14 +3505,20 @@ def _render_report_properties_table(df: pd.DataFrame) -> None:
     def get_val(col):
         return best_row.get(col) if col in best_row.index else None
 
+    # Compute 10PSA/MW if possible
+    tpsa_val = get_val('TPSA')
+    mw_val = get_val('Molecular_Weight')
+    psa_mw_ratio = (10 * tpsa_val / mw_val) if tpsa_val is not None and mw_val is not None and mw_val > 0 and not pd.isna(tpsa_val) and not pd.isna(mw_val) else None
+
     props = {
         "pActivity": (get_val('pActivity'), "-log10(IC50), higher = more potent"),
         "Molecular Weight": (get_val('Molecular_Weight'), "g/mol"),
         "PSA (TPSA)": (get_val('TPSA'), "Polar surface area (Å²)"),
         "Heavy Atoms": (get_val('Heavy_Atoms'), "Non-hydrogen atom count"),
-        "N+O Atoms (NPOL)": (get_val('NPOL'), "Heteroatom count"),
+        "N+O Atoms (NPOL)": (get_val('NPOL'), "Heteroatom count (Num of Polar Atoms)"),
         "QED": (get_val('QED'), "Drug-likeness (0-1)"),
         "LogP": (get_val('MolLogP') or get_val('LogP'), "Lipophilicity"),
+        "10PSA/MW": (psa_mw_ratio, "Compound Polarity vs Atom Fingerprint (= BEI/SEI)"),
     }
 
     # Create table
@@ -3626,19 +3632,19 @@ def _render_report_imp_score_calculation(df: pd.DataFrame) -> None:
 
         # Display as formatted text box (not code block to avoid scrolling)
         st.markdown(f"""
-<div style="background-color: #1e1e1e; padding: 15px; border-radius: 8px; font-family: monospace; white-space: pre-wrap;">
+<div style="background-color: var(--secondary-background-color); padding: 15px; border-radius: 8px; font-family: monospace; white-space: pre-wrap; color: var(--text-color);">
 <strong>Base Score</strong> = 0.45×Eff + 0.20×Dist + 0.15×Angle + 0.15×Interf + 0.05×PDB
-         = 0.45×<span style="color: #4ec9b0;">{eff_s:.3f}</span> + 0.20×<span style="color: #4ec9b0;">{dist_s:.3f}</span> + 0.15×<span style="color: #4ec9b0;">{ang_s:.3f}</span> + 0.15×<span style="color: #4ec9b0;">{int_s:.3f}</span> + 0.05×<span style="color: #4ec9b0;">{pdb_s:.3f}</span>
-         = <span style="color: #4ec9b0;">{base_score:.3f}</span>
+         = 0.45×<span style="color: #2ca02c; font-weight: bold;">{eff_s:.3f}</span> + 0.20×<span style="color: #2ca02c; font-weight: bold;">{dist_s:.3f}</span> + 0.15×<span style="color: #2ca02c; font-weight: bold;">{ang_s:.3f}</span> + 0.15×<span style="color: #2ca02c; font-weight: bold;">{int_s:.3f}</span> + 0.05×<span style="color: #2ca02c; font-weight: bold;">{pdb_s:.3f}</span>
+         = <span style="color: #2ca02c; font-weight: bold;">{base_score:.3f}</span>
 
-<strong>QED Value:</strong> <span style="color: #4ec9b0;">{qed:.3f}</span>
+<strong>QED Value:</strong> <span style="color: #2ca02c; font-weight: bold;">{qed:.3f}</span>
 <strong>QED Multiplier</strong> = 0.75 + 0.25 × QED
              = 0.75 + 0.25 × {qed:.3f}
-             = <span style="color: #4ec9b0;">{qed_mult:.3f}</span>
+             = <span style="color: #2ca02c; font-weight: bold;">{qed_mult:.3f}</span>
 
 <strong>FINAL SCORE</strong> = Base Score × QED Multiplier
             = {base_score:.3f} × {qed_mult:.3f}
-            = <span style="color: #dcdcaa; font-size: 1.2em;"><strong>{final_score:.3f}</strong></span>
+            = <span style="color: #e67e22; font-size: 1.2em;"><strong>{final_score:.3f}</strong></span>
 </div>
         """, unsafe_allow_html=True)
     else:
@@ -3678,18 +3684,15 @@ def _render_report_red_flags(df: pd.DataFrame) -> None:
     if total_flags == 0:
         overall = "LOW CONCERN - No red flags detected"
         overall_color = "#28a745"
-        overall_bg = "#d4edda"
     elif total_flags <= 5:
         overall = f"MODERATE CONCERN - {total_flags} flags detected"
-        overall_color = "#856404"
-        overall_bg = "#fff3cd"
+        overall_color = "#fd7e14"
     else:
         overall = f"HIGH CONCERN - {total_flags} flags detected"
-        overall_color = "#721c24"
-        overall_bg = "#f8d7da"
+        overall_color = "#dc3545"
 
     st.markdown(f"""
-    <div style="background-color: {overall_bg}; padding: 12px; border-radius: 5px; margin-bottom: 15px; border: 1px solid {overall_color};">
+    <div style="background-color: var(--secondary-background-color); padding: 12px; border-radius: 5px; margin-bottom: 15px; border-left: 4px solid {overall_color};">
         <strong style="color: {overall_color};">Overall Assessment: {overall}</strong>
     </div>
     """, unsafe_allow_html=True)
@@ -3700,17 +3703,17 @@ def _render_report_red_flags(df: pd.DataFrame) -> None:
         with cols[i]:
             if count > 0:
                 st.markdown(f"""
-                <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #dc3545;">
+                <div style="text-align: center; padding: 10px; background: var(--secondary-background-color); border-radius: 8px; border-left: 4px solid #dc3545;">
                     <div style="font-size: 1.5em; color: #dc3545; font-weight: bold;">{count}</div>
-                    <div style="color: #fff;">{name}</div>
+                    <div style="color: var(--text-color);">{name}</div>
                     <div style="font-size: 0.7em; color: #dc3545;">⚠️ Flagged</div>
                 </div>
                 """, unsafe_allow_html=True)
             else:
                 st.markdown(f"""
-                <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #28a745;">
+                <div style="text-align: center; padding: 10px; background: var(--secondary-background-color); border-radius: 8px; border-left: 4px solid #28a745;">
                     <div style="font-size: 1.5em; color: #28a745; font-weight: bold;">0</div>
-                    <div style="color: #fff;">{name}</div>
+                    <div style="color: var(--text-color);">{name}</div>
                     <div style="font-size: 0.7em; color: #28a745;">✓ Clean</div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -3806,11 +3809,11 @@ def _render_report_efficiency_boxplots(df: pd.DataFrame) -> None:
                 used_in_score = " ✓" if metric in ['SEI', 'BEI'] else ""
                 description = metric_descriptions.get(metric, metric)
                 st.markdown(f"""
-                <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid {metric_colors.get(metric, '#636EFA')};">
-                    <div style="color: #fff; font-size: 0.9em; margin-bottom: 5px;">{metric}{used_in_score}</div>
+                <div style="text-align: center; padding: 10px; background: var(--secondary-background-color); border-radius: 8px; border-left: 4px solid {metric_colors.get(metric, '#636EFA')};">
+                    <div style="color: var(--text-color); font-size: 0.9em; margin-bottom: 5px;">{metric}{used_in_score}</div>
                     <div style="font-size: 1.5em; color: {metric_colors.get(metric, '#636EFA')}; font-weight: bold;">{mean_val:.2f}</div>
-                    <div style="color: #aaa; font-size: 0.75em;">{description}</div>
-                    <div style="color: #888; font-size: 0.7em; margin-top: 3px;">Range: {vals.min():.1f}-{vals.max():.1f}</div>
+                    <div style="color: var(--text-color); opacity: 0.6; font-size: 0.75em;">{description}</div>
+                    <div style="color: var(--text-color); opacity: 0.5; font-size: 0.7em; margin-top: 3px;">Range: {vals.min():.1f}-{vals.max():.1f}</div>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -3904,19 +3907,16 @@ def _render_report_efficiency_plane(df: pd.DataFrame) -> None:
     if 40 <= mean_angle <= 50:
         angle_status = "OPTIMAL ✓"
         angle_color = "#28a745"
-        angle_bg = "#d4edda"
     elif 30 <= mean_angle < 40 or 50 < mean_angle <= 60:
         angle_status = "ACCEPTABLE"
-        angle_color = "#856404"
-        angle_bg = "#fff3cd"
+        angle_color = "#fd7e14"
     else:
         angle_status = "UNBALANCED ⚠️"
-        angle_color = "#721c24"
-        angle_bg = "#f8d7da"
+        angle_color = "#dc3545"
 
     # Display angle assessment banner
     st.markdown(f"""
-    <div style="background-color: {angle_bg}; padding: 12px; border-radius: 5px; margin-bottom: 15px; border: 1px solid {angle_color};">
+    <div style="background-color: var(--secondary-background-color); padding: 12px; border-radius: 5px; margin-bottom: 15px; border-left: 4px solid {angle_color};">
         <strong style="color: {angle_color};">Development Trajectory: {angle_status} (Angle: {mean_angle:.1f}°)</strong>
     </div>
     """, unsafe_allow_html=True)
@@ -4012,33 +4012,33 @@ def _render_report_efficiency_plane(df: pd.DataFrame) -> None:
     cols = st.columns(4)
     with cols[0]:
         st.markdown(f"""
-        <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #636EFA;">
+        <div style="text-align: center; padding: 10px; background: var(--secondary-background-color); border-radius: 8px; border-left: 4px solid #636EFA;">
             <div style="font-size: 1.2em; color: #636EFA; font-weight: bold;">{mean_angle:.1f}°</div>
-            <div style="color: #fff; font-size: 0.9em;">Mean Angle</div>
+            <div style="color: var(--text-color); font-size: 0.9em;">Mean Angle</div>
         </div>
         """, unsafe_allow_html=True)
 
     with cols[1]:
         st.markdown(f"""
-        <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #ff7f0e;">
+        <div style="text-align: center; padding: 10px; background: var(--secondary-background-color); border-radius: 8px; border-left: 4px solid #ff7f0e;">
             <div style="font-size: 1.2em; color: #ff7f0e; font-weight: bold;">{mean_modulus:.1f}</div>
-            <div style="color: #fff; font-size: 0.9em;">Mean Modulus</div>
+            <div style="color: var(--text-color); font-size: 0.9em;">Mean Modulus</div>
         </div>
         """, unsafe_allow_html=True)
 
     with cols[2]:
         st.markdown(f"""
-        <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #2ca02c;">
+        <div style="text-align: center; padding: 10px; background: var(--secondary-background-color); border-radius: 8px; border-left: 4px solid #2ca02c;">
             <div style="font-size: 1.2em; color: #2ca02c; font-weight: bold;">{mean_sei:.1f}</div>
-            <div style="color: #fff; font-size: 0.9em;">Mean SEI</div>
+            <div style="color: var(--text-color); font-size: 0.9em;">Mean SEI</div>
         </div>
         """, unsafe_allow_html=True)
 
     with cols[3]:
         st.markdown(f"""
-        <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #d62728;">
+        <div style="text-align: center; padding: 10px; background: var(--secondary-background-color); border-radius: 8px; border-left: 4px solid #d62728;">
             <div style="font-size: 1.2em; color: #d62728; font-weight: bold;">{mean_bei:.1f}</div>
-            <div style="color: #fff; font-size: 0.9em;">Mean BEI</div>
+            <div style="color: var(--text-color); font-size: 0.9em;">Mean BEI</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -4049,6 +4049,15 @@ def _render_report_efficiency_plane(df: pd.DataFrame) -> None:
     - **> 45°:** Compound favors **binding efficiency** (BEI) - efficient use of molecular weight
 
     **Note:** Most approved drugs have angles between 40-60°. The green dashed line shows the optimal 45° trajectory. The orange star marks the mean efficiency point.
+    """)
+
+    st.markdown("""
+    **10PSA/MW — Compound Polarity Fingerprint:**
+
+    The ratio 10PSA/MW is the fingerprint of the compound that corresponds to the profile of the binding pocket.
+
+    - **Polar pockets:** The most fitting compounds will have **high PSA/MW** — indicating a larger proportion of polar surface area relative to molecular weight.
+    - **Hydrophobic pockets:** The most fitting compounds will have **low PSA/MW** — indicating a compact, non-polar molecular profile.
     """)
 
     st.markdown("---")
@@ -4114,21 +4123,18 @@ def _render_report_pdb_evidence(df: pd.DataFrame, data: Dict[str, Any]) -> None:
     if mean_pdb_score >= 0.7:
         confidence = "HIGH CONFIDENCE"
         conf_color = "#28a745"
-        conf_bg = "#d4edda"
         conf_icon = "✓"
     elif mean_pdb_score >= 0.4:
         confidence = "MEDIUM CONFIDENCE"
-        conf_color = "#856404"
-        conf_bg = "#fff3cd"
+        conf_color = "#fd7e14"
         conf_icon = "●"
     else:
         confidence = "LOW CONFIDENCE"
-        conf_color = "#721c24"
-        conf_bg = "#f8d7da"
+        conf_color = "#dc3545"
         conf_icon = "⚠️"
 
     st.markdown(f"""
-    <div style="background-color: {conf_bg}; padding: 12px; border-radius: 5px; margin-bottom: 15px; border: 1px solid {conf_color};">
+    <div style="background-color: var(--secondary-background-color); padding: 12px; border-radius: 5px; margin-bottom: 15px; border-left: 4px solid {conf_color};">
         <strong style="color: {conf_color};">{conf_icon} Structural Validation: {confidence} (PDB Score: {mean_pdb_score:.3f})</strong>
     </div>
     """, unsafe_allow_html=True)
@@ -4137,18 +4143,18 @@ def _render_report_pdb_evidence(df: pd.DataFrame, data: Dict[str, Any]) -> None:
     cols = st.columns(4)
     with cols[0]:
         st.markdown(f"""
-        <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #636EFA;">
+        <div style="text-align: center; padding: 10px; background: var(--secondary-background-color); border-radius: 8px; border-left: 4px solid #636EFA;">
             <div style="font-size: 1.5em; color: #636EFA; font-weight: bold;">{total_structures}</div>
-            <div style="color: #fff; font-size: 0.9em;">Total Structures</div>
+            <div style="color: var(--text-color); font-size: 0.9em;">Total Structures</div>
         </div>
         """, unsafe_allow_html=True)
 
     with cols[1]:
         star_display = '⭐⭐⭐' if high_quality > 0 else ''
         st.markdown(f"""
-        <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #28a745;">
+        <div style="text-align: center; padding: 10px; background: var(--secondary-background-color); border-radius: 8px; border-left: 4px solid #28a745;">
             <div style="font-size: 1.5em; color: #28a745; font-weight: bold;">{high_quality}</div>
-            <div style="color: #fff; font-size: 0.9em;">High Quality</div>
+            <div style="color: var(--text-color); font-size: 0.9em;">High Quality</div>
             <div style="color: #28a745; font-size: 0.8em;">{star_display}</div>
         </div>
         """, unsafe_allow_html=True)
@@ -4156,9 +4162,9 @@ def _render_report_pdb_evidence(df: pd.DataFrame, data: Dict[str, Any]) -> None:
     with cols[2]:
         star_display = '⭐⭐' if medium_quality > 0 else ''
         st.markdown(f"""
-        <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #ffc107;">
+        <div style="text-align: center; padding: 10px; background: var(--secondary-background-color); border-radius: 8px; border-left: 4px solid #ffc107;">
             <div style="font-size: 1.5em; color: #ffc107; font-weight: bold;">{medium_quality}</div>
-            <div style="color: #fff; font-size: 0.9em;">Medium Quality</div>
+            <div style="color: var(--text-color); font-size: 0.9em;">Medium Quality</div>
             <div style="color: #ffc107; font-size: 0.8em;">{star_display}</div>
         </div>
         """, unsafe_allow_html=True)
@@ -4166,9 +4172,9 @@ def _render_report_pdb_evidence(df: pd.DataFrame, data: Dict[str, Any]) -> None:
     with cols[3]:
         star_display = '⭐' if poor_quality > 0 else ''
         st.markdown(f"""
-        <div style="text-align: center; padding: 10px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #dc3545;">
+        <div style="text-align: center; padding: 10px; background: var(--secondary-background-color); border-radius: 8px; border-left: 4px solid #dc3545;">
             <div style="font-size: 1.5em; color: #dc3545; font-weight: bold;">{poor_quality}</div>
-            <div style="color: #fff; font-size: 0.9em;">Poor Quality</div>
+            <div style="color: var(--text-color); font-size: 0.9em;">Poor Quality</div>
             <div style="color: #dc3545; font-size: 0.8em;">{star_display}</div>
         </div>
         """, unsafe_allow_html=True)
@@ -4209,6 +4215,22 @@ def _render_report_pdb_evidence(df: pd.DataFrame, data: Dict[str, Any]) -> None:
             yaxis_title=""
         )
         st.plotly_chart(fig, width='stretch', key="report_pdb_quality")
+
+        # List high-quality PDB codes as clickable links
+        high_q_pdb_ids = []
+        if pdb_summary_df is not None and not pdb_summary_df.empty and 'PDB_ID' in pdb_summary_df.columns:
+            if 'Quality' in pdb_summary_df.columns:
+                high_q_pdb_ids = pdb_summary_df[pdb_summary_df['Quality'] == '***']['PDB_ID'].dropna().unique().tolist()
+            elif 'Resolution' in pdb_summary_df.columns:
+                res_col = pd.to_numeric(pdb_summary_df['Resolution'], errors='coerce')
+                high_q_pdb_ids = pdb_summary_df[res_col < 2.0]['PDB_ID'].dropna().unique().tolist()
+
+        if high_q_pdb_ids:
+            pdb_links = ", ".join(
+                f"[{pid}](https://www.rcsb.org/structure/{pid})"
+                for pid in sorted(high_q_pdb_ids)
+            )
+            st.markdown(f"**High-Quality PDB Structures (<2.0Å):** {pdb_links}")
 
         # Resolution Quality info box below
         st.markdown("""
@@ -4691,12 +4713,19 @@ def _generate_html_report(data: Dict[str, Any], df: pd.DataFrame) -> str:
             ('Molecular_Weight', 'Molecular Weight', 'g/mol'),
             ('TPSA', 'PSA (TPSA)', 'Å²'),
             ('Heavy_Atoms', 'Heavy Atoms', 'count'),
-            ('NPOL', 'N+O Atoms', 'count'),
+            ('NPOL', 'N+O Atoms (NPOL)', 'Heteroatom count (Num of Polar Atoms)'),
             ('QED', 'QED', 'Drug-likeness'),
         ]
         for col, label, unit in prop_cols:
             if col in best_row.index and not pd.isna(best_row[col]):
                 props_html += f"<tr><td>{label}</td><td>{best_row[col]:.3f}</td><td>{unit}</td></tr>"
+
+        # Add computed 10PSA/MW
+        tpsa_br = best_row['TPSA'] if 'TPSA' in best_row.index else None
+        mw_br = best_row['Molecular_Weight'] if 'Molecular_Weight' in best_row.index else None
+        if tpsa_br is not None and mw_br is not None and not pd.isna(tpsa_br) and not pd.isna(mw_br) and mw_br > 0:
+            psa_mw_val = 10 * tpsa_br / mw_br
+            props_html += f"<tr><td>10PSA/MW</td><td>{psa_mw_val:.3f}</td><td>Compound Polarity vs Atom Fingerprint (= BEI/SEI)</td></tr>"
 
     # Build efficiency metrics table from best compound
     efficiency_html = ""
@@ -4884,6 +4913,20 @@ def _generate_html_report(data: Dict[str, Any], df: pd.DataFrame) -> str:
     high_q_pct = (high_q / pdb_total * 100) if pdb_total > 0 else 0
     med_q_pct = (med_q / pdb_total * 100) if pdb_total > 0 else 0
     poor_q_pct = (poor_q / pdb_total * 100) if pdb_total > 0 else 0
+
+    # Extract high-quality PDB codes for clickable links
+    high_q_pdb_links_html = ""
+    if pdb_summary_df_html is not None and not pdb_summary_df_html.empty and 'PDB_ID' in pdb_summary_df_html.columns:
+        if 'Quality' in pdb_summary_df_html.columns:
+            hq_ids = pdb_summary_df_html[pdb_summary_df_html['Quality'] == '***']['PDB_ID'].dropna().unique().tolist()
+        elif 'Resolution' in pdb_summary_df_html.columns:
+            res_col = pd.to_numeric(pdb_summary_df_html['Resolution'], errors='coerce')
+            hq_ids = pdb_summary_df_html[res_col < 2.0]['PDB_ID'].dropna().unique().tolist()
+        else:
+            hq_ids = []
+        if hq_ids:
+            links = ", ".join(f'<a href="https://www.rcsb.org/structure/{pid}" target="_blank">{pid}</a>' for pid in sorted(hq_ids))
+            high_q_pdb_links_html = f'<p><strong>High-Quality PDB Structures (&lt;2.0Å):</strong> {links}</p>'
 
     # Classification - ClassyFire and NPClassifier
     classyfire_html = ""
@@ -5183,6 +5226,13 @@ def _generate_html_report(data: Dict[str, Any], df: pd.DataFrame) -> str:
         </div>
     </div>
 
+    <h3>10PSA/MW — Compound Polarity Fingerprint</h3>
+    <p>The ratio 10PSA/MW is the fingerprint of the compound that corresponds to the profile of the binding pocket.</p>
+    <ul>
+        <li><strong>Polar pockets:</strong> The most fitting compounds will have <strong>high PSA/MW</strong> — indicating a larger proportion of polar surface area relative to molecular weight.</li>
+        <li><strong>Hydrophobic pockets:</strong> The most fitting compounds will have <strong>low PSA/MW</strong> — indicating a compact, non-polar molecular profile.</li>
+    </ul>
+
     <!-- 10. PDB EVIDENCE -->
     <h2>🔬 PDB Structural Evidence</h2>
 
@@ -5219,6 +5269,8 @@ def _generate_html_report(data: Dict[str, Any], df: pd.DataFrame) -> str:
     <div style="margin-bottom: 20px;">
         {pdb_quality_chart_html}
     </div>
+
+    {high_q_pdb_links_html}
 
     <!-- Resolution Quality Info -->
     <div class="info">
