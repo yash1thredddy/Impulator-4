@@ -61,3 +61,11 @@ uploads/
 !README.md
 !IMP_Score.md
 !IMP_SCORING_METHODOLOGY.md
+
+# Scratch/experimental files
+IMP_Top_50 - Copy.csv
+quercetin_plots.html
+scripts/pubchemvsflow.py
+scripts/quercetin_d3_plots.py
+scripts/quercetin_targets.csv
+scripts/test_gnps2_endpoints.py
