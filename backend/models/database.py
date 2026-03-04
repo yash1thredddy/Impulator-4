@@ -110,6 +110,7 @@ class Compound(Base):
 
     # Summary statistics
     total_activities = Column(Integer, default=0)
+    similar_compounds = Column(Integer, default=0)  # Number of similar compounds found by ChEMBL search
     imp_candidates = Column(Integer, default=0)
     imp_score = Column(Float, nullable=True)
 
@@ -145,6 +146,7 @@ class Compound(Base):
             "is_duplicate": self.is_duplicate,
             "duplicate_of": self.duplicate_of,
             "total_activities": self.total_activities,
+            "similar_compounds": self.similar_compounds,
             "imp_candidates": self.imp_candidates,
             "imp_score": self.imp_score,
             "similarity_threshold": self.similarity_threshold,

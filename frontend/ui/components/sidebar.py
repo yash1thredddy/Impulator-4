@@ -123,65 +123,95 @@ def render_active_jobs_polling() -> None:
     """
     st.markdown("### Active Jobs")
 
-    active_jobs, has_active = _fetch_and_check_jobs()
+    active_jobs, has_active, failed_jobs = _fetch_and_check_jobs()
 
     if active_jobs is None:
         st.caption("Connection error")
+        _render_failed_jobs_section(failed_jobs)
         return
 
     if not active_jobs:
         st.caption("No active jobs")
-        # No jobs at all - stop polling
         stop_polling()
-        return
-
-    for job in active_jobs:
-        render_job_card(job)
-
-    if has_active:
-        st.caption(f"Polling every {config.JOB_POLL_INTERVAL_SECONDS}s")
     else:
-        # All jobs completed - stop polling
-        stop_polling()
-        st.success("✅ All jobs completed!")
-        # Add refresh button to update home page with new compounds
-        if st.button("🔄 Refresh Home", key="refresh_home_completed", width='stretch'):
-            SessionState.navigate_to_home()
-            st.rerun()
+        for job in active_jobs:
+            render_job_card(job)
+
+        if has_active:
+            st.caption(f"Polling every {config.JOB_POLL_INTERVAL_SECONDS}s")
+        else:
+            # All jobs completed - stop polling
+            stop_polling()
+            st.success("✅ All jobs completed!")
+            if st.button("🔄 Refresh Home", key="refresh_home_completed", width='stretch'):
+                SessionState.navigate_to_home()
+                st.rerun()
+
+    _render_failed_jobs_section(failed_jobs)
 
 
 def render_active_jobs_static() -> None:
     """Render active jobs section without polling.
 
-    Used when no jobs are active to avoid unnecessary API calls.
-    Does NOT fetch from backend - just shows "No active jobs".
-    Polling is started by the job submission flow, not by checking.
+    Does a single fetch so persistent failed jobs show in their own section.
+    Starts polling if active (pending/processing) jobs are discovered.
     """
     st.markdown("### Active Jobs")
-    st.caption("No active jobs")
+    active_jobs, has_active, failed_jobs = _fetch_and_check_jobs()
+
+    if active_jobs is None:
+        st.caption("Connection error")
+    elif not active_jobs:
+        st.caption("No active jobs")
+    elif has_active:
+        start_polling()
+        st.rerun()
+        return
+    else:
+        for job in active_jobs:
+            render_job_card(job)
+
+    _render_failed_jobs_section(failed_jobs)
 
 
 def _fetch_and_check_jobs():
     """Fetch active jobs and check if any are in progress.
 
-    Filters out jobs that have already been viewed by the user.
+    Separates failed jobs into their own list. Filters out viewed jobs
+    from active/completed (failed jobs are only dismissable via Remove).
 
     Returns:
-        Tuple of (jobs_list, has_active_jobs) or (None, False) on error
+        Tuple of (non_failed_jobs, has_active, failed_jobs)
+        or (None, False, []) on error
     """
     client = get_api_client()
     try:
-        active_jobs = client.get_active_jobs()
+        all_jobs = client.get_active_jobs()
 
-        # Filter out jobs that user has already viewed
+        # Separate failed jobs from active/completed
+        failed_jobs = [j for j in all_jobs if j.get('status') == 'failed']
+        non_failed = [j for j in all_jobs if j.get('status') != 'failed']
+
+        # Filter out viewed jobs (only applies to completed, not failed)
         viewed_ids = _get_viewed_jobs()
-        active_jobs = [j for j in active_jobs if j.get('id') not in viewed_ids]
+        non_failed = [j for j in non_failed if j.get('id') not in viewed_ids]
 
-        has_active = any(j.get('status') in ('pending', 'processing') for j in active_jobs)
-        return active_jobs, has_active
+        has_active = any(j.get('status') in ('pending', 'processing') for j in non_failed)
+        return non_failed, has_active, failed_jobs
     except Exception as e:
         logger.error(f"Failed to fetch active jobs: {e}")
-        return None, False
+        return None, False, []
+
+
+def _render_failed_jobs_section(failed_jobs: list) -> None:
+    """Render a separate 'Failed Jobs' section if any exist."""
+    dismissed = SessionState.get('dismissed_failed_jobs', set())
+    visible = [j for j in failed_jobs if j.get('id') not in dismissed]
+    if not visible:
+        return
+    st.markdown("### Failed Jobs")
+    for job in visible:
+        render_job_card(job)
 
 
 def render_job_card(job: Dict[str, Any]) -> None:
@@ -211,7 +241,11 @@ def render_job_card(job: Dict[str, Any]) -> None:
         elif status == 'completed':
             st.caption("Ready to view")
         elif status == 'failed':
-            st.caption("Processing failed")
+            error_msg = job.get('error_message', '')
+            if error_msg:
+                st.caption(f"Failed: {_truncate(error_msg, 45)}")
+            else:
+                st.caption("Processing failed")
 
         # Action buttons - use callbacks to avoid rerun issues in fragment
         if status in ('pending', 'processing'):
@@ -230,11 +264,11 @@ def render_job_card(job: Dict[str, Any]) -> None:
                 st.rerun()
         elif status == 'failed':
             st.button(
-                "Delete",
-                key=f"delete_{job_id}",
+                "Remove",
+                key=f"dismiss_{job_id}",
                 width='stretch',
-                on_click=_on_delete_job,
-                args=(job_id, entry_id)
+                on_click=_dismiss_failed_job,
+                args=(job_id,)
             )
 
 
@@ -266,10 +300,29 @@ def _on_cancel_job(job_id: str) -> None:
         if response.success:
             st.toast("Job cancelled")
         else:
-            st.toast(f"Failed: {response.error}", icon="")
+            st.toast(f"Failed: {response.error}", icon="⚠️")
     except Exception as e:
         logger.error(f"Error cancelling job {job_id}: {e}")
-        st.toast(f"Error: {e}", icon="")
+        st.toast(f"Error: {e}", icon="⚠️")
+
+
+def _dismiss_failed_job(job_id: str) -> None:
+    """Delete a failed job from the backend and hide from sidebar."""
+    client = get_api_client()
+    try:
+        response = client.delete_job(job_id)
+        if response.success:
+            st.toast("Failed job removed")
+        else:
+            logger.warning(f"Backend delete failed for job {job_id}: {response.error}")
+            st.toast(f"Remove failed: {response.error}", icon="⚠️")
+    except Exception as e:
+        logger.error(f"Error removing failed job {job_id}: {e}")
+        st.toast(f"Error: {e}", icon="⚠️")
+    # Always hide locally so the UI updates even if backend delete fails
+    dismissed = SessionState.get('dismissed_failed_jobs', set())
+    dismissed.add(job_id)
+    SessionState.set('dismissed_failed_jobs', dismissed)
 
 
 def _on_delete_job(job_id: str, entry_id: str = None) -> None:
@@ -291,10 +344,10 @@ def _on_delete_job(job_id: str, entry_id: str = None) -> None:
                 delete_from_cache(entry_id)
             st.toast("Job and results deleted")
         else:
-            st.toast(f"Failed: {response.error}", icon="")
+            st.toast(f"Failed: {response.error}", icon="⚠️")
     except Exception as e:
         logger.error(f"Error deleting job {job_id}: {e}")
-        st.toast(f"Error: {e}", icon="")
+        st.toast(f"Error: {e}", icon="⚠️")
 
 
 def _exit_select_mode() -> None:

@@ -155,6 +155,91 @@ async def list_compounds(
     }
 
 
+@router.get("/{entry_id}/versions")
+async def get_compound_versions(
+    entry_id: str,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Get all structural siblings (versions) of a compound.
+
+    Finds compounds sharing the same InChIKey structure key (first two blocks),
+    which represents re-analyses with different configs.
+
+    Args:
+        entry_id: UUID of the compound entry
+
+    Returns:
+        List of version items with is_original and is_current flags
+    """
+    compound = db.query(Compound).filter(Compound.entry_id == entry_id).first()
+    if not compound:
+        raise HTTPException(status_code=404, detail="Compound not found")
+
+    inchikey = compound.inchikey
+    if not inchikey or "-" not in inchikey:
+        return {"versions": [], "current_entry_id": entry_id}
+
+    # Extract protonation-insensitive structure key (AAAA-BBBB)
+    parts = inchikey.split("-")
+    if len(parts) < 2:
+        return {"versions": [], "current_entry_id": entry_id}
+    structure_key = f"{parts[0]}-{parts[1]}"
+
+    # Find all compounds with the same structure key
+    siblings = (
+        db.query(Compound)
+        .filter(Compound.inchikey.like(f"{structure_key}%"))
+        .order_by(Compound.processed_at.asc())
+        .all()
+    )
+
+    if len(siblings) <= 1:
+        return {"versions": [], "current_entry_id": entry_id}
+
+    # Identify the original: oldest non-duplicate, fallback to oldest overall
+    original_entry_id = None
+    for s in siblings:
+        if not s.is_duplicate:
+            original_entry_id = s.entry_id
+            break
+    if original_entry_id is None:
+        original_entry_id = siblings[0].entry_id
+
+    # Batch-resolve parent names for duplicates
+    parent_entry_ids = {s.duplicate_of for s in siblings if s.duplicate_of}
+    parent_names = {}
+    if parent_entry_ids:
+        parents = (
+            db.query(Compound.entry_id, Compound.compound_name)
+            .filter(Compound.entry_id.in_(parent_entry_ids))
+            .all()
+        )
+        parent_names = {p.entry_id: p.compound_name for p in parents}
+
+    versions = []
+    for s in siblings:
+        versions.append({
+            "entry_id": s.entry_id,
+            "compound_name": s.compound_name,
+            "similarity_threshold": s.similarity_threshold,
+            "activity_types": s.activity_types,
+            "imp_score": s.imp_score,
+            "qed": s.qed,
+            "similar_compounds": s.similar_compounds or 0,
+            "total_activities": s.total_activities,
+            "is_duplicate": s.is_duplicate or False,
+            "duplicate_of": s.duplicate_of,
+            "duplicate_of_name": parent_names.get(s.duplicate_of),
+            "author_name": s.author_name,
+            "processed_at": s.processed_at.isoformat() if s.processed_at else None,
+            "storage_path": s.storage_path,
+            "is_original": s.entry_id == original_entry_id,
+            "is_current": s.entry_id == entry_id,
+        })
+
+    return {"versions": versions, "current_entry_id": entry_id}
+
+
 @router.get("/{entry_id}")
 async def get_compound(
     entry_id: str,

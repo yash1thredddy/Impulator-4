@@ -620,6 +620,33 @@ class ImpulatorAPIClient:
         except requests.exceptions.RequestException as e:
             return CompoundListResponse(success=False, error=str(e))
 
+    def get_compound_versions(self, entry_id: str) -> dict:
+        """Get all structural siblings (versions) of a compound.
+
+        Args:
+            entry_id: UUID of the compound entry
+
+        Returns:
+            Dict with success, versions list, and current_entry_id
+        """
+        try:
+            response = self._request('GET', f'/api/v1/compounds/{entry_id}/versions')
+
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    return {"success": True, **data}
+                except (json.JSONDecodeError, ValueError) as e:
+                    logger.error(f"Invalid JSON in versions response: {e}")
+                    return {"success": False, "error": "Invalid response from server"}
+            elif response.status_code == 404:
+                return {"success": False, "error": "Compound not found"}
+            else:
+                return {"success": False, "error": f"HTTP {response.status_code}"}
+
+        except requests.exceptions.RequestException as e:
+            return {"success": False, "error": str(e)}
+
     def delete_compound(self, entry_id: str) -> JobResponse:
         """Delete a compound by entry_id.
 

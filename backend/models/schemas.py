@@ -43,7 +43,7 @@ class JobCreate(BaseModel):
     compound_name: str = Field(..., min_length=1, max_length=100)
     author_name: str = Field(..., min_length=1, max_length=100)
     smiles: str = Field(..., min_length=1, max_length=5000)
-    similarity_threshold: int = Field(default=90, ge=30, le=100)
+    similarity_threshold: int = Field(default=90, ge=40, le=100)
     activity_types: Optional[List[str]] = None
     # Session ID for user isolation (passed from frontend)
     session_id: Optional[str] = None
@@ -314,6 +314,7 @@ class ActiveJobResponse(BaseModel):
     completed_at: Optional[datetime] = None
     entry_id: Optional[str] = None
     storage_path: Optional[str] = None
+    error_message: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -343,7 +344,7 @@ class CheckDuplicatesRequest(BaseModel):
     # New: compounds with structure data for InChIKey-based duplicate detection
     compounds: Optional[List[CompoundStructure]] = Field(None, max_length=1000)
     # Optional config context (enables config-aware duplicate messaging in batch mode)
-    similarity_threshold: Optional[int] = Field(default=90, ge=30, le=100)
+    similarity_threshold: Optional[int] = Field(default=90, ge=40, le=100)
     activity_types: Optional[List[str]] = None
 
     model_config = ConfigDict(
@@ -466,8 +467,8 @@ class ResolveDuplicateRequest(BaseModel):
     author_name: str = Field(..., min_length=1, max_length=100)
     existing_entry_id: Optional[str] = None
     new_compound_name: Optional[str] = Field(None, description="New name if user wants to change it (for exact duplicates)")
-    # Keep threshold range aligned with JobCreate and frontend slider (30-100).
-    similarity_threshold: int = Field(default=90, ge=30, le=100)
+    # Keep threshold range aligned with JobCreate and frontend slider (40-100).
+    similarity_threshold: int = Field(default=90, ge=40, le=100)
     activity_types: Optional[List[str]] = None
     session_id: Optional[str] = None
 
@@ -709,3 +710,34 @@ class CancelResponse(BaseModel):
     batch_id: str
     cancelled_count: int
     message: str
+
+
+# Compound Version Schemas
+class CompoundVersionItem(BaseModel):
+    """A single version (structural sibling) of a compound."""
+
+    entry_id: str
+    compound_name: str
+    similarity_threshold: Optional[int] = None
+    activity_types: Optional[str] = None
+    imp_score: Optional[float] = None
+    qed: Optional[float] = None
+    similar_compounds: Optional[int] = None
+    total_activities: Optional[int] = None
+    is_duplicate: bool = False
+    duplicate_of: Optional[str] = None
+    duplicate_of_name: Optional[str] = None
+    author_name: Optional[str] = None
+    processed_at: Optional[datetime] = None
+    storage_path: Optional[str] = None
+    is_original: bool = False
+    is_current: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CompoundVersionsResponse(BaseModel):
+    """Response for compound versions endpoint."""
+
+    versions: List[CompoundVersionItem] = []
+    current_entry_id: str
