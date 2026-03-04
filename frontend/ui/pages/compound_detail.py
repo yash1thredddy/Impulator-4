@@ -5411,6 +5411,14 @@ def _render_versions_tab(versions: list, current_entry_id: str) -> None:
         else:
             siblings.append(v)
 
+    # Fallback: if is_current flag missing, match by entry_id
+    if current is None and current_entry_id:
+        for v in versions:
+            if v.get("entry_id") == current_entry_id:
+                current = v
+                siblings = [s for s in versions if s.get("entry_id") != current_entry_id]
+                break
+
     if not current or not siblings:
         st.info("No other versions found.")
         return
@@ -5456,16 +5464,16 @@ def _render_versions_tab(versions: list, current_entry_id: str) -> None:
     # Per-sibling expandable cards with config diffs
     st.markdown("##### Version Details")
     current_threshold = current.get("similarity_threshold")
-    current_activities = set(
-        (current.get("activity_types") or "").split(",")
-    ) - {""}
+    current_activities = {
+        s.strip() for s in (current.get("activity_types") or "").split(",")
+    } - {""}
 
     for idx, sib in enumerate(siblings):
         sib_name = html.escape(sib.get("compound_name", "Unknown"))
         sib_threshold = sib.get("similarity_threshold")
-        sib_activities = set(
-            (sib.get("activity_types") or "").split(",")
-        ) - {""}
+        sib_activities = {
+            s.strip() for s in (sib.get("activity_types") or "").split(",")
+        } - {""}
 
         label = f"**{sib_name}**"
         if sib.get("is_original"):

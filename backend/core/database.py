@@ -268,7 +268,7 @@ def _apply_migrations() -> None:
                         FROM jobs j
                         WHERE j.result_summary IS NOT NULL
                           AND UPPER(j.status) = 'COMPLETED'
-                          AND json_extract(j.result_summary, '$.compound_name') = compounds.compound_name
+                          AND json_extract(j.result_summary, '$.entry_id') = compounds.entry_id
                         ORDER BY j.completed_at DESC
                         LIMIT 1),
                     0)
@@ -284,6 +284,7 @@ def _apply_migrations() -> None:
                 sa_idx = col_names.index('similar_compounds')
                 ta_idx = col_names.index('total_activities')
                 if sa_idx != ta_idx + 1:
+                    conn.execute(text("DROP TABLE IF EXISTS compounds_new"))
                     conn.execute(text("""
                         CREATE TABLE compounds_new (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,

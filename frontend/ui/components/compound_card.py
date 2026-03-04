@@ -58,7 +58,7 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "", select_
     similarity_threshold = compound.get('similarity_threshold', 90)
 
     # Escape for XSS prevention (CSS text-overflow handles truncation dynamically)
-    safe_compound_name = html.escape(compound_name)
+    safe_compound_name = html.escape(str(compound_name))
 
     with st.container(border=True):
         # Selection checkbox in select mode

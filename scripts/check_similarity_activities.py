@@ -452,9 +452,10 @@ def resolve_smiles_to_cid(smiles: str) -> Optional[int]:
         if resp.status_code == 200:
             cids = resp.json().get("IdentifierList", {}).get("CID", [])
             return cids[0] if cids else None
-    except Exception:
-        pass
-    return None
+        return None
+    except (requests.exceptions.RequestException, ValueError, KeyError) as e:
+        print(f"  [PUBCHEM] CID resolution failed for SMILES: {e}")
+        return None
 
 
 def pc_similarity_search(smiles: str, threshold: int
@@ -590,7 +591,7 @@ def pc_fetch_drug_indications(cid: int
         by_phase: Dict[str, int] = {}
         for row in rows:
             disease = row.get("srcdiseasename", "")
-            phase = row.get("maxphase", "")
+            phase = str(row.get("maxphase", "") or "")
             if disease:
                 diseases.append(f"{disease} ({phase})" if phase else disease)
                 by_phase[phase] = by_phase.get(phase, 0) + 1
@@ -700,7 +701,7 @@ def run_compound(name: str, smiles: str, threshold: int) -> CompoundResult:
             print(f" {r.pubchem_indications} indications ({r.pubchem_ind_time_ms:.0f} ms)")
             if r.pubchem_indication_by_phase:
                 phases = sorted(r.pubchem_indication_by_phase.items(),
-                                key=lambda x: x[0], reverse=True)
+                                key=lambda x: str(x[0]), reverse=True)
                 phase_str = ", ".join(f"{p}: {c}" for p, c in phases)
                 print(f"         By phase: {phase_str}")
     else:

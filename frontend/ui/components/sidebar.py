@@ -159,7 +159,9 @@ def render_active_jobs_static() -> None:
     st.markdown("### Active Jobs")
     active_jobs, has_active, failed_jobs = _fetch_and_check_jobs()
 
-    if active_jobs is None or not active_jobs:
+    if active_jobs is None:
+        st.caption("Connection error")
+    elif not active_jobs:
         st.caption("No active jobs")
     elif has_active:
         start_polling()
@@ -305,7 +307,19 @@ def _on_cancel_job(job_id: str) -> None:
 
 
 def _dismiss_failed_job(job_id: str) -> None:
-    """Hide a failed job from the sidebar without deleting from DB."""
+    """Delete a failed job from the backend and hide from sidebar."""
+    client = get_api_client()
+    try:
+        response = client.delete_job(job_id)
+        if response.success:
+            st.toast("Failed job removed")
+        else:
+            logger.warning(f"Backend delete failed for job {job_id}: {response.error}")
+            st.toast(f"Remove failed: {response.error}", icon="⚠️")
+    except Exception as e:
+        logger.error(f"Error removing failed job {job_id}: {e}")
+        st.toast(f"Error: {e}", icon="⚠️")
+    # Always hide locally so the UI updates even if backend delete fails
     dismissed = SessionState.get('dismissed_failed_jobs', set())
     dismissed.add(job_id)
     SessionState.set('dismissed_failed_jobs', dismissed)
