@@ -88,8 +88,27 @@ def render_compound_detail_page() -> None:
     # Quick stats row
     _render_quick_stats(data)
 
+    # Fetch versions for conditional tab (Streamlit requires fixed tab count per render)
+    versions = []
+    has_versions = False
+    cache_key = f"_versions_{entry_id}"
+    if entry_id:
+        if cache_key not in st.session_state:
+            api = get_api_client()
+            result = api.get_compound_versions(entry_id)
+            st.session_state[cache_key] = result.get("versions", []) if result.get("success") else []
+        versions = st.session_state[cache_key]
+        has_versions = len(versions) > 1  # >1 because list includes self
+
     # Main content with tabs
-    tabs = st.tabs(["📊 Overview", "📈 Visualizations", "🧬 Molecules", "📋 Data", "📄 Report"])
+    # After navigating from Versions tab, temporarily hide it so the tab count
+    # changes — this resets Streamlit's internal tab index back to 0 (Overview).
+    show_versions_tab = has_versions and not st.session_state.pop('_versions_nav_reset', False)
+
+    tab_labels = ["📊 Overview", "📈 Visualizations", "🧬 Molecules", "📋 Data", "📄 Report"]
+    if show_versions_tab:
+        tab_labels.append(f"🔀 Versions ({len(versions) - 1})")
+    tabs = st.tabs(tab_labels)
 
     with tabs[0]:
         _render_overview_tab(data)
@@ -105,6 +124,10 @@ def render_compound_detail_page() -> None:
 
     with tabs[4]:
         _render_report_tab(data)
+
+    if show_versions_tab:
+        with tabs[5]:
+            _render_versions_tab(versions, entry_id)
 
 
 def _render_quick_stats(data: Dict[str, Any]) -> None:
@@ -5363,3 +5386,155 @@ def _generate_html_report(data: Dict[str, Any], df: pd.DataFrame) -> str:
 </html>
 """
     return html_content
+
+
+# =============================================================================
+# VERSIONS TAB - Structural siblings with config diff highlighting
+# =============================================================================
+
+def _render_versions_tab(versions: list, current_entry_id: str) -> None:
+    """Render the Versions tab showing all structural siblings.
+
+    Args:
+        versions: List of version dicts from the API
+        current_entry_id: Entry ID of the compound being viewed
+    """
+    if not versions:
+        st.info("No other versions found.")
+        return
+
+    current = None
+    siblings = []
+    for v in versions:
+        if v.get("is_current"):
+            current = v
+        else:
+            siblings.append(v)
+
+    if not current or not siblings:
+        st.info("No other versions found.")
+        return
+
+    st.markdown(
+        f"**{len(siblings)}** other version{'s' if len(siblings) != 1 else ''} "
+        f"of this structure (same InChIKey)"
+    )
+
+    # Summary table
+    rows = []
+    for v in versions:
+        marker = ""
+        if v.get("is_current"):
+            marker = " ◀"
+        if v.get("is_original"):
+            marker += " ★"
+        qed = v.get("qed")
+        rows.append({
+            "Name": html.escape(v.get("compound_name", "")) + marker,
+            "Threshold": f"{v.get('similarity_threshold', '?')}%",
+            "Activity Types": v.get("activity_types") or "default",
+            "Similar Compounds": v.get("similar_compounds") or 0,
+            "QED": f"{qed:.2f}" if qed is not None else "—",
+            "Activities": v.get("total_activities") or 0,
+            "Author": html.escape(v.get("author_name") or "—"),
+            "Processed": (v.get("processed_at") or "")[:10],
+        })
+
+    table_df = pd.DataFrame(rows)
+
+    # Highlight current row with green background
+    def _highlight_current(row):
+        if "◀" in str(row["Name"]):
+            return ["background-color: rgba(0, 180, 100, 0.15)"] * len(row)
+        return [""] * len(row)
+
+    styled = table_df.style.apply(_highlight_current, axis=1)
+    st.markdown("##### All Versions")
+    st.markdown("★ = original &nbsp;&nbsp; ◀ = currently viewing")
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    # Per-sibling expandable cards with config diffs
+    st.markdown("##### Version Details")
+    current_threshold = current.get("similarity_threshold")
+    current_activities = set(
+        (current.get("activity_types") or "").split(",")
+    ) - {""}
+
+    for idx, sib in enumerate(siblings):
+        sib_name = html.escape(sib.get("compound_name", "Unknown"))
+        sib_threshold = sib.get("similarity_threshold")
+        sib_activities = set(
+            (sib.get("activity_types") or "").split(",")
+        ) - {""}
+
+        label = f"**{sib_name}**"
+        if sib.get("is_original"):
+            label += " ★ original"
+
+        with st.expander(label, expanded=False):
+            # Config diff
+            diffs = []
+            if sib_threshold != current_threshold:
+                diffs.append(
+                    f"🔶 **Threshold**: {sib_threshold}% "
+                    f"(current: {current_threshold}%)"
+                )
+
+            if sib_activities != current_activities:
+                added = sib_activities - current_activities
+                removed = current_activities - sib_activities
+                shared = sib_activities & current_activities
+                parts = []
+                for a in sorted(shared):
+                    parts.append(a)
+                for a in sorted(added):
+                    parts.append(f"🟢 {a}")
+                for a in sorted(removed):
+                    parts.append(f"🔴 ~~{a}~~")
+                diffs.append(f"**Activity Types**: {', '.join(parts)}")
+
+            if diffs:
+                st.markdown("**Config differences** (vs. current):")
+                for d in diffs:
+                    st.markdown(f"- {d}")
+            else:
+                st.markdown("*Same configuration as current compound*")
+
+            # Stats row
+            qed = sib.get("qed")
+            cols = st.columns(3)
+            with cols[0]:
+                st.metric("QED", f"{qed:.2f}" if qed is not None else "—")
+            with cols[1]:
+                st.metric("Activities", sib.get("total_activities") or 0)
+            with cols[2]:
+                st.metric("Author", html.escape(sib.get("author_name") or "—"))
+
+            if sib.get("duplicate_of_name"):
+                st.caption(
+                    f"Duplicate of: {html.escape(sib['duplicate_of_name'])}"
+                )
+
+            # Navigate button
+            if st.button(
+                f"View →  {sib_name}",
+                key=f"versions_nav_{idx}",
+                width='stretch',
+            ):
+                # Reset tab index to Overview on next render
+                st.session_state['_versions_nav_reset'] = True
+                # Clear versions cache for the target compound
+                target_cache_key = f"_versions_{sib['entry_id']}"
+                st.session_state.pop(target_cache_key, None)
+                # Also clear current cache (stale after navigation)
+                current_cache_key = f"_versions_{current_entry_id}"
+                st.session_state.pop(current_cache_key, None)
+
+                SessionState.navigate_to_compound(
+                    compound_name=sib.get("compound_name", ""),
+                    entry_id=sib.get("entry_id"),
+                    storage_path=sib.get("storage_path"),
+                    is_duplicate=sib.get("is_duplicate", False),
+                    duplicate_of_name=sib.get("duplicate_of_name"),
+                )
+                st.rerun()

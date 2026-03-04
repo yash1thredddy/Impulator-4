@@ -253,7 +253,85 @@ def _apply_migrations() -> None:
                 conn.execute(text("ALTER TABLE compounds ADD COLUMN activity_types TEXT"))
                 migrations_applied.append('compounds.activity_types')
 
-            # Create indexes AFTER columns exist
+            # Add similar_compounds column if missing
+            if 'similar_compounds' not in compounds_columns:
+                conn.execute(text("ALTER TABLE compounds ADD COLUMN similar_compounds INTEGER DEFAULT 0"))
+                # Backfill from jobs.result_summary JSON (similar_count or total_compounds)
+                # Note: status enum stored as uppercase 'COMPLETED' in SQLite
+                conn.execute(text("""
+                    UPDATE compounds
+                    SET similar_compounds = COALESCE(
+                        (SELECT COALESCE(
+                            json_extract(j.result_summary, '$.similar_count'),
+                            json_extract(j.result_summary, '$.total_compounds')
+                        )
+                        FROM jobs j
+                        WHERE j.result_summary IS NOT NULL
+                          AND UPPER(j.status) = 'COMPLETED'
+                          AND json_extract(j.result_summary, '$.compound_name') = compounds.compound_name
+                        ORDER BY j.completed_at DESC
+                        LIMIT 1),
+                    0)
+                """))
+                migrations_applied.append('compounds.similar_compounds (backfilled)')
+
+            # Reorder columns: move similar_compounds after total_activities
+            # SQLite requires table recreation to reorder columns
+            result = conn.execute(text("PRAGMA table_info(compounds)"))
+            col_names = [row[1] for row in result.fetchall()]
+            # Only run if similar_compounds exists but is not in the correct position
+            if 'similar_compounds' in col_names:
+                sa_idx = col_names.index('similar_compounds')
+                ta_idx = col_names.index('total_activities')
+                if sa_idx != ta_idx + 1:
+                    conn.execute(text("""
+                        CREATE TABLE compounds_new (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            entry_id VARCHAR(36) UNIQUE,
+                            compound_name VARCHAR(255) NOT NULL,
+                            chembl_id VARCHAR(50),
+                            smiles TEXT,
+                            inchikey VARCHAR(27),
+                            canonical_smiles TEXT,
+                            is_duplicate BOOLEAN DEFAULT 0,
+                            duplicate_of VARCHAR(36),
+                            total_activities INTEGER DEFAULT 0,
+                            similar_compounds INTEGER DEFAULT 0,
+                            imp_candidates INTEGER DEFAULT 0,
+                            imp_score FLOAT,
+                            similarity_threshold INTEGER DEFAULT 90,
+                            activity_types TEXT,
+                            qed FLOAT,
+                            num_outliers INTEGER DEFAULT 0,
+                            author_name VARCHAR(100),
+                            storage_path VARCHAR(500),
+                            processed_at DATETIME
+                        )
+                    """))
+                    conn.execute(text("""
+                        INSERT INTO compounds_new (
+                            id, entry_id, compound_name, chembl_id, smiles,
+                            inchikey, canonical_smiles, is_duplicate, duplicate_of,
+                            total_activities, similar_compounds, imp_candidates, imp_score,
+                            similarity_threshold, activity_types, qed, num_outliers,
+                            author_name, storage_path, processed_at
+                        )
+                        SELECT
+                            id, entry_id, compound_name, chembl_id, smiles,
+                            inchikey, canonical_smiles, is_duplicate, duplicate_of,
+                            total_activities, similar_compounds, imp_candidates, imp_score,
+                            similarity_threshold, activity_types, qed, num_outliers,
+                            author_name, storage_path, processed_at
+                        FROM compounds
+                    """))
+                    conn.execute(text("DROP TABLE compounds"))
+                    conn.execute(text("ALTER TABLE compounds_new RENAME TO compounds"))
+                    migrations_applied.append('compounds column reorder (similar_compounds)')
+
+            # Create indexes AFTER columns exist (and after potential table recreation)
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_compounds_entry_id ON compounds(entry_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_compounds_compound_name ON compounds(compound_name)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_compounds_chembl_id ON compounds(chembl_id)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_compounds_inchikey ON compounds(inchikey)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_compounds_is_duplicate ON compounds(is_duplicate)"))
 

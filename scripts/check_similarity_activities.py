@@ -1,9 +1,9 @@
 """
-ChEMBL Similarity & Activity Count Comparison (REST vs WebClient)
+ChEMBL Similarity & Activity Count Comparison (ChEMBL REST vs PubChem)
 
 Compares counts of similar compounds, activities, targets, PDB entries,
-and drug indications — using BOTH REST API and chembl_webresource_client
-to diagnose discrepancies with the app.
+and drug indications — using ChEMBL REST API and PubChem side-by-side
+to understand data coverage differences between the two sources.
 
 Supports multiple input types:
   - SMILES:    CC(=O)OC1=CC=CC=C1C(=O)O
@@ -36,6 +36,7 @@ from urllib3.util.retry import Retry
 CHEMBL_BASE = "https://www.ebi.ac.uk/chembl/api/data"
 PDB_SEARCH_URL = "https://search.rcsb.org/rcsbsearch/v2/query"
 PUBCHEM_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
+PUBCHEM_SDQ = "https://pubchem.ncbi.nlm.nih.gov/sdq/sphinxql.cgi"
 
 MAX_LIMIT = 1000
 SIMILARITY_TIMEOUT = 120
@@ -181,15 +182,10 @@ class CompoundResult:
     threshold: int
     # Similarity
     rest_compounds: List[str] = field(default_factory=list)
-    client_compounds: List[str] = field(default_factory=list)
     sim_rest_ms: float = 0.0
-    sim_client_ms: float = 0.0
     sim_rest_error: Optional[str] = None
-    sim_client_error: Optional[str] = None
     # Activities (REST)
     rest_counts: Counts = field(default_factory=Counts)
-    # Activities (WebClient)
-    client_counts: Counts = field(default_factory=Counts)
     # PDB
     pdb_entries: int = 0
     pdb_time_ms: float = 0.0
@@ -199,6 +195,27 @@ class CompoundResult:
     indication_details: List[str] = field(default_factory=list)
     ind_time_ms: float = 0.0
     ind_error: Optional[str] = None
+    # PubChem Similarity
+    pubchem_cids: List[int] = field(default_factory=list)
+    sim_pubchem_ms: float = 0.0
+    sim_pubchem_error: Optional[str] = None
+    # PubChem Bioactivity
+    pubchem_total_assays: int = 0
+    pubchem_active_assays: int = 0
+    pubchem_type_filtered_total: int = 0
+    pubchem_type_filtered_active: int = 0
+    pubchem_by_type_filtered: Dict[str, int] = field(default_factory=dict)
+    pubchem_by_type_filtered_active: Dict[str, int] = field(default_factory=dict)
+    pubchem_unique_targets: int = 0
+    pubchem_response_kb: float = 0.0
+    pubchem_bio_time_ms: float = 0.0
+    pubchem_bio_error: Optional[str] = None
+    # PubChem Drug Indications (Open Targets)
+    pubchem_indications: int = 0
+    pubchem_indication_details: List[str] = field(default_factory=list)
+    pubchem_indication_by_phase: Dict[str, int] = field(default_factory=dict)
+    pubchem_ind_time_ms: float = 0.0
+    pubchem_ind_error: Optional[str] = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -351,96 +368,6 @@ def rest_fetch_activities(chembl_ids: List[str], activity_types: List[str]) -> C
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  WebClient functions
-# ═══════════════════════════════════════════════════════════════════════════
-
-def get_webclient():
-    """Initialize chembl_webresource_client with optimized settings."""
-    try:
-        from chembl_webresource_client.settings import Settings
-        settings = Settings.Instance()
-        settings.MAX_LIMIT = 1000
-        settings.TIMEOUT = 90
-
-        from chembl_webresource_client.new_client import new_client
-        return new_client
-    except ImportError:
-        return None
-
-
-def client_similarity_search(client, smiles: str, threshold: int) -> Tuple[List[str], float, Optional[str]]:
-    start = time.perf_counter()
-    all_ids = []
-    error = None
-
-    try:
-        results = client.similarity.filter(smiles=smiles, similarity=threshold).only(['molecule_chembl_id'])
-        for mol in results:
-            cid = mol.get('molecule_chembl_id')
-            if cid:
-                all_ids.append(cid)
-    except Exception as e:
-        error = str(e)
-
-    ms = (time.perf_counter() - start) * 1000
-    return all_ids, ms, error
-
-
-def client_fetch_activities(client, chembl_ids: List[str], activity_types: List[str]) -> Counts:
-    """Fetch activities via webclient and apply both type and value filters."""
-    counts = Counts()
-    if not chembl_ids:
-        return counts
-
-    start = time.perf_counter()
-    types_set = set(activity_types)
-    targets = set()
-    max_per_req = 50
-    chunks = [chembl_ids[i:i + max_per_req] for i in range(0, len(chembl_ids), max_per_req)]
-
-    for ci, chunk in enumerate(chunks):
-        try:
-            results = client.activity.filter(
-                molecule_chembl_id__in=chunk
-            ).only(['molecule_chembl_id', 'standard_type', 'standard_value', 'standard_units', 'target_chembl_id'])
-
-            for act in results:
-                counts.raw_total += 1
-                stype = act.get("standard_type", "")
-                counts.by_type_raw[stype] = counts.by_type_raw.get(stype, 0) + 1
-
-                if stype not in types_set:
-                    counts.dropped_wrong_type += 1
-                    continue
-                counts.type_filtered += 1
-
-                reason = classify_drop_reason(act)
-                if reason == "no_value":
-                    counts.dropped_no_value += 1
-                    continue
-                elif reason == "bad_value":
-                    counts.dropped_bad_value += 1
-                    continue
-                elif reason == "bad_units":
-                    counts.dropped_bad_units += 1
-                    continue
-
-                counts.value_filtered += 1
-                counts.by_type_filtered[stype] = counts.by_type_filtered.get(stype, 0) + 1
-                tgt = act.get("target_chembl_id")
-                if tgt:
-                    targets.add(tgt)
-
-        except Exception as e:
-            counts.error = f"Failed at chunk {ci + 1}/{len(chunks)}: {e}"
-            break
-
-    counts.unique_targets = len(targets)
-    counts.time_ms = (time.perf_counter() - start) * 1000
-    return counts
-
-
-# ═══════════════════════════════════════════════════════════════════════════
 #  PDB + Drug Indications (REST only)
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -500,6 +427,179 @@ def fetch_drug_indications(chembl_ids: List[str]) -> Tuple[int, List[str], float
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  PubChem Functions
+# ═══════════════════════════════════════════════════════════════════════════
+
+PUBCHEM_RATE_LIMIT = 0.25
+_last_pubchem_time = 0.0
+
+
+def pubchem_rate_limited():
+    """Enforce PubChem rate limiting (0.25s = 4 req/s)."""
+    global _last_pubchem_time
+    elapsed = time.perf_counter() - _last_pubchem_time
+    if elapsed < PUBCHEM_RATE_LIMIT:
+        time.sleep(PUBCHEM_RATE_LIMIT - elapsed)
+    _last_pubchem_time = time.perf_counter()
+
+
+def resolve_smiles_to_cid(smiles: str) -> Optional[int]:
+    """Resolve SMILES to PubChem CID."""
+    pubchem_rate_limited()
+    url = f"{PUBCHEM_BASE}/compound/smiles/cids/JSON"
+    try:
+        resp = SESSION.post(url, data={"smiles": smiles}, timeout=GENERAL_TIMEOUT)
+        if resp.status_code == 200:
+            cids = resp.json().get("IdentifierList", {}).get("CID", [])
+            return cids[0] if cids else None
+    except Exception:
+        pass
+    return None
+
+
+def pc_similarity_search(smiles: str, threshold: int
+                         ) -> Tuple[List[int], float, Optional[str]]:
+    """PubChem 2D similarity search. Returns (cids, ms, error)."""
+    start = time.perf_counter()
+    pubchem_rate_limited()
+    url = f"{PUBCHEM_BASE}/compound/fastsimilarity_2d/smiles/cids/JSON"
+    try:
+        resp = SESSION.post(
+            url,
+            data={"smiles": smiles},
+            params={"Threshold": threshold, "MaxRecords": 10000},
+            timeout=SIMILARITY_TIMEOUT,
+        )
+        ms = (time.perf_counter() - start) * 1000
+        if resp.status_code != 200:
+            return [], ms, f"HTTP {resp.status_code}"
+        cids = resp.json().get("IdentifierList", {}).get("CID", [])
+        return cids, ms, None
+    except Exception as e:
+        return [], (time.perf_counter() - start) * 1000, str(e)
+
+
+@dataclass
+class PubChemBioResult:
+    """Full PubChem bioactivity result with type filtering."""
+    total: int = 0
+    active: int = 0
+    type_filtered_total: int = 0
+    type_filtered_active: int = 0
+    by_type_filtered: Dict[str, int] = field(default_factory=dict)
+    by_type_filtered_active: Dict[str, int] = field(default_factory=dict)
+    unique_targets: int = 0
+    size_kb: float = 0.0
+    ms: float = 0.0
+    error: Optional[str] = None
+
+
+def pc_fetch_bioactivity(cid: int) -> PubChemBioResult:
+    """PubChem assay summary with activity type filtering and target tracking."""
+    result = PubChemBioResult()
+    start = time.perf_counter()
+    pubchem_rate_limited()
+    url = f"{PUBCHEM_BASE}/compound/cid/{cid}/assaysummary/JSON"
+    try:
+        resp = SESSION.get(url, timeout=SIMILARITY_TIMEOUT)
+        result.ms = (time.perf_counter() - start) * 1000
+        result.size_kb = len(resp.content) / 1024
+        if resp.status_code != 200:
+            result.error = f"HTTP {resp.status_code}"
+            return result
+        data = resp.json()
+        rows = data.get("Table", {}).get("Row", [])
+        columns = data.get("Table", {}).get("Columns", {}).get("Column", [])
+
+        col_idx = {col: i for i, col in enumerate(columns)}
+        outcome_idx = col_idx.get("Activity Outcome")
+        name_idx = col_idx.get("Activity Name")
+        target_gi_idx = col_idx.get("Target GI")
+
+        result.total = len(rows)
+        types_set = set(APP_ACTIVITY_TYPES)
+        targets_seen = set()
+
+        for row in rows:
+            cells = row.get("Cell", [])
+            outcome = ""
+            if outcome_idx is not None and outcome_idx < len(cells):
+                outcome = cells[outcome_idx] or ""
+            aname = ""
+            if name_idx is not None and name_idx < len(cells):
+                aname = cells[name_idx] or ""
+
+            # Track targets
+            if target_gi_idx is not None and target_gi_idx < len(cells):
+                tgt = cells[target_gi_idx] or ""
+                if tgt:
+                    targets_seen.add(tgt)
+
+            if outcome == "Active":
+                result.active += 1
+
+            # Filter by app activity types
+            if aname in types_set:
+                result.type_filtered_total += 1
+                result.by_type_filtered[aname] = result.by_type_filtered.get(aname, 0) + 1
+                if outcome == "Active":
+                    result.type_filtered_active += 1
+                    result.by_type_filtered_active[aname] = (
+                        result.by_type_filtered_active.get(aname, 0) + 1
+                    )
+
+        result.unique_targets = len(targets_seen)
+        return result
+    except Exception as e:
+        result.ms = (time.perf_counter() - start) * 1000
+        result.error = str(e)
+        return result
+
+
+def pc_fetch_drug_indications(cid: int
+                              ) -> Tuple[int, List[str], Dict[str, int], float, Optional[str]]:
+    """Fetch drug indications from PubChem SDQ (Open Targets).
+
+    Returns (total, disease_names, by_phase, ms, error).
+    """
+    start = time.perf_counter()
+    pubchem_rate_limited()
+    query = json.dumps({
+        "select": "*",
+        "collection": "opentargetsdrugindication",
+        "order": ["maxphase,desc"],
+        "start": 1,
+        "limit": 10000,
+        "where": {"ands": [{"cid": str(cid)}]},
+        "width": 1000000,
+    })
+    try:
+        resp = SESSION.get(
+            PUBCHEM_SDQ,
+            params={"infmt": "json", "outfmt": "json", "query": query},
+            timeout=GENERAL_TIMEOUT,
+        )
+        ms = (time.perf_counter() - start) * 1000
+        if resp.status_code != 200:
+            return 0, [], {}, ms, f"HTTP {resp.status_code}"
+        data = resp.json()
+        output = data.get("SDQOutputSet", [{}])[0]
+        rows = output.get("rows", [])
+        total = output.get("totalCount", len(rows))
+        diseases = []
+        by_phase: Dict[str, int] = {}
+        for row in rows:
+            disease = row.get("srcdiseasename", "")
+            phase = row.get("maxphase", "")
+            if disease:
+                diseases.append(f"{disease} ({phase})" if phase else disease)
+                by_phase[phase] = by_phase.get(phase, 0) + 1
+        return total, sorted(set(diseases)), by_phase, ms, None
+    except Exception as e:
+        return 0, [], {}, (time.perf_counter() - start) * 1000, str(e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  Display
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -511,55 +611,7 @@ def print_header(text: str):
     print("=" * width)
 
 
-def print_counts_comparison(label: str, rest: Counts, client: Counts):
-    """Print side-by-side REST vs Client activity counts."""
-    sep = "-" * 72
-    print(f"\n  {sep}")
-    print(f"  {'':30} | {'REST API':>12} | {'WebClient':>12} | {'Match':>6}")
-    print(f"  {sep}")
-
-    def row(name, rv, cv):
-        match = "YES" if rv == cv else "NO"
-        print(f"  {name:<30} | {rv:>12} | {cv:>12} | {match:>6}")
-
-    row("Raw activities (all types)", rest.raw_total, client.raw_total)
-    row(f"After type filter ({label})", rest.type_filtered, client.type_filtered)
-    row("Dropped: wrong type", rest.dropped_wrong_type, client.dropped_wrong_type)
-    row("Dropped: no standard_value", rest.dropped_no_value, client.dropped_no_value)
-    row("Dropped: bad value (<=0)", rest.dropped_bad_value, client.dropped_bad_value)
-    row("Dropped: bad units", rest.dropped_bad_units, client.dropped_bad_units)
-    row("After value+unit filter (APP)", rest.value_filtered, client.value_filtered)
-    row("Unique targets", rest.unique_targets, client.unique_targets)
-    print(f"  {sep}")
-
-    # Type breakdown (after value filter)
-    all_types = sorted(set(list(rest.by_type_filtered.keys()) + list(client.by_type_filtered.keys())))
-    if all_types:
-        print("\n  Activity Type Breakdown (after all filters):")
-        print(f"  {'Type':<12} | {'REST':>8} | {'Client':>8}")
-        print(f"  {'-' * 35}")
-        for t in all_types:
-            rv = rest.by_type_filtered.get(t, 0)
-            cv = client.by_type_filtered.get(t, 0)
-            mark = "" if rv == cv else " <-- MISMATCH"
-            print(f"  {t:<12} | {rv:>8} | {cv:>8}{mark}")
-
-    # Raw type breakdown (before filtering) - top 10
-    all_raw_types = sorted(set(list(rest.by_type_raw.keys()) + list(client.by_type_raw.keys())),
-                           key=lambda t: -(rest.by_type_raw.get(t, 0) + client.by_type_raw.get(t, 0)))
-    if all_raw_types:
-        print("\n  All Activity Types (raw, top 15):")
-        print(f"  {'Type':<12} | {'REST':>8} | {'Client':>8}")
-        print(f"  {'-' * 35}")
-        for t in all_raw_types[:15]:
-            rv = rest.by_type_raw.get(t, 0)
-            cv = client.by_type_raw.get(t, 0)
-            in_filter = " *" if t in APP_ACTIVITY_TYPES else ""
-            print(f"  {t:<12} | {rv:>8} | {cv:>8}{in_filter}")
-        print("  (* = included in app filter)")
-
-
-def run_compound(name: str, smiles: str, threshold: int, client) -> CompoundResult:
+def run_compound(name: str, smiles: str, threshold: int) -> CompoundResult:
     """Run full analysis for one compound."""
     r = CompoundResult(name=name, smiles=smiles, threshold=threshold)
 
@@ -573,30 +625,6 @@ def run_compound(name: str, smiles: str, threshold: int, client) -> CompoundResu
         if r.rest_compounds:
             print(f"         IDs: {', '.join(r.rest_compounds[:5])}{'...' if len(r.rest_compounds) > 5 else ''}")
 
-    # ── Similarity: WebClient ──
-    if client:
-        print(f"  [CLIENT] Similarity search ({threshold}%)...", end="", flush=True)
-        r.client_compounds, r.sim_client_ms, r.sim_client_error = client_similarity_search(client, smiles, threshold)
-        if r.sim_client_error:
-            print(f" ERROR: {r.sim_client_error}")
-        else:
-            print(f" {len(r.client_compounds)} compounds ({r.sim_client_ms:.0f} ms)")
-            if r.client_compounds:
-                print(f"         IDs: {', '.join(r.client_compounds[:5])}{'...' if len(r.client_compounds) > 5 else ''}")
-
-        # Compare similarity results
-        rest_set = set(r.rest_compounds)
-        client_set = set(r.client_compounds)
-        if rest_set != client_set:
-            only_rest = rest_set - client_set
-            only_client = client_set - rest_set
-            if only_rest:
-                print(f"  [DIFF] Only in REST: {', '.join(sorted(only_rest))}")
-            if only_client:
-                print(f"  [DIFF] Only in Client: {', '.join(sorted(only_client))}")
-        else:
-            print("  [OK] Similarity results match between REST and Client")
-
     # ── Activities: REST ──
     if r.rest_compounds and not r.sim_rest_error:
         print(f"  [REST] Fetching activities for {len(r.rest_compounds)} compounds...", end="", flush=True)
@@ -607,21 +635,6 @@ def run_compound(name: str, smiles: str, threshold: int, client) -> CompoundResu
             print(f" {r.rest_counts.value_filtered} activities (app-filtered), "
                   f"{r.rest_counts.raw_total} raw ({r.rest_counts.time_ms:.0f} ms)")
 
-    # ── Activities: WebClient ──
-    if client and r.client_compounds and not r.sim_client_error:
-        print(f"  [CLIENT] Fetching activities for {len(r.client_compounds)} compounds...", end="", flush=True)
-        r.client_counts = client_fetch_activities(client, r.client_compounds, APP_ACTIVITY_TYPES)
-        if r.client_counts.error:
-            print(f" ERROR: {r.client_counts.error}")
-        else:
-            print(f" {r.client_counts.value_filtered} activities (app-filtered), "
-                  f"{r.client_counts.raw_total} raw ({r.client_counts.time_ms:.0f} ms)")
-
-    # ── Comparison table ──
-    if client and not r.rest_counts.error and not r.client_counts.error:
-        type_label = ",".join(APP_ACTIVITY_TYPES)
-        print_counts_comparison(type_label, r.rest_counts, r.client_counts)
-
     # ── PDB ──
     print("  [PDB] Searching structural entries...", end="", flush=True)
     r.pdb_entries, r.pdb_time_ms, r.pdb_error = search_pdb(smiles)
@@ -631,7 +644,7 @@ def run_compound(name: str, smiles: str, threshold: int, client) -> CompoundResu
         print(f" {r.pdb_entries} entries ({r.pdb_time_ms:.0f} ms)")
 
     # ── Drug Indications ──
-    ids_for_ind = r.rest_compounds or r.client_compounds
+    ids_for_ind = r.rest_compounds
     if ids_for_ind:
         print("  [REST] Fetching drug indications...", end="", flush=True)
         r.drug_indications, r.indication_details, r.ind_time_ms, r.ind_error = fetch_drug_indications(ids_for_ind)
@@ -644,21 +657,85 @@ def run_compound(name: str, smiles: str, threshold: int, client) -> CompoundResu
                 if len(r.indication_details) > 10:
                     print(f"         ... and {len(r.indication_details) - 10} more")
 
+    # ── PubChem Similarity ──
+    print(f"  [PUBCHEM] Similarity search ({threshold}%)...", end="", flush=True)
+    r.pubchem_cids, r.sim_pubchem_ms, r.sim_pubchem_error = pc_similarity_search(smiles, threshold)
+    if r.sim_pubchem_error:
+        print(f" ERROR: {r.sim_pubchem_error}")
+    else:
+        print(f" {len(r.pubchem_cids)} CIDs ({r.sim_pubchem_ms:.0f} ms)")
+
+    # ── PubChem Bioactivity ──
+    print("  [PUBCHEM] Resolving SMILES to CID...", end="", flush=True)
+    pc_cid = resolve_smiles_to_cid(smiles)
+    if pc_cid:
+        print(f" CID {pc_cid}")
+        print(f"  [PUBCHEM] Fetching assay summary for CID {pc_cid}...", end="", flush=True)
+        bio = pc_fetch_bioactivity(pc_cid)
+        r.pubchem_total_assays = bio.total
+        r.pubchem_active_assays = bio.active
+        r.pubchem_type_filtered_total = bio.type_filtered_total
+        r.pubchem_type_filtered_active = bio.type_filtered_active
+        r.pubchem_by_type_filtered = bio.by_type_filtered
+        r.pubchem_by_type_filtered_active = bio.by_type_filtered_active
+        r.pubchem_unique_targets = bio.unique_targets
+        r.pubchem_response_kb = bio.size_kb
+        r.pubchem_bio_time_ms = bio.ms
+        r.pubchem_bio_error = bio.error
+        if r.pubchem_bio_error:
+            print(f" ERROR: {r.pubchem_bio_error}")
+        else:
+            print(f" {r.pubchem_total_assays} assays, "
+                  f"{r.pubchem_type_filtered_active} active (app-filtered), "
+                  f"{r.pubchem_unique_targets} targets "
+                  f"({r.pubchem_response_kb:.0f} KB, {r.pubchem_bio_time_ms:.0f} ms)")
+        # ── PubChem Drug Indications ──
+        print(f"  [PUBCHEM] Fetching drug indications for CID {pc_cid}...", end="", flush=True)
+        (r.pubchem_indications, r.pubchem_indication_details,
+         r.pubchem_indication_by_phase, r.pubchem_ind_time_ms,
+         r.pubchem_ind_error) = pc_fetch_drug_indications(pc_cid)
+        if r.pubchem_ind_error:
+            print(f" ERROR: {r.pubchem_ind_error}")
+        else:
+            print(f" {r.pubchem_indications} indications ({r.pubchem_ind_time_ms:.0f} ms)")
+            if r.pubchem_indication_by_phase:
+                phases = sorted(r.pubchem_indication_by_phase.items(),
+                                key=lambda x: x[0], reverse=True)
+                phase_str = ", ".join(f"{p}: {c}" for p, c in phases)
+                print(f"         By phase: {phase_str}")
+    else:
+        print(" not found in PubChem")
+
     # ── Summary ──
-    sep = "-" * 72
+    sep = "-" * 68
     print(f"\n  {sep}")
     print(f"  SUMMARY: {name} @ {threshold}% similarity")
     print(f"  {sep}")
-    print(f"  {'Metric':<30} | {'REST':>12} | {'Client':>12}")
+    print(f"  {'Metric':<30} | {'ChEMBL REST':>14} | {'PubChem':>14}")
     print(f"  {sep}")
-    print(f"  {'Similar compounds':<30} | {len(r.rest_compounds):>12} | {len(r.client_compounds) if client else 'N/A':>12}")
-    print(f"  {'Activities (app-filtered)':<30} | {r.rest_counts.value_filtered:>12} | {r.client_counts.value_filtered if client else 'N/A':>12}")
-    print(f"  {'Activities (type-only)':<30} | {r.rest_counts.type_filtered:>12} | {r.client_counts.type_filtered if client else 'N/A':>12}")
-    print(f"  {'Activities (raw/all types)':<30} | {r.rest_counts.raw_total:>12} | {r.client_counts.raw_total if client else 'N/A':>12}")
-    print(f"  {'Unique targets':<30} | {r.rest_counts.unique_targets:>12} | {r.client_counts.unique_targets if client else 'N/A':>12}")
-    print(f"  {'PDB entries':<30} | {r.pdb_entries:>12} |")
-    print(f"  {'Drug indications':<30} | {r.drug_indications:>12} |")
+    print(f"  {'Similar compounds':<30} | {len(r.rest_compounds):>14} | {len(r.pubchem_cids):>14}")
+    print(f"  {'Activities (raw/all types)':<30} | {r.rest_counts.raw_total:>14} | {r.pubchem_total_assays:>14}")
+    print(f"  {'Activities (type-filtered)':<30} | {r.rest_counts.type_filtered:>14} | {r.pubchem_type_filtered_total:>14}")
+    print(f"  {'Activities (app-filtered)':<30} | {r.rest_counts.value_filtered:>14} | {r.pubchem_type_filtered_active:>14}")
+    print(f"  {'Unique targets':<30} | {r.rest_counts.unique_targets:>14} | {r.pubchem_unique_targets:>14}")
+    print(f"  {'PDB entries':<30} | {r.pdb_entries:>14} | {'':>14}")
+    print(f"  {'Drug indications':<30} | {r.drug_indications:>14} | {r.pubchem_indications:>14}")
     print(f"  {sep}")
+
+    # ── ChEMBL REST vs PubChem Activity Type Comparison ──
+    all_types = sorted(set(
+        list(r.rest_counts.by_type_filtered.keys()) +
+        list(r.pubchem_by_type_filtered.keys())
+    ))
+    if all_types:
+        print("\n  Activity Type Breakdown (type-filtered, ChEMBL REST vs PubChem):")
+        print(f"  {'Type':<12} | {'ChEMBL REST':>12} | {'PubChem':>10} | {'PC Active':>10}")
+        print(f"  {'-' * 52}")
+        for t in all_types:
+            rv = r.rest_counts.by_type_filtered.get(t, 0)
+            pv = r.pubchem_by_type_filtered.get(t, 0)
+            pa = r.pubchem_by_type_filtered_active.get(t, 0)
+            print(f"  {t:<12} | {rv:>12} | {pv:>10} | {pa:>10}")
 
     return r
 
@@ -669,7 +746,7 @@ def run_compound(name: str, smiles: str, threshold: int, client) -> CompoundResu
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Compare ChEMBL REST vs WebClient at given similarity threshold."
+        description="Compare ChEMBL REST vs PubChem at given similarity threshold."
     )
     parser.add_argument("--threshold", "-t", type=int, default=90, help="Similarity threshold (default: 90)")
     parser.add_argument("--compound", "-c", type=str, nargs="+", default=None,
@@ -683,19 +760,11 @@ def main():
 
     threshold = args.threshold
 
-    print_header("ChEMBL REST vs WebClient Comparison")
+    print_header("ChEMBL REST vs PubChem Comparison")
     print(f"  Threshold:       {threshold}%")
     print(f"  App filter:      {', '.join(APP_ACTIVITY_TYPES)} ({len(APP_ACTIVITY_TYPES)} types, matching app default)")
     print(f"  Value filter:    standard_value > 0, units in {VALID_UNITS}")
-    print("  Sources:         ChEMBL REST + WebClient, RCSB PDB, PubChem")
-
-    # Initialize webclient
-    print("\n  Initializing chembl_webresource_client...", end="", flush=True)
-    client = get_webclient()
-    if client:
-        print(" OK (MAX_LIMIT=1000, TIMEOUT=90)")
-    else:
-        print(" NOT AVAILABLE (install chembl_webresource_client)")
+    print("  Sources:         ChEMBL REST, RCSB PDB, PubChem")
 
     # Collect compounds
     compounds_to_run: List[Tuple[str, str]] = []
@@ -757,7 +826,7 @@ def main():
     all_json = {}
     for name, smiles in compounds_to_run:
         print_header(f"{name}  |  SMILES: {smiles[:50]}{'...' if len(smiles) > 50 else ''}")
-        result = run_compound(name, smiles, threshold, client)
+        result = run_compound(name, smiles, threshold)
         all_results.append(result)
         all_json[name] = {
             "smiles": smiles,
@@ -770,14 +839,22 @@ def main():
                 "activity_by_type": result.rest_counts.by_type_filtered,
                 "unique_targets": result.rest_counts.unique_targets,
             },
-            "client": {
-                "similar_compounds": len(result.client_compounds),
-                "activities_raw": result.client_counts.raw_total,
-                "activities_type_filtered": result.client_counts.type_filtered,
-                "activities_app_filtered": result.client_counts.value_filtered,
-                "activity_by_type": result.client_counts.by_type_filtered,
-                "unique_targets": result.client_counts.unique_targets,
-            } if client else None,
+            "pubchem": {
+                "similar_cids": len(result.pubchem_cids),
+                "total_assays": result.pubchem_total_assays,
+                "active_all_types": result.pubchem_active_assays,
+                "type_filtered_total": result.pubchem_type_filtered_total,
+                "type_filtered_active": result.pubchem_type_filtered_active,
+                "by_type_filtered": result.pubchem_by_type_filtered,
+                "by_type_filtered_active": result.pubchem_by_type_filtered_active,
+                "unique_targets": result.pubchem_unique_targets,
+                "response_kb": round(result.pubchem_response_kb, 1),
+                "similarity_time_ms": round(result.sim_pubchem_ms, 1),
+                "bioactivity_time_ms": round(result.pubchem_bio_time_ms, 1),
+                "indications": result.pubchem_indications,
+                "indication_by_phase": result.pubchem_indication_by_phase,
+                "indication_names": result.pubchem_indication_details[:20],
+            },
             "pdb_entries": result.pdb_entries,
             "drug_indications": result.drug_indications,
             "indication_names": result.indication_details,

@@ -57,11 +57,7 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "", select_
     qed = compound.get('qed', 0.0)
     similarity_threshold = compound.get('similarity_threshold', 90)
 
-    # Truncate long compound names (max 20 chars for display)
-    display_name = compound_name if len(compound_name) <= 20 else compound_name[:18] + "..."
-
-    # Escape for XSS prevention
-    safe_display_name = html.escape(display_name)
+    # Escape for XSS prevention (CSS text-overflow handles truncation dynamically)
     safe_compound_name = html.escape(compound_name)
 
     with st.container(border=True):
@@ -69,24 +65,25 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "", select_
         if select_mode and entry_id:
             cb_key = f"select_{entry_id}"
             st.checkbox(
-                safe_display_name,
+                safe_compound_name,
                 key=cb_key,
                 label_visibility="collapsed",
             )
 
-        # Compound name centered, DUPLICATE tag pinned to right corner
+        # Compound name (CSS ellipsis) with DUPLICATE badge stacked below
         dup_tag = ""
         if is_duplicate:
             dup_tag = (
-                "<span style='position: absolute; right: 0; top: 50%; transform: translateY(-50%); "
-                "background: #ff6b35; color: white; padding: 3px 10px; "
-                "border-radius: 4px; font-size: 12px; font-weight: 600;'>DUPLICATE</span>"
+                "<span style='display: inline-block; background: #ff6b35; color: white; "
+                "padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; "
+                "margin-top: 2px;'>DUPLICATE</span>"
             )
 
         st.markdown(
-            f"<div style='position: relative; text-align: center; "
-            f"margin: 0 0 10px 0; padding-top: 0;' title='{safe_compound_name}'>"
-            f"<span style='font-size: 1.5rem; font-weight: 600;'>{safe_display_name}</span>"
+            f"<div style='text-align: center; margin: 0 0 10px 0;' title='{safe_compound_name}'>"
+            f"<div style='font-size: clamp(0.9rem, 2.5vw, 1.4rem); font-weight: 600; "
+            f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;'>"
+            f"{safe_compound_name}</div>"
             f"{dup_tag}</div>",
             unsafe_allow_html=True
         )
@@ -119,11 +116,11 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "", select_
         safe_similarity = html.escape(str(similarity_threshold))
 
         st.markdown(
-            f"""<div style='display: flex; justify-content: space-between; font-size: 16px; margin: 8px 0;'>
+            f"""<div style='display: flex; justify-content: space-between; font-size: clamp(12px, 1.4vw, 16px); margin: 8px 0;'>
                 <span><b>Activities:</b> {safe_total_activities}</span>
                 <span><b>IMP Score:</b> {safe_imp_score}</span>
             </div>
-            <div style='display: flex; justify-content: space-between; font-size: 16px; margin: 8px 0;'>
+            <div style='display: flex; justify-content: space-between; font-size: clamp(12px, 1.4vw, 16px); margin: 8px 0;'>
                 <span><b>QED:</b> {safe_qed_display}</span>
                 <span><b>Similarity:</b> {safe_similarity}%</span>
             </div>""",

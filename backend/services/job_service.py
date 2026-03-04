@@ -280,18 +280,28 @@ class JobService:
             active_query = active_query.filter(Job.session_id == session_id)
         active_jobs = active_query.all()
 
-        # Get recently completed/failed jobs (within last N minutes)
+        # Recently completed jobs (auto-dismiss after N minutes)
         recent_cutoff = datetime.now(timezone.utc) - timedelta(minutes=include_recent_minutes)
-        recent_query = db.query(Job).filter(
-            Job.status.in_([JobStatus.COMPLETED, JobStatus.FAILED]),
+        completed_query = db.query(Job).filter(
+            Job.status == JobStatus.COMPLETED,
             Job.completed_at >= recent_cutoff
         )
         if session_id:
-            recent_query = recent_query.filter(Job.session_id == session_id)
-        recent_jobs = recent_query.all()
+            completed_query = completed_query.filter(Job.session_id == session_id)
+        completed_jobs = completed_query.all()
+
+        # Failed jobs for session (auto-dismiss after 20 minutes)
+        failed_cutoff = datetime.now(timezone.utc) - timedelta(minutes=20)
+        failed_query = db.query(Job).filter(
+            Job.status == JobStatus.FAILED,
+            Job.completed_at >= failed_cutoff
+        )
+        if session_id:
+            failed_query = failed_query.filter(Job.session_id == session_id)
+        failed_jobs = failed_query.all()
 
         # Combine and sort: completed jobs first, then by created_at (newest first within each group)
-        all_jobs = active_jobs + recent_jobs
+        all_jobs = active_jobs + completed_jobs + failed_jobs
         # Sort key: (0 if completed/failed, 1 otherwise), then by created_at descending
         all_jobs.sort(
             key=lambda j: (
@@ -344,6 +354,7 @@ class JobService:
 
             item["entry_id"] = entry_id
             item["storage_path"] = storage_path
+            item["error_message"] = job.error_message
             result.append(item)
 
         return result
@@ -728,6 +739,7 @@ class JobService:
             activity_types = result_summary.get('activity_types')
             qed = result_summary.get('qed', 0.0)
             num_outliers = result_summary.get('num_outliers', 0)
+            similar_compounds = result_summary.get('similar_count', result_summary.get('total_compounds', 0))
 
             # For duplicates, always create new entry (don't update existing)
             if is_duplicate:
@@ -747,6 +759,7 @@ class JobService:
                     activity_types=activity_types,
                     qed=qed,
                     num_outliers=num_outliers,
+                    similar_compounds=similar_compounds,
                     author_name=result_summary.get('author_name'),
                     storage_path=storage_path,
                     is_duplicate=True,
@@ -788,6 +801,7 @@ class JobService:
                 existing.activity_types = activity_types
                 existing.qed = qed
                 existing.num_outliers = num_outliers
+                existing.similar_compounds = similar_compounds
                 existing.author_name = result_summary.get('author_name')
                 existing.storage_path = storage_path
                 existing.processed_at = datetime.now(timezone.utc)  # Update timestamp
@@ -812,6 +826,7 @@ class JobService:
                     activity_types=activity_types,
                     qed=qed,
                     num_outliers=num_outliers,
+                    similar_compounds=similar_compounds,
                     author_name=result_summary.get('author_name'),
                     storage_path=storage_path,
                     is_duplicate=is_duplicate,

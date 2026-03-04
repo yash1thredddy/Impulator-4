@@ -102,7 +102,7 @@ def render_job_form() -> Optional[str]:
     with col1:
         similarity_threshold = st.slider(
             "Similarity Threshold (%)",
-            min_value=30,
+            min_value=40,
             max_value=100,
             value=config.DEFAULT_SIMILARITY_THRESHOLD,
             help="Minimum similarity for ChEMBL compound search"
@@ -700,7 +700,7 @@ def render_csv_upload_form() -> Optional[str]:
 
     similarity_threshold = st.slider(
         "Similarity Threshold (%)",
-        min_value=30,
+        min_value=40,
         max_value=100,
         value=config.DEFAULT_SIMILARITY_THRESHOLD,
         key="batch_similarity"
