@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Callable, Any
 
 import requests
 from requests.adapters import HTTPAdapter
+from urllib.parse import quote as _url_quote
 from urllib3.util.retry import Retry
 
 # Configure logging
@@ -43,6 +44,14 @@ CHEMBL_RESPONSE_KEYS = {
 # Rate limiting configuration
 RATE_LIMIT_CALLS = 10  # Max calls per window
 RATE_LIMIT_WINDOW = 1.0  # Window size in seconds
+
+
+def _url_encode_smiles(smiles: str) -> str:
+    """URL-encode SMILES for use in ChEMBL REST API URL paths.
+
+    SMILES can contain URL-significant characters like /, #, +, @, [, ].
+    """
+    return _url_quote(smiles, safe='')
 
 
 class RateLimiter:
@@ -335,6 +344,111 @@ def _get_response_data(data: Optional[Dict], endpoint: str) -> List[Dict]:
     return data.get(response_key, [])
 
 
+def cascade_similarity_counts(
+    smiles: str,
+    start_threshold: int,
+    min_threshold: int = 40,
+    step: int = 10,
+) -> List[Dict[str, int]]:
+    """Probe lower similarity thresholds and return compound count per tier.
+
+    Uses REST API with ``limit=1`` so only ``page_meta.total_count`` is
+    transferred — no actual compound data is fetched.
+
+    Args:
+        smiles: Query SMILES string.
+        start_threshold: The user's original threshold (probing starts one step below).
+        min_threshold: Lowest threshold to probe (default 40%).
+        step: How much to decrease the threshold each iteration.
+
+    Returns:
+        List of ``{"threshold": int, "count": int}`` dicts, one per probed tier.
+        Empty list if *smiles* is falsy or all probes fail.
+    """
+    if not smiles:
+        return []
+
+    results: List[Dict[str, int]] = []
+    threshold = start_threshold - step
+
+    while threshold >= min_threshold:
+        try:
+            url = (
+                f"{CHEMBL_REST_API_BASE}/similarity/{_url_encode_smiles(smiles)}/{threshold}.json"
+            )
+            _chembl_rate_limiter.wait()
+            resp = session.get(
+                url,
+                params={"limit": 1, "only": "molecule_chembl_id"},
+                timeout=API_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            count = data.get("page_meta", {}).get("total_count", 0)
+            results.append({"threshold": threshold, "count": count})
+        except Exception as e:
+            logger.warning(f"Cascade probe failed at {threshold}%: {e}")
+            # Return what we've collected so far — don't let one failure kill the rest
+            break
+
+        threshold -= step
+
+    return results
+
+
+def probe_all_thresholds(
+    smiles: str,
+    start_threshold: int,
+    min_threshold: int = 40,
+    step: int = 10,
+) -> List[Dict[str, int]]:
+    """Probe ALL thresholds from start down to min, returning count per tier.
+
+    Unlike cascade_similarity_counts, this:
+    - Includes the start_threshold itself
+    - Returns ALL tiers including 0-count ones
+    - Does not stop on failure (skips failed probes with count=0)
+
+    Args:
+        smiles: Query SMILES string.
+        start_threshold: The user's requested threshold (included in probing).
+        min_threshold: Lowest threshold to probe (default 40%).
+        step: How much to decrease the threshold each iteration.
+
+    Returns:
+        List of ``{"threshold": int, "count": int}`` dicts for every tier.
+        Empty list if *smiles* is falsy.
+    """
+    if not smiles:
+        return []
+
+    results: List[Dict[str, int]] = []
+    threshold = start_threshold
+
+    while threshold >= min_threshold:
+        try:
+            url = (
+                f"{CHEMBL_REST_API_BASE}/similarity/{_url_encode_smiles(smiles)}/{threshold}.json"
+            )
+            _chembl_rate_limiter.wait()
+            resp = session.get(
+                url,
+                params={"limit": 1, "only": "molecule_chembl_id"},
+                timeout=API_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            count = data.get("page_meta", {}).get("total_count", 0)
+            results.append({"threshold": threshold, "count": count})
+        except Exception as e:
+            logger.warning(f"Availability probe failed at {threshold}%: {e}")
+            results.append({"threshold": threshold, "count": 0})
+
+        threshold -= step
+
+    return results
+
+
 def rest_api_fetch_activities(
     chembl_ids: List[str],
     activity_types: Optional[List[str]] = None,
@@ -449,7 +563,7 @@ def rest_api_similarity_search(
         params = {
             "smiles": smiles,
             "similarity": similarity_threshold,
-            "only": "molecule_chembl_id",
+            "only": "molecule_chembl_id,similarity",
             "limit": CHEMBL_MAX_LIMIT,
             "offset": offset
         }
@@ -467,7 +581,7 @@ def rest_api_similarity_search(
         for mol in molecules:
             chembl_id = mol.get('molecule_chembl_id')
             if chembl_id:
-                all_results.append({"ChEMBL ID": chembl_id})
+                all_results.append({"ChEMBL ID": chembl_id, "Similarity": float(mol.get('similarity', 0))})
 
         if progress_callback:
             total = data.get('page_meta', {}).get('total_count', 0)
@@ -1092,11 +1206,11 @@ def _similarity_search_with_timeout(smiles: str, similarity_threshold: int, max_
             results = client['similarity'].filter(
                 smiles=smiles,
                 similarity=similarity_threshold
-            ).only(['molecule_chembl_id'])
+            ).only(['molecule_chembl_id', 'similarity'])
 
             # Convert to list to actually fetch the data
             result_list = list(results)
-            return [{"ChEMBL ID": result['molecule_chembl_id']} for result in result_list]
+            return [{"ChEMBL ID": result['molecule_chembl_id'], "Similarity": float(result.get('similarity', 0))} for result in result_list]
 
         except Exception as e:
             last_error = e

@@ -40,6 +40,7 @@ from backend.models.database import JobStatus  # noqa: E402
 from backend.modules.api_client import (  # noqa: E402
     get_chembl_ids,
     get_drug_indications_batch,
+    cascade_similarity_counts,
 )
 from backend.modules.efficiency_metrics import calculate_efficiency_metrics_dataframe  # noqa: E402
 from backend.modules.efficiency_planes import calculate_plane_metrics_dataframe  # noqa: E402
@@ -114,8 +115,21 @@ class CompoundService:
                 self._update_progress(db, job_id, 5, "Searching ChEMBL for similar compounds...")
                 chembl_ids = self._search_similar_compounds(smiles, similarity_threshold)
 
+                # Build similarity score lookup before any filtering
+                similarity_scores = {
+                    d.get('ChEMBL ID'): d.get('Similarity', 0)
+                    for d in chembl_ids if d.get('ChEMBL ID')
+                }
+                all_similar_chembl_ids = list(similarity_scores.keys())
+
                 if not chembl_ids:
-                    self._fail_job(db, job_id, "No similar compounds found in ChEMBL")
+                    # Probe lower thresholds so the user knows where data exists
+                    self._update_progress(db, job_id, 10, "Searching lower thresholds...")
+                    cascade = cascade_similarity_counts(smiles, similarity_threshold)
+                    error_msg = "No similar compounds found in ChEMBL"
+                    if cascade:
+                        error_msg += f" at {similarity_threshold}% threshold"
+                    self._fail_job(db, job_id, error_msg, cascade_results=cascade)
                     return
 
                 # Check for cancellation after ChEMBL search
@@ -134,7 +148,13 @@ class CompoundService:
                 self._update_progress(db, job_id, 40, f"Retrieved {len(all_results)} bioactivity records")
 
                 if not all_results:
-                    self._fail_job(db, job_id, "No bioactivity data found")
+                    # Probe lower thresholds — structural matches exist but lack activity data
+                    self._update_progress(db, job_id, 35, "Searching lower thresholds...")
+                    cascade = cascade_similarity_counts(smiles, similarity_threshold)
+                    error_msg = "No bioactivity data found"
+                    if cascade:
+                        error_msg += f" at {similarity_threshold}% threshold"
+                    self._fail_job(db, job_id, error_msg, cascade_results=cascade)
                     return
 
                 # Check for cancellation after fetching activities (long operation)
@@ -145,6 +165,10 @@ class CompoundService:
                 self._update_progress(db, job_id, 42, "Processing compounds & calculating metrics...")
                 df_results = pd.DataFrame(all_results)
                 df_results.replace("No data", np.nan, inplace=True)
+
+                # Map similarity scores onto results
+                if 'ChEMBL_ID' in df_results.columns:
+                    df_results['Similarity'] = df_results['ChEMBL_ID'].map(similarity_scores).fillna(0)
 
                 # Calculate molecular descriptors (QED, NPOL, Heavy_Atoms) from SMILES
                 self._update_progress(db, job_id, 44, "Calculating molecular descriptors...")
@@ -198,19 +222,31 @@ class CompoundService:
                 df_results = self._add_chemical_classification(df_results)
                 self._update_progress(db, job_id, 84, "Chemical classification complete")
 
-                # Step 6.5: Fetch drug indications (separate data, not merged with main df)
-                self._update_progress(db, job_id, 85, "Fetching drug indications...")
+                # Step 6.5: Build all similar molecules catalog
+                self._update_progress(db, job_id, 84, "Building similar molecules catalog...")
+                try:
+                    all_similar_df = self._build_all_similar_df(
+                        all_similar_chembl_ids, similarity_scores, df_results,
+                        lambda pct, msg: self._update_progress(db, job_id, 84 + int(pct * 3), msg)
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to build all similar molecules catalog: {e}")
+                    all_similar_df = pd.DataFrame()
+
+                # Step 6.6: Fetch drug indications (separate data, not merged with main df)
+                self._update_progress(db, job_id, 87, "Fetching drug indications...")
                 indications_df = self._fetch_drug_indications(
                     df_results,
-                    lambda pct, msg: self._update_progress(db, job_id, 85 + int(pct * 3), msg)
+                    lambda pct, msg: self._update_progress(db, job_id, 87 + int(pct * 2), msg)
                 )
-                self._update_progress(db, job_id, 88, f"Drug indications complete ({len(indications_df)} found)")
+                self._update_progress(db, job_id, 89, f"Drug indications complete ({len(indications_df)} found)")
 
                 # Step 7: Save results (90%)
                 self._update_progress(db, job_id, 89, "Saving results...")
                 result_path, result_summary = self._save_results(
                     compound_name, smiles, similarity_threshold, activity_types, df_results, indications_df,
-                    entry_id=entry_id,  # Pass entry_id for UUID-based storage path
+                    all_similar_df=all_similar_df,
+                    entry_id=entry_id,
                     author_name=author_name,
                 )
                 # Add entry_id to result_summary for database
@@ -220,6 +256,7 @@ class CompoundService:
                 # Explicit DataFrame cleanup to reduce memory pressure
                 del df_results
                 del indications_df
+                del all_similar_df
 
                 # Step 8: Upload to Azure using entry_id-based path (95%)
                 self._update_progress(db, job_id, 92, "Uploading to Azure...")
@@ -289,10 +326,10 @@ class CompoundService:
         from backend.services.job_service import job_service
         job_service.complete_job(db, job_id, result_path, result_summary)
 
-    def _fail_job(self, db, job_id: str, error_message: str) -> None:
-        """Mark job as failed."""
+    def _fail_job(self, db, job_id: str, error_message: str, cascade_results=None) -> None:
+        """Mark job as failed, optionally storing cascade similarity data."""
         from backend.services.job_service import job_service
-        job_service.fail_job(db, job_id, error_message)
+        job_service.fail_job(db, job_id, error_message, cascade_results=cascade_results)
 
     def _is_job_cancelled(self, db, job_id: str) -> bool:
         """Check if job has been cancelled by user.
@@ -352,11 +389,11 @@ class CompoundService:
                 results = similarity.filter(
                     smiles=smiles,
                     similarity=similarity_threshold
-                ).only(['molecule_chembl_id'])
+                ).only(['molecule_chembl_id', 'similarity'])
 
                 # Explicit list conversion to handle pagination issues
                 result_list = list(results)
-                return [{"ChEMBL ID": r['molecule_chembl_id']} for r in result_list]
+                return [{"ChEMBL ID": r['molecule_chembl_id'], "Similarity": float(r.get('similarity', 0))} for r in result_list]
 
             except Exception as e:
                 last_error = e
@@ -1003,6 +1040,107 @@ class CompoundService:
             logger.error(f"Batch drug indications fetch failed: {e}")
             return pd.DataFrame()
 
+    def _build_all_similar_df(
+        self,
+        all_chembl_ids: List[str],
+        similarity_scores: Dict[str, float],
+        df_results: pd.DataFrame,
+        progress_callback: Callable[[float, str], None],
+    ) -> pd.DataFrame:
+        """Build a DataFrame of ALL similar compounds (including those without bioactivity).
+
+        Reuses data from df_results for compounds that already have bioactivity
+        (avoids duplicate API calls, descriptor calculations, and interference analysis).
+        Only fetches/processes the delta for compounds WITHOUT bioactivity.
+
+        Args:
+            all_chembl_ids: All ChEMBL IDs from similarity search
+            similarity_scores: Mapping of ChEMBL ID to similarity score
+            df_results: Main results DataFrame (compounds WITH bioactivity)
+            progress_callback: Progress callback (0.0-1.0, message)
+
+        Returns:
+            DataFrame with all similar compounds and their properties
+        """
+        from backend.modules.api_client import fetch_batch_molecule_data
+
+        if not all_chembl_ids:
+            return pd.DataFrame()
+
+        # Identify which compounds already have data in df_results (avoid re-processing)
+        compounds_with_data = set()
+        if df_results is not None and 'ChEMBL_ID' in df_results.columns:
+            compounds_with_data = set(df_results['ChEMBL_ID'].dropna().unique())
+        new_chembl_ids = [cid for cid in all_chembl_ids if cid not in compounds_with_data]
+
+        # Extract rows for already-processed compounds from df_results
+        reuse_cols = ['ChEMBL_ID', 'Molecule_Name', 'SMILES', 'Molecular_Weight', 'TPSA',
+                      'QED', 'LogP', 'HBA', 'HBD', 'Heavy_Atoms',
+                      'PAINS_Violation', 'Aggregator_Risk', 'BRENK_Alerts', 'NIH_Alerts',
+                      'Kingdom', 'Superclass']
+        existing_rows = pd.DataFrame()
+        if compounds_with_data and df_results is not None:
+            available_cols = [c for c in reuse_cols if c in df_results.columns]
+            existing_rows = df_results[available_cols].drop_duplicates('ChEMBL_ID').copy()
+            existing_rows['Has_Bioactivity'] = True
+            existing_rows['Similarity'] = existing_rows['ChEMBL_ID'].map(similarity_scores).fillna(0)
+
+        # Fetch molecule data only for NEW compounds (not in df_results)
+        new_rows = pd.DataFrame()
+        if new_chembl_ids:
+            progress_callback(0.0, f"Fetching molecule data for {len(new_chembl_ids)} new compounds...")
+            mol_data = fetch_batch_molecule_data(
+                new_chembl_ids,
+                progress_callback=lambda pct, msg: progress_callback(pct * 0.3, msg),
+            )
+
+            rows = []
+            for chembl_id in new_chembl_ids:
+                mol = mol_data.get(chembl_id, {})
+                props = mol.get('molecule_properties', {}) or {}
+                rows.append({
+                    'ChEMBL_ID': chembl_id,
+                    'Molecule_Name': (mol.get('pref_name') or chembl_id),
+                    'SMILES': (mol.get('molecule_structures') or {}).get('canonical_smiles', ''),
+                    'Molecular_Weight': props.get('full_mwt'),
+                    'TPSA': props.get('psa'),
+                    'Similarity': similarity_scores.get(chembl_id, 0),
+                })
+
+            new_rows = pd.DataFrame(rows)
+            if not new_rows.empty:
+                for col in ['Molecular_Weight', 'TPSA', 'Similarity']:
+                    if col in new_rows.columns:
+                        new_rows[col] = pd.to_numeric(new_rows[col], errors='coerce')
+
+                new_rows['Has_Bioactivity'] = False
+
+                # Only run descriptors/interference/classification on NEW compounds
+                progress_callback(0.3, "Calculating molecular descriptors...")
+                new_rows = self._calculate_molecular_descriptors(
+                    new_rows,
+                    lambda pct, msg: progress_callback(0.3 + pct * 0.2, msg)
+                )
+
+                progress_callback(0.5, "Running assay interference analysis...")
+                new_rows = self._add_assay_interference_flags(new_rows)
+
+                if len(new_rows) <= 100:
+                    progress_callback(0.7, "Getting chemical classifications...")
+                    new_rows = self._add_chemical_classification(new_rows)
+        else:
+            progress_callback(0.7, "All compounds already processed")
+
+        # Combine existing + new
+        dfs_to_concat = [d for d in [existing_rows, new_rows] if not d.empty]
+        if not dfs_to_concat:
+            return pd.DataFrame()
+
+        df = pd.concat(dfs_to_concat, ignore_index=True)
+        df = df.sort_values('Similarity', ascending=False).reset_index(drop=True)
+        progress_callback(1.0, f"All similar molecules catalog complete ({len(df)} compounds)")
+        return df
+
     def _save_results(
         self,
         compound_name: str,
@@ -1011,6 +1149,7 @@ class CompoundService:
         activity_types: Optional[List[str]],
         df_results: pd.DataFrame,
         indications_df: Optional[pd.DataFrame] = None,
+        all_similar_df: Optional[pd.DataFrame] = None,
         entry_id: Optional[str] = None,
         author_name: Optional[str] = None,
     ) -> tuple:
@@ -1024,6 +1163,7 @@ class CompoundService:
             activity_types: Activity types processed
             df_results: Results DataFrame
             indications_df: Optional DataFrame with drug indications (separate file)
+            all_similar_df: Optional DataFrame with ALL similar compounds (including those without bioactivity)
             entry_id: Optional UUID for the compound entry (used for ZIP filename)
             author_name: Name of the author who submitted the analysis
 
@@ -1066,6 +1206,7 @@ class CompoundService:
 
         # Add similar_count for frontend
         result_summary['similar_count'] = result_summary.get('total_compounds', 0)
+        result_summary['compounds_with_data'] = result_summary.get('total_compounds', 0)
         result_summary['smiles'] = smiles
 
         # Add fields for home page display (matching old UI)
@@ -1141,6 +1282,20 @@ class CompoundService:
         else:
             result_summary['drug_indications_count'] = 0
             result_summary['compounds_with_indications'] = 0
+
+        # Save all similar molecules CSV (includes compounds without bioactivity data)
+        if all_similar_df is not None and not all_similar_df.empty:
+            try:
+                all_similar_csv = os.path.join(compound_folder, "all_similar_molecules.csv")
+                all_similar_df.to_csv(all_similar_csv, index=False)
+                logger.info(f"Saved {len(all_similar_df)} all similar molecules")
+                result_summary['total_similar'] = len(all_similar_df)
+            except Exception as e:
+                logger.warning(f"Could not save all similar molecules: {e}")
+
+        # Update similar_count to reflect total (not just with-data)
+        if result_summary.get('total_similar'):
+            result_summary['similar_count'] = result_summary['total_similar']
 
         # Save metadata and summary after all fields are finalized
         metadata_filename = os.path.join(compound_folder, f"{safe_name}_metadata.json")

@@ -22,6 +22,25 @@ SMILES_PATTERN = re.compile(r'^[A-Za-z0-9@+\-\[\]\(\)\\/#=%\.\*\:]+$')
 COMPOUND_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9\-_\s\(\)\[\]',\.]+$")
 
 
+def _validate_smiles_field(v: str) -> str:
+    """Shared SMILES validation logic for all schemas."""
+    if not v or not v.strip():
+        raise ValueError('SMILES string cannot be empty')
+    v = v.strip()
+    if len(v) > 2000:
+        raise ValueError('SMILES too long (max 2000 characters)')
+    if not SMILES_PATTERN.match(v):
+        raise ValueError('SMILES contains invalid characters')
+    if RDKIT_AVAILABLE:
+        try:
+            mol = Chem.MolFromSmiles(v)
+            if mol is None:
+                raise ValueError('Invalid SMILES: could not parse as a valid molecule')
+        except Exception as e:
+            raise ValueError(f'Invalid SMILES: {str(e)}')
+    return v
+
+
 # Enums
 class JobStatus(str, Enum):
     PENDING = "pending"
@@ -104,34 +123,7 @@ class JobCreate(BaseModel):
     @field_validator('smiles')
     @classmethod
     def validate_smiles(cls, v: str) -> str:
-        """Validate SMILES string format and chemical validity.
-
-        Uses whitelist pattern to only allow valid SMILES characters,
-        preventing injection attacks. RDKit validation is required if available.
-        """
-        if not v or not v.strip():
-            raise ValueError('SMILES string cannot be empty')
-
-        v = v.strip()
-
-        # Length check
-        if len(v) > 2000:
-            raise ValueError('SMILES too long (max 2000 characters)')
-
-        # Whitelist pattern check - only valid SMILES characters
-        if not SMILES_PATTERN.match(v):
-            raise ValueError('SMILES contains invalid characters')
-
-        # RDKit validation (required, not optional)
-        if RDKIT_AVAILABLE:
-            try:
-                mol = Chem.MolFromSmiles(v)
-                if mol is None:
-                    raise ValueError('Invalid SMILES: could not parse as a valid molecule')
-            except Exception as e:
-                raise ValueError(f'Invalid SMILES: {str(e)}')
-
-        return v
+        return _validate_smiles_field(v)
 
     @field_validator('compound_name')
     @classmethod
@@ -315,6 +307,8 @@ class ActiveJobResponse(BaseModel):
     entry_id: Optional[str] = None
     storage_path: Optional[str] = None
     error_message: Optional[str] = None
+    cascade_results: Optional[List[Dict]] = None  # [{threshold: 80, count: 5}, ...]
+    input_params: Optional[Dict] = None  # Original job params (included for cascade resubmission)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -426,6 +420,81 @@ class CheckDuplicatesResponse(BaseModel):
     )
 
 
+# --- Availability Check Schemas ---
+
+class CheckAvailabilityRequest(BaseModel):
+    """Pre-submission check for ChEMBL data availability."""
+    smiles: str = Field(..., min_length=1, max_length=5000)
+    similarity_threshold: int = Field(default=90, ge=40, le=100)
+    activity_types: Optional[List[str]] = None
+
+    @field_validator('smiles')
+    @classmethod
+    def validate_smiles(cls, v: str) -> str:
+        return _validate_smiles_field(v)
+
+
+class CompoundInput(BaseModel):
+    """Compound identifier for availability checks."""
+    compound_name: str = Field(..., min_length=1, max_length=100)
+    smiles: str = Field(..., min_length=1, max_length=5000)
+
+    @field_validator('smiles')
+    @classmethod
+    def validate_smiles(cls, v: str) -> str:
+        return _validate_smiles_field(v)
+
+
+class CheckAvailabilityBatchRequest(BaseModel):
+    """Batch availability check — one probe per compound."""
+    compounds: List[CompoundInput] = Field(..., min_length=1, max_length=1000)
+    similarity_threshold: int = Field(default=90, ge=40, le=100)
+    activity_types: Optional[List[str]] = None
+
+
+class ExistingCompoundAtThreshold(BaseModel):
+    """An existing compound that matches by InChIKey, with config comparison."""
+    entry_id: str
+    compound_name: str
+    similarity_threshold: Optional[int] = None
+    activity_types: Optional[str] = None
+    config_match: str  # 'identical', 'different_threshold', 'different_activities', 'different_both'
+    config_diff: Optional[Dict] = None
+    imp_score: Optional[float] = None
+    processed_at: Optional[str] = None
+    author_name: Optional[str] = None
+
+
+class ThresholdAvailability(BaseModel):
+    """Data availability at a single threshold."""
+    threshold: int
+    count: int  # 0 = no data
+
+
+class CompoundAvailability(BaseModel):
+    """Availability result for a single compound."""
+    compound_name: str
+    smiles: str
+    available: bool  # True = data at requested threshold
+    count_at_threshold: int
+    thresholds: List[ThresholdAvailability] = []
+    existing_compounds: List[ExistingCompoundAtThreshold] = []
+    has_any_data: bool = True  # False = no data at ANY threshold
+
+
+class CheckAvailabilityResponse(BaseModel):
+    """Single compound availability response."""
+    result: CompoundAvailability
+
+
+class CheckAvailabilityBatchResponse(BaseModel):
+    """Batch availability response."""
+    results: List[CompoundAvailability] = []
+    available_count: int = 0
+    unavailable_count: int = 0
+    no_data_count: int = 0
+
+
 class DuplicateAction(str, Enum):
     """User action for handling duplicate compounds."""
 
@@ -475,22 +544,7 @@ class ResolveDuplicateRequest(BaseModel):
     @field_validator('smiles')
     @classmethod
     def validate_smiles(cls, v: str) -> str:
-        """Validate SMILES string format and chemical validity."""
-        if not v or not v.strip():
-            raise ValueError('SMILES string cannot be empty')
-        v = v.strip()
-        if len(v) > 2000:
-            raise ValueError('SMILES too long (max 2000 characters)')
-        if not SMILES_PATTERN.match(v):
-            raise ValueError('SMILES contains invalid characters')
-        if RDKIT_AVAILABLE:
-            try:
-                mol = Chem.MolFromSmiles(v)
-                if mol is None:
-                    raise ValueError('Invalid SMILES: could not parse as a valid molecule')
-            except Exception as e:
-                raise ValueError(f'Invalid SMILES: {str(e)}')
-        return v
+        return _validate_smiles_field(v)
 
     @field_validator('compound_name')
     @classmethod

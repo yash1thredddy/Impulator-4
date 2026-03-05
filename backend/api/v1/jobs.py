@@ -47,8 +47,16 @@ from backend.models.schemas import (
     CancelResponse,
     DuplicateMatch,
     InternalDuplicateMatch,
+    CheckAvailabilityRequest,
+    CheckAvailabilityBatchRequest,
+    CheckAvailabilityResponse,
+    CheckAvailabilityBatchResponse,
+    CompoundAvailability,
+    ThresholdAvailability,
+    ExistingCompoundAtThreshold,
 )
 from backend.services.job_service import job_service, generate_inchikey
+from backend.modules.api_client import probe_all_thresholds
 from backend.models.database import Compound, DeletedCompound, Job
 from backend.core.azure_sync import delete_result_from_azure_by_entry_id
 from backend.core.audit import (
@@ -425,6 +433,263 @@ def _verify_job_ownership(db: Session, job_id: str, session_id: str) -> Job:
     return job
 
 
+def _build_config_diff(
+    existing_compound: Compound,
+    submitted_threshold: int,
+    submitted_activity_types: str,
+) -> Optional[Dict]:
+    """Build config diff dict if configs differ, else None."""
+    config_match = _compute_config_match(existing_compound, submitted_threshold, submitted_activity_types)
+    if config_match == "identical":
+        return None
+    return {
+        "similarity_threshold": {
+            "existing": existing_compound.similarity_threshold or 90,
+            "submitted": submitted_threshold,
+        },
+        "activity_types": {
+            "existing": _normalize_activity_types_str(existing_compound.activity_types),
+            "submitted": submitted_activity_types,
+        },
+    }
+
+
+def _build_existing_at_threshold(
+    existing_compound: Compound,
+    submitted_threshold: int,
+    submitted_activity_types: str,
+) -> ExistingCompoundAtThreshold:
+    """Build ExistingCompoundAtThreshold from a Compound ORM object."""
+    config_match = _compute_config_match(existing_compound, submitted_threshold, submitted_activity_types)
+    config_diff = _build_config_diff(existing_compound, submitted_threshold, submitted_activity_types)
+
+    return ExistingCompoundAtThreshold(
+        entry_id=existing_compound.entry_id,
+        compound_name=existing_compound.compound_name,
+        similarity_threshold=existing_compound.similarity_threshold,
+        activity_types=_normalize_activity_types_str(existing_compound.activity_types),
+        config_match=config_match,
+        config_diff=config_diff,
+        imp_score=existing_compound.imp_score,
+        processed_at=existing_compound.processed_at.isoformat() if existing_compound.processed_at else None,
+        author_name=existing_compound.author_name,
+    )
+
+
+def _check_single_availability(
+    smiles: str,
+    compound_name: str,
+    similarity_threshold: int,
+    activity_types: Optional[List[str]],
+    db: Session,
+) -> CompoundAvailability:
+    """Check ChEMBL data availability for a single compound.
+
+    Probes all thresholds and finds existing compounds by InChIKey.
+    """
+    submitted_at = _normalize_activity_types(activity_types)
+
+    # Probe ALL thresholds (includes requested threshold)
+    thresholds = probe_all_thresholds(smiles, similarity_threshold)
+
+    threshold_items = [
+        ThresholdAvailability(threshold=t["threshold"], count=t["count"])
+        for t in thresholds
+    ]
+
+    # Find count at requested threshold
+    count_at_threshold = 0
+    for t in thresholds:
+        if t["threshold"] == similarity_threshold:
+            count_at_threshold = t["count"]
+            break
+
+    available = count_at_threshold > 0
+    has_any_data = any(t["count"] > 0 for t in thresholds)
+
+    # Find existing compounds by InChIKey
+    existing_compounds: List[ExistingCompoundAtThreshold] = []
+    inchikey = generate_inchikey(smiles)
+    structure_key = _inchikey_structure_key(inchikey)
+    if structure_key:
+        existing = db.query(Compound).filter(
+            Compound.inchikey.like(f"{structure_key}%")
+        ).all()
+        for comp in existing:
+            existing_compounds.append(
+                _build_existing_at_threshold(comp, similarity_threshold, submitted_at)
+            )
+
+    return CompoundAvailability(
+        compound_name=compound_name,
+        smiles=smiles,
+        available=available,
+        count_at_threshold=count_at_threshold,
+        thresholds=threshold_items,
+        existing_compounds=existing_compounds,
+        has_any_data=has_any_data,
+    )
+
+
+@router.post(
+    "/check-availability",
+    response_model=CheckAvailabilityResponse,
+    summary="Check ChEMBL data availability before submission",
+)
+async def check_availability(
+    request: CheckAvailabilityRequest,
+    db: Session = Depends(get_db),
+    session_id: str = Depends(validate_session_id),
+):
+    """Check whether ChEMBL has similarity data for a compound at the requested
+    threshold and all lower thresholds (down to 40%).
+
+    This is a fast pre-submission check (~3-5s) that prevents wasting minutes
+    on jobs that would fail due to no ChEMBL data.
+
+    Also returns existing compounds with the same InChIKey (structure matches)
+    with config comparison details.
+    """
+    try:
+        result = _check_single_availability(
+            smiles=request.smiles,
+            compound_name="query",
+            similarity_threshold=request.similarity_threshold,
+            activity_types=request.activity_types,
+            db=db,
+        )
+        return CheckAvailabilityResponse(result=result)
+    except Exception as e:
+        logger.error(f"Availability check failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Availability check failed: {str(e)}")
+
+
+@router.post(
+    "/check-availability/batch",
+    response_model=CheckAvailabilityBatchResponse,
+    summary="Batch check ChEMBL data availability",
+)
+async def check_availability_batch(
+    request: CheckAvailabilityBatchRequest,
+    db: Session = Depends(get_db),
+    session_id: str = Depends(validate_session_id),
+):
+    """Batch availability check for multiple compounds.
+
+    Probes ChEMBL for each compound at the requested threshold and all lower
+    thresholds. Returns per-compound availability with existing compound matches.
+
+    Performance: ~3-8s for 50 compounds (parallel probing).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    results: List[CompoundAvailability] = []
+
+    # Pre-fetch all existing compounds by InChIKey in a single DB query
+    # Build InChIKey map for all compounds
+    inchikey_map: Dict[str, str] = {}  # compound_name -> inchikey
+    structure_keys: set = set()
+    for compound in request.compounds:
+        smiles = compound.smiles
+        name = compound.compound_name
+        if smiles:
+            ik = generate_inchikey(smiles)
+            if ik:
+                inchikey_map[name] = ik
+                sk = _inchikey_structure_key(ik)
+                if sk:
+                    structure_keys.add(sk)
+
+    # Single DB query for all existing compounds
+    existing_by_structure: Dict[str, List[Compound]] = {}
+    if structure_keys:
+        from sqlalchemy import or_
+        filters = [Compound.inchikey.like(f"{sk}%") for sk in structure_keys]
+        all_existing = db.query(Compound).filter(or_(*filters)).all()
+        for comp in all_existing:
+            sk = _inchikey_structure_key(comp.inchikey)
+            if sk:
+                existing_by_structure.setdefault(sk, []).append(comp)
+
+    submitted_at = _normalize_activity_types(request.activity_types)
+
+    def _probe_compound(compound_input) -> CompoundAvailability:
+        smiles = compound_input.smiles
+        name = compound_input.compound_name
+
+        # Probe ChEMBL thresholds
+        thresholds = probe_all_thresholds(smiles, request.similarity_threshold)
+        threshold_items = [
+            ThresholdAvailability(threshold=t["threshold"], count=t["count"])
+            for t in thresholds
+        ]
+
+        count_at_threshold = 0
+        for t in thresholds:
+            if t["threshold"] == request.similarity_threshold:
+                count_at_threshold = t["count"]
+                break
+
+        available = count_at_threshold > 0
+        has_any_data = any(t["count"] > 0 for t in thresholds)
+
+        # Find existing compounds for this compound's InChIKey
+        existing_compounds: List[ExistingCompoundAtThreshold] = []
+        ik = inchikey_map.get(name)
+        if ik:
+            sk = _inchikey_structure_key(ik)
+            if sk:
+                for comp in existing_by_structure.get(sk, []):
+                    existing_compounds.append(
+                        _build_existing_at_threshold(comp, request.similarity_threshold, submitted_at)
+                    )
+
+        return CompoundAvailability(
+            compound_name=name,
+            smiles=smiles,
+            available=available,
+            count_at_threshold=count_at_threshold,
+            thresholds=threshold_items,
+            existing_compounds=existing_compounds,
+            has_any_data=has_any_data,
+        )
+
+    try:
+        # Parallelize ChEMBL probes (DB queries already done above)
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {
+                executor.submit(_probe_compound, c): c
+                for c in request.compounds
+            }
+            for future in as_completed(futures):
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    compound = futures[future]
+                    logger.warning(f"Availability probe failed for {compound.compound_name}: {e}")
+                    results.append(CompoundAvailability(
+                        compound_name=compound.compound_name,
+                        smiles=compound.smiles,
+                        available=False,
+                        count_at_threshold=0,
+                        has_any_data=False,
+                    ))
+
+        available_count = sum(1 for r in results if r.available)
+        no_data_count = sum(1 for r in results if not r.has_any_data)
+        unavailable_count = len(results) - available_count - no_data_count
+
+        return CheckAvailabilityBatchResponse(
+            results=results,
+            available_count=available_count,
+            unavailable_count=unavailable_count,
+            no_data_count=no_data_count,
+        )
+    except Exception as e:
+        logger.error(f"Batch availability check failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Batch availability check failed: {str(e)}")
+
+
 @router.post(
     "",
     status_code=201,
@@ -507,19 +772,7 @@ async def create_job(
         # Calculate the next available version name for duplicates
         suggested_name = get_next_version_name(db, existing_compound.compound_name)
 
-        # Build config diff for non-identical configs
-        config_diff = None
-        if config_match != "identical":
-            config_diff = {
-                "similarity_threshold": {
-                    "existing": existing_compound.similarity_threshold or 90,
-                    "submitted": submitted_threshold,
-                },
-                "activity_types": {
-                    "existing": _normalize_activity_types_str(existing_compound.activity_types),
-                    "submitted": submitted_at,
-                },
-            }
+        config_diff = _build_config_diff(existing_compound, submitted_threshold, submitted_at)
 
         logger.info(
             f"Duplicate found: {request.compound_name} matches "
@@ -929,18 +1182,7 @@ async def check_duplicates(
 
                     existing_compound = exact_config_match or first_non_duplicate or candidates_for_selection[0]
                     config_match = _compute_config_match(existing_compound, submitted_threshold, submitted_at)
-                    config_diff = None
-                    if config_match != "identical":
-                        config_diff = {
-                            "similarity_threshold": {
-                                "existing": existing_compound.similarity_threshold or 90,
-                                "submitted": submitted_threshold,
-                            },
-                            "activity_types": {
-                                "existing": _normalize_activity_types_str(existing_compound.activity_types),
-                                "submitted": submitted_at,
-                            },
-                        }
+                    config_diff = _build_config_diff(existing_compound, submitted_threshold, submitted_at)
 
                     match_type = (
                         "exact"
