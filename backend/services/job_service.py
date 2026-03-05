@@ -948,7 +948,7 @@ class JobService:
             job.error_message = error_message
             job.completed_at = datetime.now(timezone.utc)
 
-            if cascade_results:
+            if cascade_results is not None:
                 job.result_summary = json.dumps({"cascade_results": cascade_results})
 
             db.commit()

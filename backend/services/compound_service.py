@@ -1125,9 +1125,8 @@ class CompoundService:
                 progress_callback(0.5, "Running assay interference analysis...")
                 new_rows = self._add_assay_interference_flags(new_rows)
 
-                if len(new_rows) <= 100:
-                    progress_callback(0.7, "Getting chemical classifications...")
-                    new_rows = self._add_chemical_classification(new_rows)
+                progress_callback(0.7, "Getting chemical classifications...")
+                new_rows = self._add_chemical_classification(new_rows)
         else:
             progress_callback(0.7, "All compounds already processed")
 

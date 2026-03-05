@@ -27,17 +27,17 @@ def _validate_smiles_field(v: str) -> str:
     if not v or not v.strip():
         raise ValueError('SMILES string cannot be empty')
     v = v.strip()
-    if len(v) > 2000:
-        raise ValueError('SMILES too long (max 2000 characters)')
+    if len(v) > 5000:
+        raise ValueError('SMILES too long (max 5000 characters)')
     if not SMILES_PATTERN.match(v):
         raise ValueError('SMILES contains invalid characters')
     if RDKIT_AVAILABLE:
         try:
             mol = Chem.MolFromSmiles(v)
-            if mol is None:
-                raise ValueError('Invalid SMILES: could not parse as a valid molecule')
         except Exception as e:
             raise ValueError(f'Invalid SMILES: {str(e)}')
+        if mol is None:
+            raise ValueError('Invalid SMILES: could not parse as a valid molecule')
     return v
 
 

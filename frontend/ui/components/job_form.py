@@ -1020,24 +1020,69 @@ def render_csv_upload_form() -> Optional[str]:
     else:
         # Step 1.5: Availability check (runs once after duplicate check)
         if not st.session_state.get('batch_availability_check_done'):
-            # Build list of compounds that will be processed (new + those needing decisions)
-            new_compounds_list = st.session_state.get('batch_new', [])
+            # Build set of compound names that already exist with identical config
+            # (same threshold + activity types) — no need to check availability for these.
             structure_matches_raw = st.session_state.get('batch_structure_matches', [])
+            identical_config_names = set()
+            for match in structure_matches_raw:
+                if match.get('config_match') == 'identical':
+                    match_name = (match.get('compound_name') or '').strip().lower()
+                    if match_name:
+                        identical_config_names.add(match_name)
 
-            # Collect SMILES for compounds that need availability checking
+            # Collect compounds that need availability checking
             compounds_for_avail = []
             df_has_smiles_col = 'smiles' in df_mapped.columns
+            df_has_inchi_col = 'inchi' in df_mapped.columns
+            df_has_inchikey_col = 'inchikey' in df_mapped.columns
 
-            if df_has_smiles_col:
-                for row in df_mapped[['compound_name', 'smiles']].to_dict('records'):
+            # Pre-resolve InChIKeys to SMILES if needed (same pattern as batch submit)
+            inchikey_smiles_map = {}
+            if df_has_inchikey_col and not df_has_smiles_col and not df_has_inchi_col:
+                inchikeys_to_resolve = []
+                for _, row in df_mapped.iterrows():
+                    key_val = str(row.get('inchikey', '')).strip()
+                    if key_val and key_val.lower() not in ('nan', 'none', ''):
+                        inchikeys_to_resolve.append(key_val.upper())
+                if inchikeys_to_resolve:
+                    unique_keys = list(set(inchikeys_to_resolve))
+                    try:
+                        api_client = get_api_client()
+                        inchikey_smiles_map = api_client.resolve_inchikeys_batch(unique_keys)
+                    except Exception as e:
+                        logger.warning(f"InChIKey batch resolution failed: {e}")
+
+            # Build list with SMILES → InChI → InChIKey fallback
+            structural_cols = [c for c in ['compound_name', 'smiles', 'inchi', 'inchikey'] if c in df_mapped.columns]
+            if structural_cols:
+                for row in df_mapped[structural_cols].to_dict('records'):
                     name = _sanitize_and_limit_name(str(row.get('compound_name', '')).strip())
-                    smiles_val = str(row.get('smiles', '')).strip()
-                    if not name or not smiles_val or smiles_val.lower() in ('nan', 'none', ''):
+                    if not name:
                         continue
-                    compounds_for_avail.append({
-                        "compound_name": name,
-                        "smiles": smiles_val,
-                    })
+                    # Skip compounds that already exist with identical config
+                    if name.lower() in identical_config_names:
+                        continue
+
+                    # Fallback chain: SMILES → InChI → InChIKey
+                    smiles_val = None
+                    if df_has_smiles_col:
+                        raw = str(row.get('smiles', '')).strip()
+                        if raw and raw.lower() not in ('nan', 'none', ''):
+                            smiles_val = raw
+                    if not smiles_val and df_has_inchi_col:
+                        inchi_val = str(row.get('inchi', '')).strip()
+                        if inchi_val and inchi_val.lower() not in ('nan', 'none', ''):
+                            smiles_val = _inchi_to_smiles(inchi_val)
+                    if not smiles_val and df_has_inchikey_col:
+                        key_val = str(row.get('inchikey', '')).strip().upper()
+                        if key_val and key_val.lower() not in ('nan', 'none', ''):
+                            smiles_val = inchikey_smiles_map.get(key_val)
+
+                    if smiles_val:
+                        compounds_for_avail.append({
+                            "compound_name": name,
+                            "smiles": smiles_val,
+                        })
 
             if compounds_for_avail:
                 with st.spinner(f"Checking ChEMBL data availability for {len(compounds_for_avail)} compounds..."):

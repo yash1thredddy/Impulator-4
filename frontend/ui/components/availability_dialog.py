@@ -46,9 +46,16 @@ def _recompute_config_match(
 
     threshold_same = ec_threshold == selected_threshold
 
-    submitted_sorted = ",".join(sorted(a.strip() for a in submitted_activity_types.split(",") if a.strip())) if submitted_activity_types else ""
-    existing_sorted = ",".join(sorted(a.strip() for a in ec_activities.split(",") if a.strip())) if ec_activities else ""
-    activities_same = submitted_sorted == existing_sorted
+    # Backend default activity types — treat empty/missing as this set
+    _DEFAULT_ACTIVITIES = "AC50,EC50,GI50,IC50,Kd,Ki,MIC"
+
+    submitted_norm = submitted_activity_types.strip() if submitted_activity_types else ""
+    existing_norm = ec_activities.strip() if ec_activities else ""
+
+    # Normalize empty to default set for comparison
+    submitted_set = frozenset(a.strip() for a in (submitted_norm or _DEFAULT_ACTIVITIES).split(",") if a.strip())
+    existing_set = frozenset(a.strip() for a in (existing_norm or _DEFAULT_ACTIVITIES).split(",") if a.strip())
+    activities_same = submitted_set == existing_set
 
     if threshold_same and activities_same:
         return "identical"
@@ -212,19 +219,30 @@ def render_availability_dialog(
         label = f"**{th}%** — {count} compound{'s' if count != 1 else ''}"
 
         # Check for existing compound at this threshold (re-evaluated config)
+        # Prefer identical match over different-config matches
+        best_ec = None
+        best_match = None
         for ec in existing_compounds:
             match = _recompute_config_match(ec, th, submitted_at)
-            ec_name = ec.get("compound_name", "?")
             if match == "identical":
+                best_ec = ec
+                best_match = match
+                break  # identical is the best possible — stop early
+            elif best_ec is None:
+                best_ec = ec
+                best_match = match
+
+        if best_ec is not None:
+            ec_name = best_ec.get("compound_name", "?")
+            if best_match == "identical":
                 label += f"  ·  ✅ {ec_name} (same config — already done)"
             else:
                 diff_short = {
                     "different_threshold": "different threshold",
                     "different_activities": "different activities",
                     "different_both": "different config",
-                }.get(match, "different config")
+                }.get(best_match, "different config")
                 label += f"  ·  ⚠️ {ec_name} ({diff_short})"
-            break
 
         radio_labels.append(label)
         threshold_values.append(th)
@@ -321,8 +339,12 @@ def render_availability_dialog(
             ):
                 return ("submit", selected_threshold, active_match, "replace", None)
         with col3:
-            # Disable Keep Both if names collide and no new name provided
-            keep_both_disabled = names_collide and not (new_keep_both_name and new_keep_both_name.strip())
+            # Disable Keep Both if names collide and no valid new name provided
+            # Also block if user typed the same name as the existing compound
+            keep_both_disabled = names_collide and (
+                not (new_keep_both_name and new_keep_both_name.strip())
+                or (new_keep_both_name and new_keep_both_name.strip().lower() == ec_name.strip().lower())
+            )
             if st.button(
                 f"Keep Both at {selected_threshold}%",
                 key="avail_submit",
@@ -363,6 +385,8 @@ def clear_availability_state():
         'availability_requested_threshold',
         'availability_activity_types_str',
         'avail_keep_both_name',
+        'avail_threshold_radio',
+        'avail_keep_both_name_input',
     ]
     for key in keys_to_clear:
         st.session_state.pop(key, None)

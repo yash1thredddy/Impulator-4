@@ -536,7 +536,7 @@ def _check_single_availability(
     response_model=CheckAvailabilityResponse,
     summary="Check ChEMBL data availability before submission",
 )
-async def check_availability(
+def check_availability(
     request: CheckAvailabilityRequest,
     db: Session = Depends(get_db),
     session_id: str = Depends(validate_session_id),
@@ -560,8 +560,8 @@ async def check_availability(
         )
         return CheckAvailabilityResponse(result=result)
     except Exception as e:
-        logger.error(f"Availability check failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Availability check failed: {str(e)}")
+        logger.exception("Availability check failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post(
@@ -569,7 +569,7 @@ async def check_availability(
     response_model=CheckAvailabilityBatchResponse,
     summary="Batch check ChEMBL data availability",
 )
-async def check_availability_batch(
+def check_availability_batch(
     request: CheckAvailabilityBatchRequest,
     db: Session = Depends(get_db),
     session_id: str = Depends(validate_session_id),
@@ -587,7 +587,7 @@ async def check_availability_batch(
 
     # Pre-fetch all existing compounds by InChIKey in a single DB query
     # Build InChIKey map for all compounds
-    inchikey_map: Dict[str, str] = {}  # compound_name -> inchikey
+    inchikey_map: Dict[tuple, str] = {}  # (compound_name, smiles) -> inchikey
     structure_keys: set = set()
     for compound in request.compounds:
         smiles = compound.smiles
@@ -595,7 +595,7 @@ async def check_availability_batch(
         if smiles:
             ik = generate_inchikey(smiles)
             if ik:
-                inchikey_map[name] = ik
+                inchikey_map[(name, smiles)] = ik
                 sk = _inchikey_structure_key(ik)
                 if sk:
                     structure_keys.add(sk)
@@ -635,7 +635,7 @@ async def check_availability_batch(
 
         # Find existing compounds for this compound's InChIKey
         existing_compounds: List[ExistingCompoundAtThreshold] = []
-        ik = inchikey_map.get(name)
+        ik = inchikey_map.get((name, smiles))
         if ik:
             sk = _inchikey_structure_key(ik)
             if sk:
@@ -686,8 +686,8 @@ async def check_availability_batch(
             no_data_count=no_data_count,
         )
     except Exception as e:
-        logger.error(f"Batch availability check failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Batch availability check failed: {str(e)}")
+        logger.exception("Batch availability check failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post(

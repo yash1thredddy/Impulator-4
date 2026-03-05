@@ -388,8 +388,8 @@ def cascade_similarity_counts(
             results.append({"threshold": threshold, "count": count})
         except Exception as e:
             logger.warning(f"Cascade probe failed at {threshold}%: {e}")
-            # Return what we've collected so far — don't let one failure kill the rest
-            break
+            results.append({"threshold": threshold, "count": 0})
+            # Continue probing lower thresholds — one failure shouldn't stop the rest
 
         threshold -= step
 

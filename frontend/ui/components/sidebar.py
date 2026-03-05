@@ -375,8 +375,11 @@ def _resubmit_all_at_best_threshold(jobs: list) -> None:
     """Resubmit all cascade-eligible failed jobs, each at its highest available threshold."""
     client = get_api_client()
     submitted = 0
+    failed = 0
+    failure_reasons = []
     for job in jobs:
         params = job.get('input_params', {})
+        compound_name = params.get('compound_name') or job.get('compound_name', 'Unknown')
         smiles = params.get('smiles', '')
         if not smiles:
             continue
@@ -388,7 +391,7 @@ def _resubmit_all_at_best_threshold(jobs: list) -> None:
         best_threshold = max(t['threshold'] for t in tiers_with_data)
         try:
             response = client.submit_job(
-                compound_name=params.get('compound_name') or job.get('compound_name', 'Unknown'),
+                compound_name=compound_name,
                 smiles=smiles,
                 similarity_threshold=best_threshold,
                 activity_types=params.get('activity_types'),
@@ -400,11 +403,23 @@ def _resubmit_all_at_best_threshold(jobs: list) -> None:
                 if job_id:
                     _dismiss_failed_job(job_id)
                 submitted += 1
+            else:
+                failed += 1
+                reason = getattr(response, 'error', None) or 'submission rejected'
+                failure_reasons.append(f"{compound_name}: {reason}")
+                logger.warning(f"Resubmit failed for {compound_name}: {reason}")
         except Exception as e:
-            logger.error(f"Error resubmitting job: {e}")
+            failed += 1
+            failure_reasons.append(f"{compound_name}: {e}")
+            logger.error(f"Error resubmitting {compound_name}: {e}")
     if submitted:
         start_polling()
+    if submitted and not failed:
         st.toast(f"Resubmitted {submitted} jobs at their best thresholds")
+    elif submitted and failed:
+        st.toast(f"Resubmitted {submitted} jobs, {failed} failed")
+    elif failed:
+        st.toast(f"Failed to resubmit {failed} jobs")
 
 
 def _resubmit_at_threshold(job: Dict[str, Any], threshold: int) -> None:
