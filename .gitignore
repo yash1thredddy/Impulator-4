@@ -32,6 +32,7 @@ build/
 # Testing
 .pytest_cache/
 .coverage
+coverage.json
 htmlcov/
 /test_*.py
 

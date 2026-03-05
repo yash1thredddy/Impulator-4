@@ -37,13 +37,12 @@ def isolate_scheduler():
 
 @pytest.fixture(scope="function")
 def test_engine(tmp_path):
-    """Create a per-test SQLite engine isolated by file path.
+    """Override conftest's in-memory engine with a file-backed DB.
 
     A file-backed DB + NullPool avoids shared single-connection races under
     concurrent request tests.
     """
     from backend.core.database import Base
-    # Import models BEFORE create_all to register them with Base
     from backend.models.database import Job, Compound  # noqa: F401
 
     db_path = tmp_path / "test_error_handling.sqlite"
@@ -54,59 +53,13 @@ def test_engine(tmp_path):
     )
     Base.metadata.create_all(bind=engine)
     yield engine
-    # Using per-test db files; dispose only to avoid teardown lock flakes.
     engine.dispose()
 
 
 @pytest.fixture
-def mock_azure():
-    """Mock Azure storage for tests."""
-    with patch('backend.core.azure_sync.is_azure_configured', return_value=False):
-        with patch('backend.core.azure_sync.sync_db_to_azure', return_value=True):
-            with patch('backend.core.azure_sync.delete_result_from_azure_by_entry_id', return_value=True):
-                yield
-
-
-@pytest.fixture
-def client_with_db(test_engine, mock_azure):
-    """Create a test client with properly configured database.
-
-    This fixture patches both the get_db dependency AND the underlying engine/SessionLocal
-    to ensure all database operations use the test database.
-    """
-    from backend.main import app
-    from backend.core import database as db_module
-    from backend.core.database import get_db
-
-    # Save original values
-    original_engine = db_module.engine
-    original_session_local = db_module.SessionLocal
-
-    # Create new SessionLocal bound to test engine
-    TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
-
-    # Patch the module-level engine and SessionLocal
-    db_module.engine = test_engine
-    db_module.SessionLocal = TestSessionLocal
-
-    def override_get_db():
-        session = TestSessionLocal()
-        try:
-            yield session
-        finally:
-            session.close()
-
-    app.dependency_overrides[get_db] = override_get_db
-
-    # Mock the scheduler to prevent background job processing after test teardown
-    with patch('backend.core.scheduler.job_scheduler.trigger'):
-        with TestClient(app) as client:
-            yield client
-
-    # Restore original values
-    app.dependency_overrides.clear()
-    db_module.engine = original_engine
-    db_module.SessionLocal = original_session_local
+def client_with_db(client):
+    """Alias for the shared client fixture (legacy name used throughout this file)."""
+    return client
 
 
 class TestInvalidInputHandling:

@@ -861,7 +861,7 @@ def smart_load_summary(
                 with zf.open("summary.json") as f:
                     return json.load(f)
             else:
-                logger.warning(f"summary.json not found in ZIP (storage_path={storage_path}, entry_id={entry_id})")
+                logger.debug(f"summary.json not found in ZIP (storage_path={storage_path}, entry_id={entry_id})")
                 return None
 
     except Exception as e:
@@ -906,7 +906,7 @@ def smart_load_dataframe(
                 with zf.open(filename) as f:
                     return pd.read_csv(f)
             else:
-                logger.warning(f"{filename} not found in ZIP (storage_path={storage_path}, entry_id={entry_id})")
+                logger.debug(f"{filename} not found in ZIP (storage_path={storage_path}, entry_id={entry_id})")
                 return None
 
     except Exception as e:

@@ -3170,7 +3170,7 @@ def _load_compound_data(
             storage_path=storage_path
         )
         if summary is None:
-            logger.warning(f"Could not load summary for {compound_name} (entry_id={entry_id}, storage_path={storage_path})")
+            logger.debug(f"Could not load summary for {compound_name} (entry_id={entry_id}, storage_path={storage_path})")
             return None
 
         # Load results DataFrame using smart loader
@@ -5536,7 +5536,7 @@ def _render_versions_tab(versions: list, current_entry_id: str) -> None:
     styled = table_df.style.apply(_highlight_current, axis=1)
     st.markdown("##### All Versions")
     st.markdown("★ = original &nbsp;&nbsp; ◀ = currently viewing")
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+    st.dataframe(styled, width='stretch', hide_index=True)
 
     # Per-sibling expandable cards with config diffs
     st.markdown("##### Version Details")
