@@ -210,6 +210,27 @@ def _render_failed_jobs_section(failed_jobs: list) -> None:
     if not visible:
         return
     st.markdown("### Failed Jobs")
+
+    # Collect cascade-eligible jobs
+    cascade_jobs = []
+    for job in visible:
+        cascade = job.get('cascade_results')
+        if cascade:
+            tiers_with_data = [t for t in cascade if t.get('count', 0) > 0]
+            if tiers_with_data and job.get('input_params', {}).get('smiles'):
+                cascade_jobs.append(job)
+
+    # "Resubmit all" — each job at its own best (highest) available threshold
+    if len(cascade_jobs) >= 2:
+        st.button(
+            f"Retry all {len(cascade_jobs)} at best threshold",
+            key="cascade_resubmit_all",
+            type="primary",
+            width='stretch',
+            on_click=_resubmit_all_at_best_threshold,
+            args=(cascade_jobs,),
+        )
+
     for job in visible:
         render_job_card(job)
 
@@ -246,6 +267,31 @@ def render_job_card(job: Dict[str, Any]) -> None:
                 st.caption(f"Failed: {_truncate(error_msg, 45)}")
             else:
                 st.caption("Processing failed")
+
+            # Show cascade similarity results as a dropdown with all thresholds
+            cascade = job.get('cascade_results')
+            if cascade:
+                tiers_with_data = [t for t in cascade if t.get('count', 0) > 0]
+                if tiers_with_data:
+                    # Sort descending by threshold (highest = most similar first)
+                    tiers_with_data.sort(key=lambda t: t['threshold'], reverse=True)
+                    options = [f"{t['threshold']}% — {t['count']} compounds" for t in tiers_with_data]
+                    selected = st.selectbox(
+                        "Retry at",
+                        options,
+                        key=f"cascade_select_{job_id}",
+                        label_visibility="collapsed",
+                    )
+                    # Extract threshold from selection
+                    selected_idx = options.index(selected)
+                    selected_threshold = tiers_with_data[selected_idx]['threshold']
+                    st.button(
+                        f"Retry at {selected_threshold}%",
+                        key=f"cascade_btn_{job_id}",
+                        width='stretch',
+                        on_click=_resubmit_at_threshold,
+                        args=(job, selected_threshold),
+                    )
 
         # Action buttons - use callbacks to avoid rerun issues in fragment
         if status in ('pending', 'processing'):
@@ -323,6 +369,78 @@ def _dismiss_failed_job(job_id: str) -> None:
     dismissed = SessionState.get('dismissed_failed_jobs', set())
     dismissed.add(job_id)
     SessionState.set('dismissed_failed_jobs', dismissed)
+
+
+def _resubmit_all_at_best_threshold(jobs: list) -> None:
+    """Resubmit all cascade-eligible failed jobs, each at its highest available threshold."""
+    client = get_api_client()
+    submitted = 0
+    for job in jobs:
+        params = job.get('input_params', {})
+        smiles = params.get('smiles', '')
+        if not smiles:
+            continue
+        # Find this job's best (highest) threshold with data
+        cascade = job.get('cascade_results', [])
+        tiers_with_data = [t for t in cascade if t.get('count', 0) > 0]
+        if not tiers_with_data:
+            continue
+        best_threshold = max(t['threshold'] for t in tiers_with_data)
+        try:
+            response = client.submit_job(
+                compound_name=params.get('compound_name') or job.get('compound_name', 'Unknown'),
+                smiles=smiles,
+                similarity_threshold=best_threshold,
+                activity_types=params.get('activity_types'),
+                author_name=params.get('author_name', ''),
+                duplicate_action="duplicate",
+            )
+            if response.success:
+                job_id = job.get('id')
+                if job_id:
+                    _dismiss_failed_job(job_id)
+                submitted += 1
+        except Exception as e:
+            logger.error(f"Error resubmitting job: {e}")
+    if submitted:
+        start_polling()
+        st.toast(f"Resubmitted {submitted} jobs at their best thresholds")
+
+
+def _resubmit_at_threshold(job: Dict[str, Any], threshold: int) -> None:
+    """Resubmit a failed job at a lower similarity threshold."""
+    client = get_api_client()
+    params = job.get('input_params', {})
+    compound_name = params.get('compound_name') or job.get('compound_name', 'Unknown')
+    smiles = params.get('smiles', '')
+    author_name = params.get('author_name', '')
+    activity_types = params.get('activity_types')
+
+    if not smiles:
+        st.toast("Cannot resubmit: missing SMILES data", icon="⚠️")
+        return
+
+    try:
+        response = client.submit_job(
+            compound_name=compound_name,
+            smiles=smiles,
+            similarity_threshold=threshold,
+            activity_types=activity_types,
+            author_name=author_name,
+            duplicate_action="duplicate",
+        )
+        if response.success:
+            # Dismiss the old failed job
+            job_id = job.get('id')
+            if job_id:
+                _dismiss_failed_job(job_id)
+            start_polling()
+            st.toast(f"Resubmitted at {threshold}%")
+        else:
+            st.toast(f"Resubmit failed: {response.error or response.message}", icon="⚠️")
+    except Exception as e:
+        logger.error(f"Error resubmitting job at {threshold}%: {e}")
+        st.toast(f"Error: {e}", icon="⚠️")
 
 
 def _on_delete_job(job_id: str, entry_id: str = None) -> None:

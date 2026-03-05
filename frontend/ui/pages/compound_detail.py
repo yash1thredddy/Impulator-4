@@ -152,7 +152,13 @@ def _render_quick_stats(data: Dict[str, Any]) -> None:
         has_warning = True
 
     with cols[0]:
-        st.metric("Similar Compounds", similar)
+        total_similar = summary.get('total_similar', 0)
+        compounds_with_data = summary.get('compounds_with_data', similar)
+        if total_similar > 0 and total_similar > compounds_with_data:
+            st.metric("Similar Compounds", total_similar,
+                      help=f"{compounds_with_data} with activity, {total_similar - compounds_with_data} without")
+        else:
+            st.metric("Similar Compounds", similar)
     with cols[1]:
         st.metric("Activities", activities)
     with cols[2]:
@@ -255,12 +261,22 @@ def _render_compound_info(data: Dict[str, Any], df: pd.DataFrame, summary: Dict)
         if author_name and author_name != 'N/A':
             st.markdown(f"**Author:** {html.escape(author_name)}")
 
-        # Similar Compounds info below Processed (show max 3 IDs to prevent overflow)
+        # Similar compounds breakdown
+        total_similar = summary.get('total_similar', 0)
+        compounds_with_data = summary.get('compounds_with_data', unique_count)
+        if total_similar > 0:
+            compounds_without_data = total_similar - compounds_with_data
+            st.markdown(f"**Similar Compounds with Biological Activity:** {compounds_with_data}")
+            st.markdown(f"**Similar Compounds with No Biological Activity:** {compounds_without_data}")
+        elif unique_count > 0:
+            st.markdown(f"**Similar Compounds:** {unique_count}")
+
+        # ChEMBL ID list (ones with activity data)
         if unique_count > 0:
             ids_display = ", ".join(unique_ids[:3]) if unique_ids else "None"
             if unique_count > 3:
                 ids_display += f" (+{unique_count - 3})"
-            st.markdown(f"**Similar Compounds ({unique_count}):** `{ids_display}`")
+            st.markdown(f"**ChEMBL IDs:** `{ids_display}`")
 
     with col2:
         # Key info in a clean grid
@@ -305,24 +321,38 @@ def _render_compound_info(data: Dict[str, Any], df: pd.DataFrame, summary: Dict)
                 except Exception:
                     pass  # Skip if RDKit not available
 
-        # View Compound Details - full width of col2 (spans across both info_cols)
+        # View Compound Details - shows ALL similar compounds (not just those with bioactivity)
         if unique_count > 0 and df is not None:
             with st.expander("📋 View Compound Details", expanded=False):
-                id_cols = ['ChEMBL_ID']
-                if 'Molecule_Name' in df.columns:
-                    id_cols.append('Molecule_Name')
-                if 'Similarity' in df.columns:
-                    id_cols.append('Similarity')
+                all_similar_df = data.get('all_similar')
 
-                unique_compounds = df[id_cols].drop_duplicates('ChEMBL_ID').reset_index(drop=True)
+                if all_similar_df is not None and not all_similar_df.empty:
+                    # Build activity count from main results
+                    activity_counts = df.groupby('ChEMBL_ID').size().to_dict() if 'ChEMBL_ID' in df.columns else {}
+                    display = all_similar_df[['ChEMBL_ID', 'Molecule_Name', 'Similarity']].copy()
+                    display['Biological_Activity'] = display['ChEMBL_ID'].map(activity_counts).fillna(0).astype(int)
+                else:
+                    # Fallback for older compounds without all_similar catalog
+                    id_cols = ['ChEMBL_ID']
+                    if 'Molecule_Name' in df.columns:
+                        id_cols.append('Molecule_Name')
+                    if 'Similarity' in df.columns:
+                        id_cols.append('Similarity')
+                    display = df[id_cols].drop_duplicates('ChEMBL_ID').reset_index(drop=True)
+                    # Add activity count
+                    if 'ChEMBL_ID' in df.columns:
+                        activity_counts = df.groupby('ChEMBL_ID').size().to_dict()
+                        display['Biological_Activity'] = display['ChEMBL_ID'].map(activity_counts).fillna(0).astype(int)
+                    if 'Similarity' in display.columns:
+                        display = display.sort_values('Similarity', ascending=False).reset_index(drop=True)
 
-                if 'Molecule_Name' in unique_compounds.columns:
-                    unique_compounds['Molecule_Name'] = unique_compounds['Molecule_Name'].apply(
+                if 'Molecule_Name' in display.columns:
+                    display['Molecule_Name'] = display['Molecule_Name'].apply(
                         lambda x: x if isinstance(x, str) else ''
                     )
 
                 # Make ChEMBL IDs clickable
-                unique_compounds['ChEMBL_ID'] = unique_compounds['ChEMBL_ID'].apply(
+                display['ChEMBL_ID'] = display['ChEMBL_ID'].apply(
                     lambda x: f"https://www.ebi.ac.uk/chembl/explore/compound/{x}" if x else ""
                 )
                 col_config = {
@@ -333,10 +363,10 @@ def _render_compound_info(data: Dict[str, Any], df: pd.DataFrame, summary: Dict)
                 }
 
                 st.dataframe(
-                    unique_compounds,
+                    display,
                     width='stretch',
                     hide_index=True,
-                    height=min(200, len(unique_compounds) * 35 + 40),
+                    height=min(300, len(display) * 35 + 40),
                     column_config=col_config,
                 )
 
@@ -2802,10 +2832,13 @@ def _render_data_tab(data: Dict[str, Any]) -> None:
         st.warning("No data available")
         return
 
+    # Use pre-loaded all similar molecules catalog from data dict
+    all_similar_df = data.get('all_similar')
+
     # View selector
     view = st.radio(
         "View",
-        ["Core Analysis", "Interpretation", "Full Data"],
+        ["Core Analysis", "Interpretation", "All Similar", "Full Data"],
         horizontal=True,
         label_visibility="collapsed"
     )
@@ -2816,7 +2849,7 @@ def _render_data_tab(data: Dict[str, Any]) -> None:
         # Include SMILES for structure data in CSV downloads
         # Columns: Identifiers, Activity, Target, Efficiency Metrics, Properties
         cols = [
-            'ChEMBL_ID', 'Molecule_Name', 'SMILES',
+            'ChEMBL_ID', 'Molecule_Name', 'Similarity', 'SMILES',
             'Activity_Type', 'Activity_nM', 'pActivity',
             'Target_ChEMBL_ID', 'Target_Name',
             'SEI', 'BEI', 'NSEI', 'NBEI',
@@ -2855,6 +2888,35 @@ def _render_data_tab(data: Dict[str, Any]) -> None:
             )
         else:
             st.info("No interpretation columns available")
+
+    elif view == "All Similar":
+        if all_similar_df is not None and not all_similar_df.empty:
+            # Build activity count lookup from main results
+            activity_counts = {}
+            if df is not None and 'ChEMBL_ID' in df.columns:
+                activity_counts = df.groupby('ChEMBL_ID').size().to_dict()
+
+            display_df = all_similar_df.copy()
+            display_df['Biological_Activity'] = display_df['ChEMBL_ID'].map(activity_counts).fillna(0).astype(int)
+
+            cols = ['ChEMBL_ID', 'Molecule_Name', 'Similarity', 'Biological_Activity',
+                    'Molecular_Weight', 'QED', 'LogP', 'PAINS_Violation', 'Aggregator_Risk',
+                    'BRENK_Alerts', 'Kingdom', 'Superclass']
+            cols = [c for c in cols if c in display_df.columns]
+
+            total = len(display_df)
+            with_data = (display_df['Biological_Activity'] > 0).sum()
+            st.caption(f"{total} similar compounds found — {with_data} with biological activity, {total - with_data} without")
+
+            st.dataframe(display_df[cols], width='stretch', height=450, hide_index=True)
+            st.download_button(
+                "📥 Download All Similar",
+                data=display_df[cols].to_csv(index=False),
+                file_name=f"{compound_name}_all_similar.csv",
+                mime="text/csv"
+            )
+        else:
+            st.info("All similar molecules catalog not available for this compound. Re-run the analysis to generate it.")
 
     else:  # Full Data
         # Remove internal columns
@@ -3134,6 +3196,13 @@ def _load_compound_data(
             storage_path=storage_path
         )
 
+        # Load all similar molecules catalog (may not exist for older compounds)
+        all_similar_df = smart_load_dataframe(
+            "all_similar_molecules.csv",
+            entry_id=entry_id,
+            storage_path=storage_path
+        )
+
         # Get display name from summary (compound_name is in summary.json)
         display_name = summary.get('compound_name', compound_name or entry_id)
 
@@ -3165,6 +3234,7 @@ def _load_compound_data(
             'summary': summary,
             'results': df,
             'indications': indications_df,
+            'all_similar': all_similar_df,
         }
 
     except Exception as e:
@@ -3439,7 +3509,13 @@ def _render_report_header(data: Dict[str, Any], smiles: str) -> None:
         # Display stats in columns
         stat_cols = st.columns(5)
         with stat_cols[0]:
-            st.metric("Similar Compounds", similar_count)
+            total_similar = summary.get('total_similar', 0)
+            compounds_with_data = summary.get('compounds_with_data', similar_count)
+            if total_similar > 0 and total_similar > compounds_with_data:
+                st.metric("Similar Compounds", total_similar,
+                          help=f"{compounds_with_data} with activity, {total_similar - compounds_with_data} without")
+            else:
+                st.metric("Similar Compounds", similar_count)
         with stat_cols[1]:
             st.metric("Activities", activities_count)
         with stat_cols[2]:
@@ -5076,7 +5152,8 @@ def _generate_html_report(data: Dict[str, Any], df: pd.DataFrame) -> str:
     <div style="display: flex; justify-content: space-around; background-color: #f8f9fa; padding: 15px; border-radius: 8px; margin: 15px 0;">
         <div style="text-align: center;">
             <div style="font-size: 0.9em; color: #666;">Similar Compounds</div>
-            <div style="font-size: 1.8em; font-weight: bold;">{similar_count}</div>
+            <div style="font-size: 1.8em; font-weight: bold;">{summary.get('total_similar', similar_count)}</div>
+            <div style="font-size: 0.7em; color: #888;">{summary.get('compounds_with_data', similar_count)} with activity</div>
         </div>
         <div style="text-align: center;">
             <div style="font-size: 0.9em; color: #666;">Activities</div>
