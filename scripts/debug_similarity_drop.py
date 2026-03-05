@@ -8,7 +8,6 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import requests
-import json
 
 SMILES = "O=C1O[C@H]([C@@H](O)CO)[C@@H](O)C1=O"
 THRESHOLD = 40
@@ -137,7 +136,7 @@ if ids_missing_mol:
 step(6, "FINAL: Unique compounds in processed output")
 final_ids = ids_after_app & ids_with_mol_data
 print(f"  Final compound count: {len(final_ids)}")
-print(f"\n  Pipeline summary:")
+print("\n  Pipeline summary:")
 print(f"    Similarity search:  {len(sim_ids):>3} compounds")
 print(f"    Have activities:    {len(ids_with_any_activity):>3} compounds  (dropped {len(ids_without_activity)})")
 print(f"    Type filter:        {len(ids_after_type):>3} compounds  (dropped {len(dropped_by_type)})")
