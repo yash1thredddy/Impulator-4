@@ -355,6 +355,16 @@ class JobService:
             item["entry_id"] = entry_id
             item["storage_path"] = storage_path
             item["error_message"] = job.error_message
+
+            # For failed jobs, include cascade similarity results and input params for resubmission
+            if job.status == JobStatus.FAILED and job.result_summary:
+                failed_data = _safe_json_loads(job.result_summary, {})
+                cascade = failed_data.get("cascade_results")
+                if cascade:
+                    item["cascade_results"] = cascade
+                    # Include input params so the frontend can resubmit at a lower threshold
+                    item["input_params"] = params
+
             result.append(item)
 
         return result
@@ -739,7 +749,7 @@ class JobService:
             activity_types = result_summary.get('activity_types')
             qed = result_summary.get('qed', 0.0)
             num_outliers = result_summary.get('num_outliers', 0)
-            similar_compounds = result_summary.get('similar_count', result_summary.get('total_compounds', 0))
+            similar_compounds = result_summary.get('total_similar', result_summary.get('similar_count', result_summary.get('total_compounds', 0)))
 
             # For duplicates, always create new entry (don't update existing)
             if is_duplicate:
@@ -915,6 +925,7 @@ class JobService:
         db: Session,
         job_id: str,
         error_message: str,
+        cascade_results: list = None,
     ) -> Optional[Job]:
         """
         Mark job as failed with thread-safe locking.
@@ -923,6 +934,8 @@ class JobService:
             db: Database session
             job_id: Job ID
             error_message: Error description
+            cascade_results: Optional list of {threshold, count} dicts from
+                cascade similarity probing (stored in result_summary JSON).
         """
         with _db_write_lock:
             job = self._get_job_for_update(db, job_id)
@@ -934,6 +947,9 @@ class JobService:
             job.current_step = "Failed"
             job.error_message = error_message
             job.completed_at = datetime.now(timezone.utc)
+
+            if cascade_results is not None:
+                job.result_summary = json.dumps({"cascade_results": cascade_results})
 
             db.commit()
             db.refresh(job)

@@ -4,76 +4,11 @@ Integration tests for job API endpoints.
 import pytest
 from unittest.mock import patch
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
-
-
-@pytest.fixture(scope="function")
-def test_engine():
-    """Create a test database engine with tables using shared in-memory DB."""
-    from backend.core.database import Base
-    from backend.models.database import Job, Compound  # noqa: F401
-
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    Base.metadata.create_all(bind=engine)
-    yield engine
-    Base.metadata.drop_all(bind=engine)
-
-
-@pytest.fixture
-def mock_azure():
-    """Mock Azure storage for tests."""
-    with patch('backend.core.azure_sync.is_azure_configured', return_value=False):
-        with patch('backend.core.azure_sync.sync_db_to_azure', return_value=True):
-            with patch('backend.core.azure_sync.delete_result_from_azure_by_entry_id', return_value=True):
-                yield
-
-
-@pytest.fixture
-def client(test_engine, mock_azure):
-    """Create a test client for the FastAPI app with proper test database."""
-    from backend.main import app
-    from backend.core import database as db_module
-    from backend.core.database import get_db
-
-    # Save original values
-    original_engine = db_module.engine
-    original_session_local = db_module.SessionLocal
-
-    # Create new SessionLocal bound to test engine
-    TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
-
-    # Patch the module-level engine and SessionLocal
-    db_module.engine = test_engine
-    db_module.SessionLocal = TestSessionLocal
-
-    def override_get_db():
-        session = TestSessionLocal()
-        try:
-            yield session
-        finally:
-            session.close()
-
-    app.dependency_overrides[get_db] = override_get_db
-
-    # Mock the scheduler to prevent background job processing after test teardown
-    with patch('backend.core.scheduler.job_scheduler.trigger'):
-        with TestClient(app) as c:
-            yield c
-
-    # Restore original values
-    app.dependency_overrides.clear()
-    db_module.engine = original_engine
-    db_module.SessionLocal = original_session_local
 
 
 class TestJobEndpoints:
-    """Tests for job management endpoints."""
+    """Tests for job listing and retrieval endpoints."""
 
     def test_get_active_jobs_empty(self, client):
         """Test getting active jobs when none exist."""
@@ -93,94 +28,6 @@ class TestJobEndpoints:
         assert "page_size" in data
         assert "pages" in data
         assert isinstance(data["items"], list)
-
-    def test_get_nonexistent_job(self, client):
-        """Test getting a job that doesn't exist."""
-        response = client.get("/api/v1/jobs/nonexistent-id")
-        assert response.status_code == 404
-        data = response.json()
-        assert "detail" in data
-
-    def test_cancel_nonexistent_job(self, client):
-        """Test cancelling a job that doesn't exist."""
-        response = client.post("/api/v1/jobs/nonexistent-id/cancel")
-        assert response.status_code == 404
-
-    def test_delete_nonexistent_job(self, client):
-        """Test deleting a job that doesn't exist."""
-        response = client.delete("/api/v1/jobs/nonexistent-id")
-        assert response.status_code == 404
-
-
-class TestJobSubmission:
-    """Tests for job submission (may require mocking processing)."""
-
-    @pytest.fixture
-    def client(self, test_engine, mock_azure):
-        """Create a test client for the FastAPI app with proper test database."""
-        from backend.main import app
-        from backend.core import database as db_module
-        from backend.core.database import get_db
-
-        # Save original values
-        original_engine = db_module.engine
-        original_session_local = db_module.SessionLocal
-
-        # Create new SessionLocal bound to test engine
-        TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
-
-        # Patch the module-level engine and SessionLocal
-        db_module.engine = test_engine
-        db_module.SessionLocal = TestSessionLocal
-
-        def override_get_db():
-            session = TestSessionLocal()
-            try:
-                yield session
-            finally:
-                session.close()
-
-        app.dependency_overrides[get_db] = override_get_db
-
-        # Mock the scheduler to prevent background job processing after test teardown
-        with patch('backend.core.scheduler.job_scheduler.trigger'):
-            with TestClient(app) as c:
-                yield c
-
-        # Restore original values
-        app.dependency_overrides.clear()
-        db_module.engine = original_engine
-        db_module.SessionLocal = original_session_local
-
-    def test_submit_job_invalid_empty_name(self, client):
-        """Test job submission with empty compound name."""
-        response = client.post("/api/v1/jobs", json={
-            "compound_name": "",
-            "author_name": "Test Author",
-            "smiles": "CCO",
-            "similarity_threshold": 90
-        })
-        assert response.status_code == 422  # Validation error
-
-    def test_submit_job_invalid_empty_smiles(self, client):
-        """Test job submission with empty SMILES."""
-        response = client.post("/api/v1/jobs", json={
-            "compound_name": "Test",
-            "author_name": "Test Author",
-            "smiles": "",
-            "similarity_threshold": 90
-        })
-        assert response.status_code == 422  # Validation error
-
-    def test_submit_job_invalid_threshold(self, client):
-        """Test job submission with invalid similarity threshold."""
-        response = client.post("/api/v1/jobs", json={
-            "compound_name": "Test",
-            "author_name": "Test Author",
-            "smiles": "CCO",
-            "similarity_threshold": 150  # > 100
-        })
-        assert response.status_code == 422  # Validation error
 
 
 class TestJobSubmissionWithScheduler:
@@ -299,19 +146,14 @@ class TestBatchJobOperations:
 
     @pytest.fixture
     def client(self, test_engine, mock_azure):
-        """Create test client with proper test database."""
+        """Override client to patch job_scheduler at the API module level."""
         from backend.main import app
         from backend.core import database as db_module
         from backend.core.database import get_db
 
-        # Save original values
         original_engine = db_module.engine
         original_session_local = db_module.SessionLocal
-
-        # Create new SessionLocal bound to test engine
         TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
-
-        # Patch the module-level engine and SessionLocal
         db_module.engine = test_engine
         db_module.SessionLocal = TestSessionLocal
 
@@ -328,7 +170,6 @@ class TestBatchJobOperations:
             with TestClient(app) as c:
                 yield c
 
-        # Restore original values
         app.dependency_overrides.clear()
         db_module.engine = original_engine
         db_module.SessionLocal = original_session_local

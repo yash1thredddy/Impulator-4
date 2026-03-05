@@ -670,5 +670,158 @@ class TestCalculateImpScore:
             assert abs(result['IMP_Base_Score'].iloc[i] - expected) < 0.001
 
 
+class TestEfficiencyOutlierScoreMissingMetrics:
+    """Tests for missing metric column validation."""
+
+    def test_missing_sei_raises(self):
+        df = pd.DataFrame({'BEI': [1, 2, 3]})
+        with pytest.raises(ValueError, match="Missing efficiency metrics"):
+            calculate_efficiency_outlier_score(df, metrics=['SEI', 'BEI'])
+
+    def test_missing_bei_raises(self):
+        df = pd.DataFrame({'SEI': [1, 2, 3]})
+        with pytest.raises(ValueError, match="Missing efficiency metrics"):
+            calculate_efficiency_outlier_score(df, metrics=['SEI', 'BEI'])
+
+
+class TestCalculateImpScoreMissingColumns:
+    """Tests for missing required columns in calculate_imp_score."""
+
+    def test_missing_smiles_raises(self):
+        df = pd.DataFrame({
+            'SEI': [10], 'BEI': [25], 'NSEI': [2], 'NBEI': [0.35],
+            'Angle_SEI_BEI': [45], 'Modulus_SEI_BEI': [30], 'QED': [1.0],
+        })
+        with pytest.raises(ValueError, match="Missing required columns"):
+            calculate_imp_score(df, use_pdb=False)
+
+    def test_missing_all_raises(self):
+        df = pd.DataFrame({'x': [1]})
+        with pytest.raises(ValueError, match="Missing required columns"):
+            calculate_imp_score(df, use_pdb=False)
+
+    def test_phase1_missing_columns_raises(self):
+        df = pd.DataFrame({'SEI': [10], 'BEI': [25]})
+        with pytest.raises(ValueError, match="Missing required columns"):
+            calculate_imp_score_phase1(df)
+
+
+class TestAddImpScoreInterpretation:
+    """Tests for add_imp_score_interpretation."""
+
+    def test_adds_classification_column(self):
+        from backend.modules.imp_scoring import add_imp_score_interpretation
+        df = pd.DataFrame({'IMP_Final_Score': [0.95, 0.75, 0.55, 0.35, 0.15]})
+        result = add_imp_score_interpretation(df)
+        assert 'IMP_Classification' in result.columns
+        assert 'IMP_Priority' in result.columns
+        assert result['IMP_Classification'].iloc[0] == 'Exceptional IMP'
+        assert result['IMP_Classification'].iloc[4] == 'Not IMP'
+
+    def test_missing_score_raises(self):
+        from backend.modules.imp_scoring import add_imp_score_interpretation
+        df = pd.DataFrame({'x': [1]})
+        with pytest.raises(ValueError, match="IMP_Final_Score column not found"):
+            add_imp_score_interpretation(df)
+
+    def test_nan_scores_classified_invalid(self):
+        from backend.modules.imp_scoring import add_imp_score_interpretation
+        df = pd.DataFrame({'IMP_Final_Score': [np.nan]})
+        result = add_imp_score_interpretation(df)
+        assert result['IMP_Classification'].iloc[0] == 'Invalid'
+
+
+class TestGetImpScoreSummary:
+    """Tests for get_imp_score_summary."""
+
+    def test_no_scores_returns_error(self):
+        from backend.modules.imp_scoring import get_imp_score_summary
+        df = pd.DataFrame({'x': [1]})
+        summary = get_imp_score_summary(df)
+        assert 'error' in summary
+
+    def test_basic_summary(self):
+        from backend.modules.imp_scoring import get_imp_score_summary
+        df = pd.DataFrame({'IMP_Final_Score': [0.9, 0.7, 0.5, 0.3, 0.1]})
+        summary = get_imp_score_summary(df)
+        assert summary['total_compounds'] == 5
+        assert summary['scored_compounds'] == 5
+        assert summary['mean_score'] == pytest.approx(0.5)
+        assert summary['min_score'] == pytest.approx(0.1)
+        assert summary['max_score'] == pytest.approx(0.9)
+
+    def test_with_classifications(self):
+        from backend.modules.imp_scoring import get_imp_score_summary
+        df = pd.DataFrame({
+            'IMP_Final_Score': [0.95, 0.75, 0.55],
+            'IMP_Classification': ['Exceptional IMP', 'Strong IMP', 'Moderate IMP'],
+        })
+        summary = get_imp_score_summary(df)
+        assert summary['exceptional_imps'] == 1
+        assert summary['strong_imps'] == 1
+        assert summary['moderate_imps'] == 1
+
+    def test_with_priorities(self):
+        from backend.modules.imp_scoring import get_imp_score_summary
+        df = pd.DataFrame({
+            'IMP_Final_Score': [0.95, 0.75],
+            'IMP_Priority': [1, 2],
+        })
+        summary = get_imp_score_summary(df)
+        assert 'priority_counts' in summary
+
+    def test_empty_scores(self):
+        from backend.modules.imp_scoring import get_imp_score_summary
+        df = pd.DataFrame({'IMP_Final_Score': pd.Series([], dtype=float)})
+        summary = get_imp_score_summary(df)
+        assert summary['scored_compounds'] == 0
+
+
+class TestCreatePdbSummary:
+    """Tests for create_pdb_summary (pure DataFrame operation)."""
+
+    def test_basic_summary(self):
+        from backend.modules.imp_scoring import create_pdb_summary
+        df = pd.DataFrame({
+            'ChEMBL_ID': ['C1', 'C2'],
+            'Molecule_Name': ['A', 'B'],
+            'SMILES': ['CCO', 'CCCO'],
+            'PDB_Score': [0.8, 0.3],
+            'PDB_Num_Structures': [5, 2],
+            'PDB_High_Quality': [3, 0],
+            'PDB_Medium_Quality': [2, 1],
+            'PDB_Poor_Quality': [0, 1],
+            'PDB_IDs': ['1ABC,2DEF', '3GHI'],
+            'PDB_Best_Resolution': [1.5, 3.0],
+        })
+        result = create_pdb_summary(df)
+        assert len(result) == 2
+        assert result.iloc[0]['PDB_Score'] == 0.8  # Sorted descending
+        assert 'PDB_High_Quality_Pct' in result.columns
+
+    def test_zero_structures_safe_division(self):
+        from backend.modules.imp_scoring import create_pdb_summary
+        df = pd.DataFrame({
+            'ChEMBL_ID': ['C1'],
+            'Molecule_Name': ['A'],
+            'SMILES': ['CCO'],
+            'PDB_Score': [0.0],
+            'PDB_Num_Structures': [0],
+            'PDB_High_Quality': [0],
+            'PDB_Medium_Quality': [0],
+            'PDB_Poor_Quality': [0],
+            'PDB_IDs': [''],
+            'PDB_Best_Resolution': [np.nan],
+        })
+        result = create_pdb_summary(df)
+        assert result['PDB_High_Quality_Pct'].iloc[0] == 0.0
+
+    def test_missing_pdb_columns_returns_empty(self):
+        from backend.modules.imp_scoring import create_pdb_summary
+        df = pd.DataFrame({'x': [1]})
+        result = create_pdb_summary(df)
+        assert result.empty
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

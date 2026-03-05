@@ -121,7 +121,8 @@ class TestCompoundServiceProgressCallbacks:
             mock_js.fail_job.assert_called_once_with(
                 mock_db,
                 "test-job-id",
-                "Test error"
+                "Test error",
+                cascade_results=None
             )
 
 

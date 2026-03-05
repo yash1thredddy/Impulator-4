@@ -139,6 +139,7 @@ class ImpulatorAPIClient:
         similarity_threshold: int = None,
         activity_types: List[str] = None,
         author_name: str = "",
+        duplicate_action: str = None,
     ) -> JobResponse:
         """Submit a compound analysis job.
 
@@ -148,6 +149,7 @@ class ImpulatorAPIClient:
             similarity_threshold: Similarity threshold (default from config)
             activity_types: Activity types to search
             author_name: Name of the author submitting the analysis
+            duplicate_action: Optional duplicate handling ('skip', 'replace', 'duplicate')
 
         Returns:
             JobResponse with job_id on success
@@ -159,6 +161,8 @@ class ImpulatorAPIClient:
             "similarity_threshold": similarity_threshold or config.DEFAULT_SIMILARITY_THRESHOLD,
             "activity_types": activity_types or list(config.DEFAULT_ACTIVITY_TYPES),
         }
+        if duplicate_action:
+            payload["duplicate_action"] = duplicate_action
 
         try:
             response = self._request('POST', '/api/v1/jobs', json=payload)
@@ -246,6 +250,94 @@ class ImpulatorAPIClient:
                     return {"success": True, **response.json()}
                 except (json.JSONDecodeError, ValueError) as e:
                     logger.error(f"Invalid JSON in check-duplicates response: {e}")
+                    return {"success": False, "error": "Invalid response from server"}
+            else:
+                try:
+                    error = response.json().get('detail', f"HTTP {response.status_code}")
+                except (json.JSONDecodeError, ValueError):
+                    error = f"HTTP {response.status_code}"
+                return {"success": False, "error": error}
+
+        except requests.exceptions.RequestException as e:
+            return {"success": False, "error": str(e)}
+
+    def check_availability(
+        self,
+        smiles: str,
+        similarity_threshold: int = 90,
+        activity_types: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Check ChEMBL data availability for a single compound before submission.
+
+        Args:
+            smiles: SMILES string
+            similarity_threshold: Requested similarity threshold
+            activity_types: Activity types to search
+
+        Returns:
+            Dict with 'result' containing CompoundAvailability data, or 'error'
+        """
+        payload = {
+            "smiles": smiles,
+            "similarity_threshold": similarity_threshold,
+        }
+        if activity_types:
+            payload["activity_types"] = activity_types
+
+        try:
+            response = self._request('POST', '/api/v1/jobs/check-availability', json=payload)
+
+            if response.status_code == 200:
+                try:
+                    return {"success": True, **response.json()}
+                except (json.JSONDecodeError, ValueError) as e:
+                    logger.error(f"Invalid JSON in availability response: {e}")
+                    return {"success": False, "error": "Invalid response from server"}
+            else:
+                try:
+                    error = response.json().get('detail', f"HTTP {response.status_code}")
+                except (json.JSONDecodeError, ValueError):
+                    error = f"HTTP {response.status_code}"
+                return {"success": False, "error": error}
+
+        except requests.exceptions.RequestException as e:
+            return {"success": False, "error": str(e)}
+
+    def check_availability_batch(
+        self,
+        compounds: List[Dict[str, Any]],
+        similarity_threshold: int = 90,
+        activity_types: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Batch availability check for multiple compounds.
+
+        Args:
+            compounds: List of dicts with compound_name and smiles
+            similarity_threshold: Requested similarity threshold
+            activity_types: Activity types to search
+
+        Returns:
+            Dict with results, available_count, unavailable_count, no_data_count
+        """
+        payload = {
+            "compounds": compounds,
+            "similarity_threshold": similarity_threshold,
+        }
+        if activity_types:
+            payload["activity_types"] = activity_types
+
+        try:
+            response = self._request(
+                'POST', '/api/v1/jobs/check-availability/batch',
+                json=payload,
+                timeout=max(self.timeout, 60),  # Allow extra time for batch
+            )
+
+            if response.status_code == 200:
+                try:
+                    return {"success": True, **response.json()}
+                except (json.JSONDecodeError, ValueError) as e:
+                    logger.error(f"Invalid JSON in batch availability response: {e}")
                     return {"success": False, "error": "Invalid response from server"}
             else:
                 try:

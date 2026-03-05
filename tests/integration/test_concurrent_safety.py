@@ -8,68 +8,14 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 from fastapi.testclient import TestClient
-
-
-@pytest.fixture(scope="function")
-def test_engine():
-    """Create a test database engine with tables using shared in-memory DB."""
-    from backend.core.database import Base
-    from backend.models.database import Job, Compound  # noqa: F401
-
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    Base.metadata.create_all(bind=engine)
-    yield engine
-    Base.metadata.drop_all(bind=engine)
+from sqlalchemy.orm import sessionmaker
 
 
 @pytest.fixture
-def mock_azure():
-    """Mock Azure storage for tests."""
-    with patch('backend.core.azure_sync.is_azure_configured', return_value=False):
-        with patch('backend.core.azure_sync.sync_db_to_azure', return_value=True):
-            with patch('backend.core.azure_sync.delete_result_from_azure_by_entry_id', return_value=True):
-                yield
-
-
-@pytest.fixture
-def client_with_db(test_engine, mock_azure):
-    """Create a test client with properly configured database."""
-    from backend.main import app
-    from backend.core import database as db_module
-    from backend.core.database import get_db
-
-    original_engine = db_module.engine
-    original_session_local = db_module.SessionLocal
-
-    TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
-    db_module.engine = test_engine
-    db_module.SessionLocal = TestSessionLocal
-
-    def override_get_db():
-        session = TestSessionLocal()
-        try:
-            yield session
-        finally:
-            session.close()
-
-    app.dependency_overrides[get_db] = override_get_db
-
-    # Mock the scheduler to prevent background job processing after test teardown
-    with patch('backend.core.scheduler.job_scheduler.trigger'):
-        client = TestClient(app)
-        yield client
-
-    app.dependency_overrides.clear()
-    db_module.engine = original_engine
-    db_module.SessionLocal = original_session_local
+def client_with_db(client):
+    """Alias for the shared client fixture (legacy name used throughout this file)."""
+    return client
 
 
 class TestConcurrentJobCreation:

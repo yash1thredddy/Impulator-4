@@ -18,6 +18,8 @@ import logging
 
 import pytest
 
+pytestmark = pytest.mark.network
+
 from backend.modules.api_client import (
     # Main functions (library with REST fallback)
     get_chembl_ids,

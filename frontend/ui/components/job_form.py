@@ -14,6 +14,7 @@ from frontend.config.settings import config
 from frontend.utils import SessionState, InputValidator, sanitize_compound_name
 from frontend.ui.components.sidebar import start_polling
 from frontend.ui.components.duplicate_dialog import render_duplicate_dialog, clear_duplicate_dialog_state
+from frontend.ui.components.availability_dialog import render_availability_dialog, clear_availability_state
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,59 @@ def render_job_form() -> Optional[str]:
             return _resolve_duplicate_action(action, new_name)
 
         # Dialog still showing, don't render the form below it
+        return None
+
+    # Check if we need to show the availability dialog
+    if st.session_state.get('show_availability_dialog'):
+        avail_info = st.session_state.get('pending_availability_info', {})
+        avail_name = st.session_state.get('availability_compound_name', 'Unknown')
+        action, threshold, existing, dup_action, new_name = render_availability_dialog(avail_info, avail_name)
+
+        if action == "cancel":
+            clear_availability_state()
+            st.rerun()
+            return None
+        elif action == "view_existing" and existing:
+            clear_availability_state()
+            SessionState.navigate_to_compound(
+                existing.get('compound_name', ''),
+                existing.get('entry_id'),
+            )
+            st.rerun()
+            return None
+        elif action == "submit" and threshold:
+            # Submit at the chosen threshold
+            smiles = st.session_state.get('availability_smiles', '')
+            compound_name = st.session_state.get('availability_compound_name', '')
+            author_name = st.session_state.get('availability_author_name', '')
+            activity_types = st.session_state.get('availability_activity_types', [])
+
+            clear_availability_state()
+
+            if existing and dup_action:
+                # Existing match with a chosen action — call resolve_duplicate
+                # directly to avoid the double-dialog (submit_job re-detects).
+                return _resolve_from_availability(
+                    existing_entry_id=existing.get('entry_id'),
+                    action=dup_action,
+                    compound_name=compound_name,
+                    new_compound_name=new_name,
+                    smiles=smiles,
+                    similarity_threshold=threshold,
+                    activity_types=activity_types,
+                    author_name=author_name,
+                )
+            else:
+                # No existing match — normal submission
+                return _submit_with_availability(
+                    compound_name=compound_name,
+                    smiles=smiles,
+                    similarity_threshold=threshold,
+                    activity_types=activity_types,
+                    author_name=author_name,
+                )
+
+        # Dialog still showing
         return None
 
     st.subheader("Compound Information")
@@ -241,6 +295,42 @@ def _submit_job(
                 return None
             st.success(f"Resolved to SMILES: {smiles[:50]}...")
 
+    # Pre-submission availability check (Level 2)
+    with st.spinner("Checking ChEMBL data availability..."):
+        try:
+            client = get_api_client()
+            avail = client.check_availability(
+                smiles=smiles,
+                similarity_threshold=similarity_threshold,
+                activity_types=activity_types,
+            )
+        except Exception as e:
+            logger.warning(f"Availability check failed, proceeding: {e}")
+            avail = {"success": False, "error": str(e)}
+
+    if avail.get("success") and avail.get("result"):
+        result = avail["result"]
+        if result.get("available") is False:
+            if not result.get("has_any_data"):
+                st.error("No similar compounds found in ChEMBL at any threshold (40%-100%). Job not submitted.")
+                return None
+
+            # Show availability dialog — data exists at lower thresholds
+            st.session_state['show_availability_dialog'] = True
+            st.session_state['pending_availability_info'] = result
+            st.session_state['availability_smiles'] = smiles
+            st.session_state['availability_compound_name'] = sanitized_name
+            st.session_state['availability_author_name'] = author_name.strip()
+            st.session_state['availability_activity_types'] = activity_types
+            st.session_state['availability_requested_threshold'] = similarity_threshold
+            st.session_state['availability_activity_types_str'] = ",".join(sorted(activity_types))
+            st.rerun()
+            return None
+        # available=True → fall through to normal submit
+    elif avail.get("error"):
+        st.warning(f"Could not verify data availability: {avail['error']}. Proceeding anyway.")
+        # Graceful degradation — proceed, post-failure cascade is fallback
+
     # Submit to backend
     SessionState.start_processing(sanitized_name)
 
@@ -362,6 +452,126 @@ def _resolve_duplicate_action(action: str, new_name: Optional[str]) -> Optional[
         clear_duplicate_dialog_state()
         st.rerun()
         return None
+
+
+def _resolve_from_availability(
+    existing_entry_id: str,
+    action: str,
+    compound_name: str,
+    new_compound_name: Optional[str],
+    smiles: str,
+    similarity_threshold: int,
+    activity_types: List[str],
+    author_name: str,
+) -> Optional[str]:
+    """Resolve a duplicate directly from the availability dialog.
+
+    Calls resolve_duplicate instead of submit_job to avoid re-triggering
+    duplicate detection (which would show a second duplicate dialog).
+    """
+    SessionState.start_processing(compound_name)
+
+    try:
+        client = get_api_client()
+        response = client.resolve_duplicate(
+            action=action,
+            smiles=smiles,
+            compound_name=compound_name,
+            existing_entry_id=existing_entry_id,
+            new_compound_name=new_compound_name,
+            similarity_threshold=similarity_threshold,
+            activity_types=activity_types,
+            author_name=author_name,
+        )
+
+        if response.success:
+            if response.status == 'skipped':
+                st.info(response.message or "Compound processing skipped")
+                st.rerun()
+                return None
+            else:
+                final_name = new_compound_name or compound_name
+                st.success(f"Job submitted! ID: {response.job_id}")
+                SessionState.add_active_job(
+                    job_id=response.job_id,
+                    compound_name=final_name,
+                    status="pending"
+                )
+                start_polling()
+                return response.job_id
+        else:
+            st.error(f"Failed to submit job: {response.error}")
+            return None
+
+    except Exception as e:
+        logger.error(f"Error resolving from availability dialog: {e}")
+        st.error(f"Error: {e}")
+        return None
+
+    finally:
+        SessionState.set('is_processing', False)
+
+
+def _submit_with_availability(
+    compound_name: str,
+    smiles: str,
+    similarity_threshold: int,
+    activity_types: List[str],
+    author_name: str,
+    duplicate_action: Optional[str] = None,
+) -> Optional[str]:
+    """Submit a job after availability dialog selection.
+
+    This bypasses the availability check (already done) and goes straight to submission.
+    If duplicate_action is set, it's included in the request to auto-resolve duplicates.
+    """
+    SessionState.start_processing(compound_name)
+
+    try:
+        client = get_api_client()
+        response = client.submit_job(
+            compound_name=compound_name,
+            smiles=smiles,
+            similarity_threshold=similarity_threshold,
+            activity_types=activity_types,
+            author_name=author_name,
+            duplicate_action=duplicate_action,
+        )
+
+        if response.success:
+            st.success(f"Job submitted! ID: {response.job_id}")
+            SessionState.add_active_job(
+                job_id=response.job_id,
+                compound_name=compound_name,
+                status="pending"
+            )
+            start_polling()
+            return response.job_id
+        elif response.is_duplicate:
+            # Duplicate detected even after availability dialog — show duplicate dialog
+            SessionState.set('just_submitted_job', False)
+            SessionState.set('last_submitted_job_id', None)
+
+            st.session_state['show_duplicate_dialog'] = True
+            st.session_state['pending_duplicate_info'] = response.duplicate_info
+            st.session_state['duplicate_smiles'] = smiles
+            st.session_state['duplicate_compound_name'] = compound_name
+            st.session_state['duplicate_author_name'] = author_name
+            st.session_state['duplicate_similarity_threshold'] = similarity_threshold
+            st.session_state['duplicate_activity_types'] = activity_types
+            st.rerun()
+            return None
+        else:
+            st.error(f"Failed to submit job: {response.error}")
+            return None
+
+    except Exception as e:
+        logger.error(f"Error submitting job after availability check: {e}")
+        st.error(f"Error: {e}")
+        return None
+
+    finally:
+        SessionState.set('is_processing', False)
 
 
 def _detect_column_mappings(df) -> Dict[str, Optional[str]]:
@@ -808,6 +1018,96 @@ def render_csv_upload_form() -> Optional[str]:
                     return None
 
     else:
+        # Step 1.5: Availability check (runs once after duplicate check)
+        if not st.session_state.get('batch_availability_check_done'):
+            # Build set of compound names that already exist with identical config
+            # (same threshold + activity types) — no need to check availability for these.
+            structure_matches_raw = st.session_state.get('batch_structure_matches', [])
+            identical_config_names = set()
+            for match in structure_matches_raw:
+                if match.get('config_match') == 'identical':
+                    match_name = (match.get('compound_name') or '').strip().lower()
+                    if match_name:
+                        identical_config_names.add(match_name)
+
+            # Collect compounds that need availability checking
+            compounds_for_avail = []
+            df_has_smiles_col = 'smiles' in df_mapped.columns
+            df_has_inchi_col = 'inchi' in df_mapped.columns
+            df_has_inchikey_col = 'inchikey' in df_mapped.columns
+
+            # Pre-resolve InChIKeys to SMILES if needed (same pattern as batch submit)
+            inchikey_smiles_map = {}
+            if df_has_inchikey_col and not df_has_smiles_col and not df_has_inchi_col:
+                inchikeys_to_resolve = []
+                for _, row in df_mapped.iterrows():
+                    key_val = str(row.get('inchikey', '')).strip()
+                    if key_val and key_val.lower() not in ('nan', 'none', ''):
+                        inchikeys_to_resolve.append(key_val.upper())
+                if inchikeys_to_resolve:
+                    unique_keys = list(set(inchikeys_to_resolve))
+                    try:
+                        api_client = get_api_client()
+                        inchikey_smiles_map = api_client.resolve_inchikeys_batch(unique_keys)
+                    except Exception as e:
+                        logger.warning(f"InChIKey batch resolution failed: {e}")
+
+            # Build list with SMILES → InChI → InChIKey fallback
+            structural_cols = [c for c in ['compound_name', 'smiles', 'inchi', 'inchikey'] if c in df_mapped.columns]
+            if structural_cols:
+                for row in df_mapped[structural_cols].to_dict('records'):
+                    name = _sanitize_and_limit_name(str(row.get('compound_name', '')).strip())
+                    if not name:
+                        continue
+                    # Skip compounds that already exist with identical config
+                    if name.lower() in identical_config_names:
+                        continue
+
+                    # Fallback chain: SMILES → InChI → InChIKey
+                    smiles_val = None
+                    if df_has_smiles_col:
+                        raw = str(row.get('smiles', '')).strip()
+                        if raw and raw.lower() not in ('nan', 'none', ''):
+                            smiles_val = raw
+                    if not smiles_val and df_has_inchi_col:
+                        inchi_val = str(row.get('inchi', '')).strip()
+                        if inchi_val and inchi_val.lower() not in ('nan', 'none', ''):
+                            smiles_val = _inchi_to_smiles(inchi_val)
+                    if not smiles_val and df_has_inchikey_col:
+                        key_val = str(row.get('inchikey', '')).strip().upper()
+                        if key_val and key_val.lower() not in ('nan', 'none', ''):
+                            smiles_val = inchikey_smiles_map.get(key_val)
+
+                    if smiles_val:
+                        compounds_for_avail.append({
+                            "compound_name": name,
+                            "smiles": smiles_val,
+                        })
+
+            if compounds_for_avail:
+                with st.spinner(f"Checking ChEMBL data availability for {len(compounds_for_avail)} compounds..."):
+                    try:
+                        api_client = get_api_client()
+                        avail_result = api_client.check_availability_batch(
+                            compounds=compounds_for_avail,
+                            similarity_threshold=similarity_threshold,
+                            activity_types=selected_activities,
+                        )
+
+                        if avail_result.get("success"):
+                            st.session_state['batch_availability_results'] = avail_result
+                        else:
+                            logger.warning(f"Batch availability check failed: {avail_result.get('error')}")
+                            st.session_state['batch_availability_results'] = None
+                    except Exception as e:
+                        logger.warning(f"Batch availability check error, proceeding: {e}")
+                        st.session_state['batch_availability_results'] = None
+            else:
+                st.session_state['batch_availability_results'] = None
+
+            st.session_state['batch_availability_check_done'] = True
+            st.rerun()
+
         # Step 2: Show duplicate confirmation dialog
         existing = st.session_state.get('batch_existing', [])
         processing = st.session_state.get('batch_processing', [])
@@ -1216,6 +1516,102 @@ def render_csv_upload_form() -> Optional[str]:
                            ", ".join(f"`{html.escape(n)}`" for n in compounds_as_duplicates[:20]) +
                            (f"... +{len(compounds_as_duplicates)-20} more" if len(compounds_as_duplicates) > 20 else ""))
 
+        # --- Availability Results Section ---
+        batch_avail = st.session_state.get('batch_availability_results')
+        batch_avail_decisions = st.session_state.get('batch_availability_decisions', {})
+        batch_auto_skipped = st.session_state.get('batch_auto_skipped_no_data', [])
+
+        if batch_avail and batch_avail.get("results"):
+            avail_results = batch_avail["results"]
+            avail_count = batch_avail.get("available_count", 0)
+            unavail_count = batch_avail.get("unavailable_count", 0)
+            no_data_count = batch_avail.get("no_data_count", 0)
+
+            if unavail_count > 0 or no_data_count > 0:
+                st.divider()
+                st.markdown("### ChEMBL Data Availability")
+
+                # Summary boxes
+                summary_cols = st.columns(3)
+                with summary_cols[0]:
+                    st.metric("Ready", avail_count, help="Data available at requested threshold")
+                with summary_cols[1]:
+                    st.metric("Need lower %", unavail_count, help="No ChEMBL data at requested threshold, but available at lower")
+                with summary_cols[2]:
+                    st.metric("No data", no_data_count, help="No ChEMBL data at any threshold")
+
+                # Compounds needing lower threshold
+                unavailable_compounds = [
+                    r for r in avail_results
+                    if not r.get("available") and r.get("has_any_data")
+                ]
+                if unavailable_compounds:
+                    with st.expander(f"Compounds needing lower threshold ({len(unavailable_compounds)})", expanded=True):
+                        for comp in unavailable_compounds:
+                            comp_name = comp.get("compound_name", "Unknown")
+                            safe_comp_name = html.escape(comp_name)
+                            avail_thresholds = [
+                                t for t in comp.get("thresholds", [])
+                                if t.get("count", 0) > 0
+                            ]
+                            if not avail_thresholds:
+                                continue
+
+                            st.markdown(f"**{safe_comp_name}** — no ChEMBL data found at {similarity_threshold}% similarity")
+
+                            # Threshold selector
+                            options = [
+                                f"{t['threshold']}% ({t['count']} compounds)"
+                                for t in sorted(avail_thresholds, key=lambda x: x["threshold"], reverse=True)
+                            ]
+                            default_idx = 0  # Highest available
+
+                            selected_option = st.selectbox(
+                                f"Threshold for {safe_comp_name}",
+                                options,
+                                index=default_idx,
+                                key=f"batch_avail_th_{comp_name}",
+                                label_visibility="collapsed",
+                            )
+
+                            # Parse selected threshold
+                            if selected_option:
+                                selected_th = int(selected_option.split("%")[0])
+                                batch_avail_decisions[comp_name] = {
+                                    "threshold": selected_th,
+                                    "duplicate_action": None,
+                                }
+
+                                # Check for existing compound at this threshold
+                                existing_at = comp.get("existing_compounds", [])
+                                for ec in existing_at:
+                                    if ec.get("similarity_threshold") == selected_th:
+                                        if ec.get("config_match") == "identical":
+                                            st.caption(
+                                                f"Already analyzed: {html.escape(ec.get('compound_name', '?'))} (same config)"
+                                            )
+                                            batch_avail_decisions[comp_name]["duplicate_action"] = "skip"
+                                        else:
+                                            st.caption(
+                                                f"Exists: {html.escape(ec.get('compound_name', '?'))} (different config, will keep both)"
+                                            )
+                                            batch_avail_decisions[comp_name]["duplicate_action"] = "duplicate"
+                                        break
+
+                        st.session_state['batch_availability_decisions'] = batch_avail_decisions
+
+                # Compounds with no data at any threshold
+                no_data_compounds = [
+                    r for r in avail_results
+                    if not r.get("has_any_data")
+                ]
+                if no_data_compounds:
+                    no_data_names = [r.get("compound_name", "Unknown") for r in no_data_compounds]
+                    st.session_state['batch_auto_skipped_no_data'] = no_data_names
+                    with st.expander(f"No ChEMBL data found at any threshold ({len(no_data_compounds)}) — will be skipped", expanded=False):
+                        for name in no_data_names:
+                            st.markdown(f"- {html.escape(name)}")
+
         # Confirmation buttons
         st.divider()
         col1, col2 = st.columns(2)
@@ -1234,6 +1630,8 @@ def render_csv_upload_form() -> Optional[str]:
                     duplicate_decisions=duplicate_decisions,
                     duplicate_new_names=duplicate_new_names,
                     author_name=batch_author_name.strip(),
+                    availability_decisions=st.session_state.get('batch_availability_decisions', {}),
+                    auto_skipped_no_data=st.session_state.get('batch_auto_skipped_no_data', []),
                 )
 
         with col2:
@@ -1262,6 +1660,11 @@ def _clear_duplicate_check_state():
         'batch_default_duplicate_action',
         'batch_suggested_versions',
         'batch_duplicate_check_signature',
+        # Availability check state
+        'batch_availability_check_done',
+        'batch_availability_results',
+        'batch_availability_decisions',
+        'batch_auto_skipped_no_data',
     ]
     for key in keys_to_clear:
         st.session_state.pop(key, None)
@@ -1292,6 +1695,8 @@ def _submit_batch(
     duplicate_decisions: Dict[str, str] = None,
     duplicate_new_names: Dict[str, str] = None,
     author_name: str = "",
+    availability_decisions: Dict = None,
+    auto_skipped_no_data: List[str] = None,
 ) -> Optional[str]:
     """Submit batch of compounds to backend.
 
@@ -1304,6 +1709,8 @@ def _submit_batch(
                             for each existing compound
         duplicate_new_names: Dict mapping original compound_name -> new_name for duplicates
         author_name: Name of the author submitting the batch
+        availability_decisions: Dict mapping compound_name -> {threshold, duplicate_action}
+        auto_skipped_no_data: List of compound names with no ChEMBL data at any threshold
 
     Returns:
         batch_id if successful, None otherwise
@@ -1312,6 +1719,10 @@ def _submit_batch(
         duplicate_decisions = {}
     if duplicate_new_names is None:
         duplicate_new_names = {}
+    if availability_decisions is None:
+        availability_decisions = {}
+    if auto_skipped_no_data is None:
+        auto_skipped_no_data = []
     if df is None or df.empty:
         st.error("No compounds to submit")
         return None
@@ -1360,6 +1771,15 @@ def _submit_batch(
         if compound_action == 'skip':
             continue
 
+        # Skip compounds with no ChEMBL data at any threshold
+        if safe_name in auto_skipped_no_data:
+            continue
+
+        # Check if availability decisions override the threshold for this compound
+        avail_decision = availability_decisions.get(safe_name)
+        if avail_decision and avail_decision.get("duplicate_action") == "skip":
+            continue  # Same config exists at chosen threshold — skip
+
         # Try to get SMILES - with fallback from SMILES -> InChI conversion
         smiles = None
 
@@ -1398,19 +1818,27 @@ def _submit_batch(
         if compound_action == 'duplicate' and safe_name in duplicate_new_names:
             final_name = _sanitize_and_limit_name(duplicate_new_names[safe_name])
 
+        # Use availability-adjusted threshold if applicable
+        compound_threshold = similarity_threshold
+        avail_dup_action = None
+        if avail_decision and avail_decision.get("threshold"):
+            compound_threshold = avail_decision["threshold"]
+            avail_dup_action = avail_decision.get("duplicate_action")
+
         compound_data = {
             "compound_name": final_name,
             "author_name": author_name,
             "smiles": smiles,
-            "similarity_threshold": similarity_threshold,
+            "similarity_threshold": compound_threshold,
             "activity_types": activity_types,
         }
 
         # Add duplicate action for this specific compound if it's an existing compound
-        if compound_action:
-            compound_data["duplicate_action"] = compound_action
+        effective_action = compound_action or avail_dup_action
+        if effective_action:
+            compound_data["duplicate_action"] = effective_action
             # Store original name for reference when marking as duplicate
-            if compound_action == 'duplicate':
+            if effective_action == 'duplicate':
                 compound_data["original_compound_name"] = safe_name
 
         compounds.append(compound_data)
@@ -1418,6 +1846,9 @@ def _submit_batch(
     # Warn user about skipped compounds
     if skipped_no_structure:
         st.warning(f"Skipped {len(skipped_no_structure)} compounds with no valid SMILES or InChI: {', '.join(skipped_no_structure[:5])}{'...' if len(skipped_no_structure) > 5 else ''}")
+
+    if auto_skipped_no_data:
+        st.info(f"Skipped {len(auto_skipped_no_data)} compounds with no ChEMBL data at any threshold")
 
     if not compounds:
         st.error("No valid compounds found in file (all may have been skipped)")
