@@ -34,9 +34,9 @@ def calculate_modulus(x: float, y: float) -> float:
     Returns:
         float: Modulus (overall efficiency magnitude) or NaN if invalid
     """
-    if not (np.isnan(x) or np.isnan(y)):
-        return np.sqrt(x**2 + y**2)
-    return np.nan
+    if x is None or y is None or np.isnan(x) or np.isnan(y):
+        return np.nan
+    return np.sqrt(x**2 + y**2)
 
 
 def calculate_angle(x: float, y: float) -> float:
@@ -57,9 +57,9 @@ def calculate_angle(x: float, y: float) -> float:
     Returns:
         float: Angle in degrees (0-90°) or NaN if invalid
     """
-    if not (np.isnan(x) or np.isnan(y)):
-        return np.arctan2(y, x) * 180 / np.pi
-    return np.nan
+    if x is None or y is None or np.isnan(x) or np.isnan(y):
+        return np.nan
+    return np.arctan2(y, x) * 180 / np.pi
 
 
 def calculate_sei_bei_plane_metrics(

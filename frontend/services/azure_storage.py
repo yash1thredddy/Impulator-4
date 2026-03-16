@@ -39,6 +39,9 @@ LOCAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 # Maximum number of cached compounds (LRU eviction)
 MAX_CACHE_ITEMS = int(os.getenv("MAX_CACHE_ITEMS", "1000"))
 
+# Maximum allowed decompressed size per ZIP entry (zip bomb protection)
+MAX_EXTRACTED_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
+
 
 def _is_uuid(value: str) -> bool:
     """Check if a string looks like a UUID."""
@@ -732,6 +735,18 @@ def download_result_by_storage_path(storage_path: str, entry_id: str = None, for
         return None
 
 
+def _validate_zip_entry(zf: zipfile.ZipFile, filename: str) -> bool:
+    """Validate a ZIP entry against zip bomb attacks."""
+    info = zf.getinfo(filename)
+    if '..' in filename or filename.startswith('/'):
+        logger.warning(f"Path traversal attempt in ZIP: {filename}")
+        return False
+    if info.file_size > MAX_EXTRACTED_FILE_SIZE:
+        logger.warning(f"ZIP entry too large ({info.file_size} bytes): {filename}")
+        return False
+    return True
+
+
 def load_result_dataframe_by_entry_id(entry_id: str, filename: str = "similar_compounds.csv") -> Optional[pd.DataFrame]:
     """
     Load a specific CSV from a result ZIP file by entry_id.
@@ -750,6 +765,8 @@ def load_result_dataframe_by_entry_id(entry_id: str, filename: str = "similar_co
     try:
         with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
             if filename in zf.namelist():
+                if not _validate_zip_entry(zf, filename):
+                    return None
                 with zf.open(filename) as f:
                     return pd.read_csv(f)
             else:
@@ -779,6 +796,8 @@ def load_result_json_by_entry_id(entry_id: str, filename: str = "summary.json") 
     try:
         with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
             if filename in zf.namelist():
+                if not _validate_zip_entry(zf, filename):
+                    return None
                 with zf.open(filename) as f:
                     return json.load(f)
             else:
@@ -858,6 +877,8 @@ def smart_load_summary(
     try:
         with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
             if "summary.json" in zf.namelist():
+                if not _validate_zip_entry(zf, "summary.json"):
+                    return None
                 with zf.open("summary.json") as f:
                     return json.load(f)
             else:
@@ -903,6 +924,8 @@ def smart_load_dataframe(
     try:
         with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
             if filename in zf.namelist():
+                if not _validate_zip_entry(zf, filename):
+                    return None
                 with zf.open(filename) as f:
                     return pd.read_csv(f)
             else:

@@ -8,7 +8,8 @@ import os
 import re
 import shutil
 import logging
-from datetime import datetime
+import threading
+from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
@@ -55,7 +56,7 @@ class AzureSyncRotatingFileHandler(RotatingFileHandler):
                 return False
 
             # Create compressed version
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             gz_name = f"backend_{timestamp}.log.gz"
             gz_path = path.parent / gz_name
 
@@ -105,6 +106,7 @@ def _sanitize_compound_name(name: str) -> str:
 
 # Lazy import to avoid startup failures if azure not installed
 _blob_service_client = None
+_blob_service_lock = threading.Lock()
 
 
 def _get_blob_service():
@@ -115,18 +117,20 @@ def _get_blob_service():
         return None
 
     if _blob_service_client is None:
-        try:
-            from azure.storage.blob import BlobServiceClient
-            _blob_service_client = BlobServiceClient.from_connection_string(
-                settings.AZURE_CONNECTION_STRING
-            )
-            logger.info("Azure Blob service client initialized")
-        except ImportError:
-            logger.warning("azure-storage-blob not installed, Azure sync disabled")
-            return None
-        except Exception as e:
-            logger.error(f"Failed to initialize Azure client: {e}")
-            return None
+        with _blob_service_lock:
+            if _blob_service_client is None:
+                try:
+                    from azure.storage.blob import BlobServiceClient
+                    _blob_service_client = BlobServiceClient.from_connection_string(
+                        settings.AZURE_CONNECTION_STRING
+                    )
+                    logger.info("Azure Blob service client initialized")
+                except ImportError:
+                    logger.warning("azure-storage-blob not installed, Azure sync disabled")
+                    return None
+                except Exception as e:
+                    logger.error(f"Failed to initialize Azure client: {e}")
+                    return None
 
     return _blob_service_client
 
@@ -229,15 +233,22 @@ def sync_db_to_azure() -> bool:
         return False
 
     db_path = Path(settings.DATA_DIR) / "impulator.db"
-    temp_path = Path(settings.DATA_DIR) / "impulator.db.tmp"
+    temp_path = Path(settings.DATA_DIR) / "impulator.db.sync"
 
     try:
         if not db_path.exists():
             logger.warning("Database file not found, skipping sync")
             return False
 
-        # Copy to temp file to avoid locking issues
-        shutil.copy2(db_path, temp_path)
+        # Use SQLite backup API for a consistent snapshot (safe even during writes)
+        import sqlite3
+        src = sqlite3.connect(str(db_path))
+        dst = sqlite3.connect(str(temp_path))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
 
         with open(temp_path, "rb") as f:
             blob.upload_blob(f, overwrite=True)
@@ -350,7 +361,7 @@ def sync_logs_to_azure() -> bool:
         logger.info("No current log to sync to Azure")
         return True
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     gz_name = f"backend_{timestamp}_shutdown.log.gz"
     gz_path = log_file.parent / gz_name
 

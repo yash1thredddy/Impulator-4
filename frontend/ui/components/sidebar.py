@@ -9,6 +9,7 @@ Smart Polling:
 - Polling resumes when new jobs are submitted
 """
 
+import html as html_mod
 import logging
 from typing import Dict, Any
 
@@ -252,7 +253,7 @@ def render_job_card(job: Dict[str, Any]) -> None:
     with st.container(border=True):
         # Compound name with status emoji
         status_emoji = get_status_emoji(status)
-        st.markdown(f"{status_emoji} **{_truncate(compound_name, 20)}**")
+        st.markdown(f"{status_emoji} **{html_mod.escape(_truncate(compound_name, 20))}**")
 
         # Progress display based on status
         if status == 'processing':

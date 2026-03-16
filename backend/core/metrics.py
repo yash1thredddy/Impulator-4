@@ -54,6 +54,17 @@ class Metrics:
     # Start time for uptime calculation
     _start_time: float = field(default_factory=time.time, repr=False)
 
+    _ALLOWED_METRICS: frozenset = field(
+        default=frozenset({
+            'jobs_created', 'jobs_completed', 'jobs_failed', 'jobs_cancelled',
+            'api_calls_total', 'api_calls_failed',
+            'cache_hits', 'cache_misses',
+            'rate_limit_exceeded',
+            'active_jobs', 'pending_jobs',
+        }),
+        repr=False,
+    )
+
     def increment(self, metric: str, value: int = 1) -> None:
         """Increment a counter metric.
 
@@ -61,6 +72,8 @@ class Metrics:
             metric: Name of the metric to increment
             value: Amount to increment by (default 1)
         """
+        if metric not in self._ALLOWED_METRICS:
+            return
         with self._lock:
             current = getattr(self, metric, 0)
             setattr(self, metric, current + value)
@@ -72,6 +85,8 @@ class Metrics:
             metric: Name of the metric to decrement
             value: Amount to decrement by (default 1)
         """
+        if metric not in self._ALLOWED_METRICS:
+            return
         with self._lock:
             current = getattr(self, metric, 0)
             setattr(self, metric, max(0, current - value))
@@ -83,6 +98,8 @@ class Metrics:
             metric: Name of the gauge metric
             value: Value to set
         """
+        if metric not in self._ALLOWED_METRICS:
+            return
         with self._lock:
             setattr(self, metric, value)
 

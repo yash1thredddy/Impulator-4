@@ -17,7 +17,7 @@ import sqlite3
 import shutil
 import sys
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Add project root to path
@@ -58,7 +58,7 @@ def rebuild_compounds_table():
         sys.exit(1)
 
     # Create backup
-    backup_path = db_path.parent / f"impulator_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+    backup_path = db_path.parent / f"impulator_backup_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.db"
     logger.info(f"Creating backup: {backup_path}")
     shutil.copy2(db_path, backup_path)
 
@@ -91,6 +91,7 @@ def rebuild_compounds_table():
             is_duplicate BOOLEAN DEFAULT 0,
             duplicate_of VARCHAR(36),
             total_activities INTEGER DEFAULT 0,
+            similar_compounds INTEGER DEFAULT 0,
             imp_candidates INTEGER DEFAULT 0,
             imp_score REAL,
             similarity_threshold INTEGER DEFAULT 90,
@@ -111,7 +112,7 @@ def rebuild_compounds_table():
         columns_to_copy = [
             'id', 'entry_id', 'compound_name', 'chembl_id', 'smiles',
             'inchikey', 'canonical_smiles', 'is_duplicate', 'duplicate_of',
-            'total_activities', 'imp_candidates', 'imp_score',
+            'total_activities', 'similar_compounds', 'imp_candidates', 'imp_score',
             'similarity_threshold', 'qed', 'num_outliers',
             'author_name', 'activity_types',
             'storage_path', 'processed_at'

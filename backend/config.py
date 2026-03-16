@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     # Application
     
     APP_NAME: str = "Impulator"
-    APP_VERSION: str = "2.1.0"  # Updated version after fixes
+    APP_VERSION: str = "2.1.3"  # Updated version after fixes
     DEBUG: bool = False
 
     # Server

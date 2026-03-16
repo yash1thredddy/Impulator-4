@@ -213,8 +213,10 @@ def render_structure_thumbnail(smiles: str, compound_name: str, key_prefix: str 
         key_prefix: Key prefix for uniqueness
     """
     import html
+    import re as _re
     safe_smiles = html.escape(smiles)
-    canvas_id = f"{key_prefix}struct_{compound_name.replace(' ', '_')}"
+    # Sanitize canvas_id to prevent HTML/JS injection via compound_name
+    canvas_id = _re.sub(r'[^a-zA-Z0-9_]', '', f"{key_prefix}struct_{compound_name}")
 
     # SmilesDrawer rendering via JS (doesn't trigger rerun)
     html_content = f'''

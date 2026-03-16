@@ -1057,7 +1057,7 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
                 st.markdown(
                     f"<div style='background: {color}; color: white; padding: 2px 6px; "
                     f"border-radius: 4px; font-size: 11px; margin: 2px 0; text-align: center;'>"
-                    f"{m}: {count}</div>",
+                    f"{html.escape(m)}: {count}</div>",
                     unsafe_allow_html=True
                 )
 
@@ -1067,7 +1067,7 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
             st.markdown("<p style='font-size: 11px; font-weight: 600; margin-bottom: 2px;'>Groups</p>", unsafe_allow_html=True)
             group_counts = plot_df[color_by].value_counts()
             for grp, cnt in group_counts.head(6).items():
-                st.markdown(f"<p style='font-size: 10px; margin: 0; color: var(--text-color); opacity: 0.6;'>{str(grp)[:12]}: {cnt}</p>", unsafe_allow_html=True)
+                st.markdown(f"<p style='font-size: 10px; margin: 0; color: var(--text-color); opacity: 0.6;'>{html.escape(str(grp)[:12])}: {cnt}</p>", unsafe_allow_html=True)
 
     # Efficiency Metrics by Target table (after visualization)
     st.markdown("---")

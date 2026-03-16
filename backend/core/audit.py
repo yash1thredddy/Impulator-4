@@ -17,6 +17,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from enum import Enum
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -46,10 +47,12 @@ audit_logger = logging.getLogger("audit")
 audit_logger.setLevel(logging.INFO)
 audit_logger.propagate = False  # Don't propagate to root logger
 
-# Create file handler for audit log
-audit_handler = logging.FileHandler(
+# Create rotating file handler for audit log (10MB max, 5 backups)
+audit_handler = RotatingFileHandler(
     AUDIT_LOG_DIR / "audit.log",
-    encoding="utf-8"
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8",
 )
 audit_handler.setFormatter(logging.Formatter(
     "%(asctime)s - %(message)s"

@@ -70,3 +70,5 @@ scripts/pubchemvsflow.py
 scripts/quercetin_d3_plots.py
 scripts/quercetin_targets.csv
 scripts/test_gnps2_endpoints.py
+# GSD planning docs (local only)
+.planning/
