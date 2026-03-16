@@ -30,8 +30,11 @@ def start_backend():
         "backend.main:app",
         "--host", BACKEND_HOST,
         "--port", str(BACKEND_PORT),
-        "--reload" if os.getenv("DEBUG") else "--no-access-log",
     ]
+    if os.getenv("DEBUG"):
+        cmd.append("--reload")
+    else:
+        cmd.append("--no-access-log")
 
     process = subprocess.Popen(
         cmd,

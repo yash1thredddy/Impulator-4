@@ -4,6 +4,7 @@ Decoupled from Streamlit for backend use.
 """
 import atexit
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from functools import lru_cache, wraps
@@ -99,6 +100,7 @@ def cache_non_none(maxsize: int = CACHE_SIZE, ttl_seconds: int = 3600):
         cache = {}  # key -> (value, timestamp)
         cache_hits = [0]
         cache_misses = [0]
+        cache_lock = threading.Lock()
 
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -106,42 +108,48 @@ def cache_non_none(maxsize: int = CACHE_SIZE, ttl_seconds: int = 3600):
             key = (args, tuple(sorted(kwargs.items())))
             current_time = time.time()
 
-            if key in cache:
-                value, timestamp = cache[key]
-                # Check if entry is still valid (not expired)
-                if current_time - timestamp < ttl_seconds:
-                    cache_hits[0] += 1
-                    return value
-                else:
-                    # Entry expired, remove it
-                    del cache[key]
+            with cache_lock:
+                if key in cache:
+                    value, timestamp = cache[key]
+                    # Check if entry is still valid (not expired)
+                    if current_time - timestamp < ttl_seconds:
+                        cache_hits[0] += 1
+                        return value
+                    else:
+                        # Entry expired, remove it
+                        del cache[key]
 
-            cache_misses[0] += 1
+            with cache_lock:
+                cache_misses[0] += 1
+
+            # Call function outside lock to avoid holding lock during I/O
             result = func(*args, **kwargs)
 
             # Only cache non-None results
             if result is not None:
-                # Evict expired entries first
-                expired_keys = [
-                    k for k, (_, ts) in cache.items()
-                    if current_time - ts >= ttl_seconds
-                ]
-                for k in expired_keys:
-                    del cache[k]
+                with cache_lock:
+                    # Evict expired entries first
+                    expired_keys = [
+                        k for k, (_, ts) in cache.items()
+                        if current_time - ts >= ttl_seconds
+                    ]
+                    for k in expired_keys:
+                        del cache[k]
 
-                # Evict oldest entry if still at capacity
-                if len(cache) >= maxsize:
-                    oldest_key = next(iter(cache))
-                    del cache[oldest_key]
+                    # Evict oldest entry if still at capacity
+                    if len(cache) >= maxsize:
+                        oldest_key = next(iter(cache))
+                        del cache[oldest_key]
 
-                cache[key] = (result, current_time)
+                    cache[key] = (result, current_time)
 
             return result
 
         def cache_clear():
-            cache.clear()
-            cache_hits[0] = 0
-            cache_misses[0] = 0
+            with cache_lock:
+                cache.clear()
+                cache_hits[0] = 0
+                cache_misses[0] = 0
 
         def cache_info():
             class CacheInfo:
@@ -159,7 +167,8 @@ def cache_non_none(maxsize: int = CACHE_SIZE, ttl_seconds: int = 3600):
                         'currsize': self.currsize
                     }
 
-            return CacheInfo(cache_hits[0], cache_misses[0], maxsize, len(cache))
+            with cache_lock:
+                return CacheInfo(cache_hits[0], cache_misses[0], maxsize, len(cache))
 
         wrapper.cache_clear = cache_clear
         wrapper.cache_info = cache_info
@@ -168,7 +177,8 @@ def cache_non_none(maxsize: int = CACHE_SIZE, ttl_seconds: int = 3600):
     return decorator
 
 # Thread pool for timeout wrapper (reused across calls)
-_timeout_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="chembl_timeout")
+# Needs enough workers to handle concurrent compound jobs (2 workers) × multiple API calls each
+_timeout_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="chembl_timeout")
 
 
 def with_timeout(timeout_seconds: int = CHEMBL_API_TIMEOUT):
@@ -249,30 +259,38 @@ def _configure_chembl_settings():
         logger.warning(f"Failed to configure ChEMBL settings: {e}")
 
 
+_chembl_client_lock = threading.Lock()
+
+
 def _get_chembl_client():
-    """Lazy initialization of ChEMBL client with optimized settings."""
+    """Lazy initialization of ChEMBL client with optimized settings.
+
+    Thread-safe via double-checked locking pattern.
+    """
     global _chembl_client
 
     if _chembl_client is None:
-        # Configure settings BEFORE importing new_client
-        _configure_chembl_settings()
+        with _chembl_client_lock:
+            if _chembl_client is None:
+                # Configure settings BEFORE importing new_client
+                _configure_chembl_settings()
 
-        try:
-            from chembl_webresource_client.new_client import new_client
-            _chembl_client = {
-                'similarity': new_client.similarity,
-                'molecule': new_client.molecule,
-                'activity': new_client.activity,
-                'target': new_client.target,
-                'drug_indication': new_client.drug_indication,
-            }
-            logger.info(f"ChEMBL client initialized with endpoints: {list(_chembl_client.keys())}")
-        except ImportError:
-            logger.warning("chembl_webresource_client not installed")
-            _chembl_client = {}
-        except Exception as e:
-            logger.error(f"Failed to initialize ChEMBL client: {e}")
-            _chembl_client = {}
+                try:
+                    from chembl_webresource_client.new_client import new_client
+                    _chembl_client = {
+                        'similarity': new_client.similarity,
+                        'molecule': new_client.molecule,
+                        'activity': new_client.activity,
+                        'target': new_client.target,
+                        'drug_indication': new_client.drug_indication,
+                    }
+                    logger.info(f"ChEMBL client initialized with endpoints: {list(_chembl_client.keys())}")
+                except ImportError:
+                    logger.warning("chembl_webresource_client not installed")
+                    _chembl_client = None
+                except Exception as e:
+                    logger.error(f"Failed to initialize ChEMBL client: {e}")
+                    _chembl_client = None
 
     return _chembl_client
 
@@ -287,14 +305,26 @@ retry_strategy = Retry(
 
 def get_session():
     """Create and return a requests session with retry configuration."""
-    session = requests.Session()
+    s = requests.Session()
     adapter = HTTPAdapter(max_retries=retry_strategy)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    return session
+    s.mount("http://", adapter)
+    s.mount("https://", adapter)
+    return s
 
 
-# Create session
+# Thread-local sessions to avoid sharing requests.Session across threads
+# (requests.Session is NOT thread-safe — cookie jar and internal state can corrupt)
+_thread_local = threading.local()
+
+
+def _get_thread_session():
+    """Get a thread-local requests session."""
+    if not hasattr(_thread_local, 'session'):
+        _thread_local.session = get_session()
+    return _thread_local.session
+
+
+# Module-level session for backward compatibility in single-threaded contexts
 session = get_session()
 
 
@@ -319,7 +349,7 @@ def _rest_api_get(endpoint: str, params: Dict[str, Any], timeout: int = API_TIME
     url = f"{CHEMBL_REST_API_BASE}/{endpoint}.json"
     try:
         _chembl_rate_limiter.wait()
-        response = session.get(url, params=params, timeout=timeout)
+        response = _get_thread_session().get(url, params=params, timeout=timeout)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
@@ -377,7 +407,7 @@ def cascade_similarity_counts(
                 f"{CHEMBL_REST_API_BASE}/similarity/{_url_encode_smiles(smiles)}/{threshold}.json"
             )
             _chembl_rate_limiter.wait()
-            resp = session.get(
+            resp = _get_thread_session().get(
                 url,
                 params={"limit": 1, "only": "molecule_chembl_id"},
                 timeout=API_TIMEOUT,
@@ -431,7 +461,7 @@ def probe_all_thresholds(
                 f"{CHEMBL_REST_API_BASE}/similarity/{_url_encode_smiles(smiles)}/{threshold}.json"
             )
             _chembl_rate_limiter.wait()
-            resp = session.get(
+            resp = _get_thread_session().get(
                 url,
                 params={"limit": 1, "only": "molecule_chembl_id"},
                 timeout=API_TIMEOUT,
@@ -954,7 +984,7 @@ def get_classification(inchikey: str) -> Optional[Dict]:
     try:
         _classyfire_rate_limiter.wait()  # Apply rate limiting
         url = f'http://classyfire.wishartlab.com/entities/{inchikey}.json'
-        response = session.get(url, timeout=API_TIMEOUT)
+        response = _get_thread_session().get(url, timeout=API_TIMEOUT)
         if response.status_code == 200:
             return response.json()
         return None

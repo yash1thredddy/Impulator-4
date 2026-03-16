@@ -303,10 +303,18 @@ class JobService:
         # Combine and sort: completed jobs first, then by created_at (newest first within each group)
         all_jobs = active_jobs + completed_jobs + failed_jobs
         # Sort key: (0 if completed/failed, 1 otherwise), then by created_at descending
+        def _sort_ts(dt):
+            """Return a UTC timestamp suitable for descending sort."""
+            if dt is None:
+                return datetime.min.replace(tzinfo=timezone.utc).timestamp()
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+
         all_jobs.sort(
             key=lambda j: (
                 0 if j.status in [JobStatus.COMPLETED, JobStatus.FAILED] else 1,
-                -(j.created_at or datetime.min.replace(tzinfo=timezone.utc)).timestamp()
+                -_sort_ts(j.created_at),
             )
         )
 
@@ -442,14 +450,17 @@ class JobService:
         )
 
         cancelled_count = 0
-        for job in jobs:
-            job.status = JobStatus.CANCELLED
-            job.current_step = "Cancelled"
-            job.completed_at = datetime.now(timezone.utc)
-            cancelled_count += 1
+        with _db_write_lock:
+            for job in jobs:
+                job.status = JobStatus.CANCELLED
+                job.current_step = "Cancelled"
+                job.completed_at = datetime.now(timezone.utc)
+                cancelled_count += 1
+
+            if cancelled_count > 0:
+                db.commit()
 
         if cancelled_count > 0:
-            db.commit()
             logger.info(f"Cancelled {cancelled_count} jobs in batch {batch_id}")
 
         return cancelled_count
@@ -626,6 +637,11 @@ class JobService:
             job = self._get_job_for_update(db, job_id)
             if not job:
                 logger.warning(f"Job {job_id} not found for completion")
+                return None
+
+            # Guard: don't resurrect cancelled/failed jobs to COMPLETED
+            if job.status in (JobStatus.CANCELLED, JobStatus.FAILED):
+                logger.warning(f"Job {job_id} is {job.status.value}, not completing")
                 return None
 
             job.status = JobStatus.COMPLETED
@@ -1009,8 +1025,10 @@ class JobService:
         if not job:
             return False
 
-        db.delete(job)
-        db.commit()
+        with _db_write_lock:
+            db.delete(job)
+            db.commit()
+
         logger.info(f"Job {job_id} deleted")
         return True
 

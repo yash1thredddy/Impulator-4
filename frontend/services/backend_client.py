@@ -8,6 +8,7 @@ import json
 import time
 import logging
 import threading
+import contextvars
 from dataclasses import dataclass
 from typing import Optional, Dict, List, Any
 
@@ -69,7 +70,11 @@ class ImpulatorAPIClient:
         self.base_url = base_url or config.API_BASE_URL
         self.timeout = timeout or config.API_TIMEOUT_SECONDS
         self.max_retries = max_retries or config.MAX_RETRY_ATTEMPTS
-        self._session_id = session_id
+        # Session ID stored per-thread via contextvars (Streamlit runs each user
+        # session in a separate thread — a shared instance attribute would cause
+        # one user's session_id to overwrite another's mid-request).
+        if session_id:
+            _session_id_var.set(session_id)
 
         # Configure session with retry
         self.session = requests.Session()
@@ -84,19 +89,20 @@ class ImpulatorAPIClient:
 
     @property
     def session_id(self) -> Optional[str]:
-        """Get current session ID."""
-        return self._session_id
+        """Get current session ID (thread-safe via contextvars)."""
+        return _session_id_var.get(None)
 
     @session_id.setter
     def session_id(self, value: str):
-        """Set session ID for user isolation."""
-        self._session_id = value
+        """Set session ID for user isolation (thread-safe via contextvars)."""
+        _session_id_var.set(value)
 
     def _get_headers(self) -> Dict[str, str]:
         """Get request headers including session ID if set."""
         headers = {}
-        if self._session_id:
-            headers["X-Session-ID"] = self._session_id
+        sid = _session_id_var.get(None)
+        if sid:
+            headers["X-Session-ID"] = sid
         return headers
 
     def _request(
@@ -952,6 +958,11 @@ class ImpulatorAPIClient:
         return results
 
 
+# Thread-safe session ID: each Streamlit user thread gets its own value
+_session_id_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    '_session_id_var', default=None
+)
+
 # Singleton pattern with thread-safe initialization
 _api_client: Optional[ImpulatorAPIClient] = None
 _api_client_lock = threading.Lock()
@@ -968,13 +979,13 @@ def get_api_client() -> ImpulatorAPIClient:
 
 
 def set_session_id(session_id: str) -> None:
-    """Set session ID on the singleton API client.
+    """Set session ID for the current thread (thread-safe via contextvars).
 
     Call this early in the app lifecycle with the user's session ID.
+    Each Streamlit user thread gets its own isolated session ID.
 
     Args:
         session_id: Unique session identifier
     """
-    client = get_api_client()
-    client.session_id = session_id
+    _session_id_var.set(session_id)
     logger.debug(f"API client session ID set: {session_id[:8]}...")

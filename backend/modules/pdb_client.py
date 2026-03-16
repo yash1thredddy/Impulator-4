@@ -17,6 +17,7 @@ Resolution Quality Classes:
 import json
 import logging
 import requests
+import threading
 from typing import Dict, List, Optional, Tuple
 from functools import lru_cache
 import time
@@ -82,14 +83,26 @@ BATCH_SIZE = 50  # Number of PDB IDs to query in one batch for optimal performan
 
 def get_session():
     """Create and return a requests session for PDB API calls."""
-    session = requests.Session()
-    session.headers.update({
+    s = requests.Session()
+    s.headers.update({
         'Content-Type': 'application/json',
         'Accept': 'application/json'
     })
-    return session
+    return s
 
 
+# Thread-local sessions (requests.Session is NOT thread-safe)
+_thread_local = threading.local()
+
+
+def _get_thread_session():
+    """Get a thread-local requests session for PDB API calls."""
+    if not hasattr(_thread_local, 'session'):
+        _thread_local.session = get_session()
+    return _thread_local.session
+
+
+# Module-level session for backward compatibility
 session = get_session()
 
 
@@ -247,7 +260,7 @@ def get_structure_details(pdb_id: str) -> Dict[str, any]:
     try:
         # Fetch entry data
         url = f"{DATA_API_URL}/entry/{pdb_id}"
-        response = session.get(url, timeout=API_TIMEOUT)
+        response = _get_thread_session().get(url, timeout=API_TIMEOUT)
 
         if response.status_code == 200:
             data = response.json()
@@ -275,7 +288,7 @@ def get_structure_details(pdb_id: str) -> Dict[str, any]:
         # Try entity 1 (most structures have at least one polymer entity)
         try:
             entity_url = f"{DATA_API_URL}/polymer_entity/{pdb_id}/1"
-            entity_response = session.get(entity_url, timeout=API_TIMEOUT)
+            entity_response = _get_thread_session().get(entity_url, timeout=API_TIMEOUT)
 
             if entity_response.status_code == 200:
                 entity_data = entity_response.json()
@@ -473,7 +486,7 @@ def get_structure_resolution(pdb_id: str) -> Optional[float]:
         # Fallback to manual REST API query
         try:
             url = f"{DATA_API_URL}/entry/{pdb_id}"
-            response = session.get(url, timeout=API_TIMEOUT)
+            response = _get_thread_session().get(url, timeout=API_TIMEOUT)
 
             if response.status_code == 200:
                 data = response.json()

@@ -16,7 +16,7 @@ import json
 import logging
 import shutil
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
 
 import pandas as pd
@@ -1185,7 +1185,7 @@ class CompoundService:
             'query_smiles': smiles,
             'similarity_threshold': similarity_threshold,
             'activity_types': ','.join(activity_types or []),
-            'processing_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'processing_date': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
             'total_compounds': df_results['ChEMBL_ID'].nunique() if 'ChEMBL_ID' in df_results.columns else 0,
             'total_bioactivity_rows': len(df_results),
         }

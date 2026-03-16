@@ -73,7 +73,7 @@ class JobScheduler:
                     time.sleep(self._poll_interval)
                 first_run = False
 
-                logger.info(f"Scheduler poll: executor capacity={job_executor.has_capacity()}, active={job_executor.get_active_count()}")
+                logger.debug(f"Scheduler poll: executor capacity={job_executor.has_capacity()}, active={job_executor.get_active_count()}")
 
                 had_work = self._process_pending()
 
@@ -138,7 +138,7 @@ class JobScheduler:
                         .first()
                     )
 
-                    logger.info(f"Query for pending job: found={job is not None}")
+                    logger.debug(f"Query for pending job: found={job is not None}")
 
                     if not job:
                         break  # No more pending jobs
