@@ -110,7 +110,8 @@ async def lifespan(app: FastAPI):  # pragma: no cover -- startup/shutdown lifecy
             logger.warning(f"Orphan reconciliation failed (non-fatal): {e}")
 
     # Remove orphaned processing folders from crashed runs
-    _cleanup_stale_folders()
+    from backend.services.compound_service import CompoundService
+    CompoundService.cleanup_stale_folders()
 
     # Reconcile orphaned Azure uploads (STAB-18)
     if is_azure_configured():
