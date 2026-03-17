@@ -9,7 +9,7 @@ class TestRateLimiter:
 
     def test_allows_requests_within_limit(self):
         """Test that requests within limit are allowed."""
-        from backend.api.v1.jobs import RateLimiter
+        from backend.core.rate_limiter import RateLimiter
 
         limiter = RateLimiter(window_seconds=60)
         session_id = "test-session"
@@ -32,7 +32,7 @@ class TestRateLimiter:
 
     def test_blocks_requests_over_limit(self):
         """Test that requests over limit are blocked."""
-        from backend.api.v1.jobs import RateLimiter
+        from backend.core.rate_limiter import RateLimiter
 
         limiter = RateLimiter(window_seconds=60)
         session_id = "test-session"
@@ -49,7 +49,7 @@ class TestRateLimiter:
 
     def test_different_sessions_have_separate_limits(self):
         """Test that different sessions have separate rate limits."""
-        from backend.api.v1.jobs import RateLimiter
+        from backend.core.rate_limiter import RateLimiter
 
         limiter = RateLimiter(window_seconds=60)
 
@@ -68,7 +68,7 @@ class TestRateLimiter:
 
     def test_anonymous_session_handling(self):
         """Test that None/empty session IDs use 'anonymous'."""
-        from backend.api.v1.jobs import RateLimiter
+        from backend.core.rate_limiter import RateLimiter
 
         limiter = RateLimiter(window_seconds=60)
 
@@ -84,7 +84,7 @@ class TestRateLimiter:
 
     def test_max_sessions_limit_enforced(self):
         """Test that MAX_SESSIONS limit prevents memory leak."""
-        from backend.api.v1.jobs import RateLimiter
+        from backend.core.rate_limiter import RateLimiter
 
         limiter = RateLimiter(window_seconds=60)
         original_max = limiter.MAX_SESSIONS
@@ -115,7 +115,7 @@ class TestRateLimiter:
 
     def test_old_timestamps_cleaned_up(self):
         """Test that old timestamps are cleaned up."""
-        from backend.api.v1.jobs import RateLimiter
+        from backend.core.rate_limiter import RateLimiter
 
         # Use 0.2 second window for fast testing
         limiter = RateLimiter(window_seconds=0.2)
@@ -139,7 +139,7 @@ class TestRateLimiter:
 
     def test_active_session_count_property(self):
         """Test active_session_count property."""
-        from backend.api.v1.jobs import RateLimiter
+        from backend.core.rate_limiter import RateLimiter
 
         limiter = RateLimiter(window_seconds=60)
 
@@ -157,7 +157,7 @@ class TestRateLimiter:
 
     def test_thread_safety(self):
         """Test that rate limiter is thread-safe."""
-        from backend.api.v1.jobs import RateLimiter
+        from backend.core.rate_limiter import RateLimiter
         import threading
 
         limiter = RateLimiter(window_seconds=60)

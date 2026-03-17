@@ -13,6 +13,7 @@ Local caching:
 import os
 import io
 import json
+import threading
 import zipfile
 import logging
 import uuid
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 # Lazy import Azure SDK
 _blob_service_client = None
+_blob_service_lock = threading.Lock()
 
 # Local cache directory - use absolute path relative to this module
 # This ensures frontend and backend share the same data directory
@@ -66,7 +68,11 @@ def is_azure_configured() -> bool:
 
 
 def _get_blob_service():
-    """Lazy initialization of Azure Blob service client."""
+    """Get Azure Blob service client with thread-safe lazy initialization.
+
+    Uses double-checked locking to prevent connection leaks under
+    concurrent Streamlit sessions (ARCH-11).
+    """
     global _blob_service_client
 
     conn_str = _get_connection_string()
@@ -74,16 +80,18 @@ def _get_blob_service():
         return None
 
     if _blob_service_client is None:
-        try:
-            from azure.storage.blob import BlobServiceClient
-            _blob_service_client = BlobServiceClient.from_connection_string(conn_str)
-            logger.info("Frontend Azure Blob client initialized")
-        except ImportError:
-            logger.warning("azure-storage-blob not installed")
-            return None
-        except Exception as e:
-            logger.error(f"Failed to initialize Azure client: {e}")
-            return None
+        with _blob_service_lock:
+            if _blob_service_client is None:
+                try:
+                    from azure.storage.blob import BlobServiceClient
+                    _blob_service_client = BlobServiceClient.from_connection_string(conn_str)
+                    logger.info("Frontend Azure Blob client initialized")
+                except ImportError:
+                    logger.warning("azure-storage-blob not installed")
+                    return None
+                except Exception as e:
+                    logger.error(f"Failed to initialize Azure client: {e}")
+                    return None
 
     return _blob_service_client
 

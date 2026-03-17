@@ -15,7 +15,7 @@ from typing import Dict, Any
 
 import streamlit as st
 
-from frontend.services import get_api_client, delete_from_cache
+from frontend.services import get_api_client, delete_from_cache, set_session_id
 from frontend.utils import SessionState
 from frontend.config.settings import config
 
@@ -185,6 +185,9 @@ def _fetch_and_check_jobs():
         Tuple of (non_failed_jobs, has_active, failed_jobs)
         or (None, False, []) on error
     """
+    # Ensure session_id is set in this context — @st.fragment runs in a
+    # separate context where the ContextVar from the main page is not inherited
+    set_session_id(SessionState.get_session_id())
     client = get_api_client()
     try:
         all_jobs = client.get_active_jobs()

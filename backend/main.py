@@ -58,71 +58,6 @@ def _handle_thread_exception(args):
 threading.excepthook = _handle_thread_exception
 
 
-def _recover_stalled_jobs():
-    """Reset PROCESSING jobs to PENDING on startup.
-
-    Jobs that were PROCESSING when server crashed will be requeued.
-    Also triggers scheduler if there are any pending jobs.
-    """
-    with get_db_session() as db:
-        stalled = db.query(Job).filter(Job.status == JobStatus.PROCESSING).all()
-        pending_count = db.query(Job).filter(Job.status == JobStatus.PENDING).count()
-
-        for job in stalled:
-            job.status = JobStatus.PENDING
-            job.current_step = "Queued (recovered)"
-
-        if stalled:
-            db.commit()
-            logger.info(f"Recovered {len(stalled)} stalled jobs")
-
-        # Handle SYNC_PENDING jobs: retry Azure upload on startup
-        sync_pending = db.query(Job).filter(Job.status == JobStatus.SYNC_PENDING).all()
-        if sync_pending:
-            logger.info(f"Found {len(sync_pending)} SYNC_PENDING jobs for Azure retry")
-
-        # Trigger scheduler if there are pending jobs or SYNC_PENDING jobs
-        if stalled or pending_count > 0 or sync_pending:
-            job_scheduler.trigger()
-            logger.info(f"Scheduler triggered ({len(stalled)} recovered + {pending_count} pending + {len(sync_pending)} sync_pending)")
-
-
-def _cleanup_stale_folders():
-    """Remove stale compound processing folders from data/results/.
-
-    During processing, compound_service creates folders like data/results/Aspirin/
-    which are converted to ZIPs and deleted. If the process crashes mid-processing,
-    these folders remain as orphans. Since _recover_stalled_jobs() has already reset
-    PROCESSING jobs to PENDING, any remaining folders are stale.
-
-    Only removes directories (not ZIP files or UUID-prefix subdirs).
-    """
-    import shutil
-
-    results_dir = settings.RESULTS_DIR
-    if not results_dir.exists():
-        return
-
-    cleaned = 0
-    for item in results_dir.iterdir():
-        if not item.is_dir():
-            continue
-        # Skip UUID-prefix subdirs (2-char hex: "3a", "7f", etc.) -- these contain ZIPs
-        if len(item.name) == 2 and all(c in '0123456789abcdef' for c in item.name.lower()):
-            continue
-        # This is a compound processing folder (e.g., "Aspirin", "Caffeine")
-        # It's stale because _recover_stalled_jobs already reset all PROCESSING -> PENDING
-        try:
-            shutil.rmtree(item)
-            cleaned += 1
-            logger.info(f"Cleaned up stale compound folder: {item.name}")
-        except Exception as e:
-            logger.warning(f"Failed to clean up stale folder {item.name}: {e}")
-
-    if cleaned:
-        logger.info(f"Cleaned up {cleaned} stale compound folder(s)")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -151,11 +86,15 @@ async def lifespan(app: FastAPI):
     # Note: Legacy compound table sync removed - database is the source of truth
     # for all compound metadata. UUID-based storage paths are the only supported format.
 
-    # Recover stalled jobs and start scheduler if needed
-    _recover_stalled_jobs()
+    # Recover stalled jobs using state machine (ARCH-12)
+    with get_db_session() as db:
+        from backend.services.job_service import job_service
+        recovery = job_service.recover_on_startup(db, job_scheduler.trigger)
+        logger.info(f"Startup recovery: {recovery}")
 
     # Remove orphaned processing folders from crashed runs
-    _cleanup_stale_folders()
+    from backend.services.compound_service import CompoundService
+    CompoundService.cleanup_stale_folders()
 
     # Reconcile orphaned Azure uploads (STAB-18)
     if is_azure_configured():
@@ -247,6 +186,25 @@ app = FastAPI(
 app.exception_handler(StarletteHTTPException)(http_exception_handler)
 app.exception_handler(RequestValidationError)(validation_exception_handler)
 app.exception_handler(AppException)(app_exception_handler)
+
+# 10MB payload limit middleware (QUAL-02)
+MAX_CONTENT_SIZE = 10 * 1024 * 1024  # 10MB
+
+
+@app.middleware("http")
+async def limit_request_size(request: Request, call_next):
+    """Reject requests with Content-Length exceeding 10MB (QUAL-02)."""
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > MAX_CONTENT_SIZE:
+        return JSONResponse(
+            status_code=413,
+            content={
+                "detail": "Request body too large. Maximum size is 10MB.",
+                "error_code": "PAYLOAD_TOO_LARGE",
+            },
+        )
+    return await call_next(request)
+
 
 # Add CorrelationIdMiddleware BEFORE CORSMiddleware
 # Middleware executes in reverse registration order, so CorrelationIdMiddleware
