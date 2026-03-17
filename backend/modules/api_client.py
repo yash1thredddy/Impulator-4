@@ -15,11 +15,13 @@ from requests.adapters import HTTPAdapter
 from urllib.parse import quote as _url_quote
 from urllib3.util.retry import Retry
 
+from backend.core.metrics import metrics
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
 # Configuration constants
-CACHE_SIZE = 2000
+CACHE_SIZE = 500  # Bounded: 500 x ~10KB = 5MB ceiling (STAB-04)
 MAX_BATCH_SIZE = 50
 MAX_IDS_PER_REQUEST = 50  # Max ChEMBL IDs per REST API request (prevents URL length violations)
 MAX_RETRIES = 3
@@ -114,6 +116,7 @@ def cache_non_none(maxsize: int = CACHE_SIZE, ttl_seconds: int = 3600):
                     # Check if entry is still valid (not expired)
                     if current_time - timestamp < ttl_seconds:
                         cache_hits[0] += 1
+                        metrics.increment('cache_hits')
                         return value
                     else:
                         # Entry expired, remove it
@@ -121,6 +124,7 @@ def cache_non_none(maxsize: int = CACHE_SIZE, ttl_seconds: int = 3600):
 
             with cache_lock:
                 cache_misses[0] += 1
+                metrics.increment('cache_misses')
 
             # Call function outside lock to avoid holding lock during I/O
             result = func(*args, **kwargs)
@@ -349,10 +353,15 @@ def _rest_api_get(endpoint: str, params: Dict[str, Any], timeout: int = API_TIME
     url = f"{CHEMBL_REST_API_BASE}/{endpoint}.json"
     try:
         _chembl_rate_limiter.wait()
+        _start = time.time()
         response = _get_thread_session().get(url, params=params, timeout=timeout)
         response.raise_for_status()
+        metrics.increment('api_calls_total')
+        metrics.record_latency('chembl', (time.time() - _start) * 1000)
         return response.json()
     except requests.exceptions.RequestException as e:
+        metrics.increment('api_calls_total')
+        metrics.increment('api_calls_failed')
         logger.warning(f"REST API request failed for {endpoint}: {e}")
         return None
 
@@ -984,11 +993,16 @@ def get_classification(inchikey: str) -> Optional[Dict]:
     try:
         _classyfire_rate_limiter.wait()  # Apply rate limiting
         url = f'http://classyfire.wishartlab.com/entities/{inchikey}.json'
+        _start = time.time()
         response = _get_thread_session().get(url, timeout=API_TIMEOUT)
+        metrics.increment('api_calls_total')
+        metrics.record_latency('classyfire', (time.time() - _start) * 1000)
         if response.status_code == 200:
             return response.json()
         return None
     except Exception as e:
+        metrics.increment('api_calls_total')
+        metrics.increment('api_calls_failed')
         logger.error(f"Error getting classification for {inchikey}: {str(e)}")
         return None
 
@@ -1949,18 +1963,19 @@ def get_cache_info() -> Dict[str, Any]:
 
 
 def shutdown_api_client():
-    """
-    Shutdown the API client and cleanup resources.
+    """Shutdown the timeout executor and reset thread-local sessions.
 
-    Call this during application shutdown to properly cleanup
-    the timeout executor thread pool.
+    Called during application lifespan teardown (STAB-14, STAB-16).
     """
-    global _timeout_executor
+    global _timeout_executor, _thread_local
     try:
         _timeout_executor.shutdown(wait=False, cancel_futures=True)
-        logger.info("API client timeout executor shutdown complete")
+        logger.info("ChEMBL timeout executor shut down")
     except Exception as e:
         logger.warning(f"Error during API client shutdown: {e}")
+    # Reset thread-local sessions
+    _thread_local = threading.local()
+    logger.info("ChEMBL thread-local sessions reset")
 
 
 # Register shutdown handler

@@ -38,6 +38,8 @@ try:
 except ImportError:
     DataQuery = None  # rcsb-api library not available/broken
 
+from backend.core.metrics import metrics
+
 logger = logging.getLogger(__name__)
 
 
@@ -79,6 +81,7 @@ API_TIMEOUT = 30  # seconds (for REST API calls)
 SIMILARITY_QUERY_TIMEOUT = 45  # seconds (for chemical similarity searches, can be slower)
 CACHE_SIZE = 500
 BATCH_SIZE = 50  # Number of PDB IDs to query in one batch for optimal performance
+MAX_PDB_WORKERS = 3  # Capped per job (STAB-20): 3 x 2 concurrent jobs = 6 PDB threads max
 
 
 def get_session():
@@ -128,6 +131,7 @@ def search_similar_ligands(
     """
     try:
         logger.info(f"Searching PDB for ligands similar to SMILES: {smiles[:50]}...")
+        _search_start = time.time()
 
         # Construct RCSB PDB Search API v2 Query
         # Reference: https://search.rcsb.org/index.html#chemical-search
@@ -179,11 +183,15 @@ def search_similar_ligands(
                     # Limit to top 100 results
                     pdb_ids = pdb_ids[:100]
 
+                    metrics.increment('api_calls_total')
+                    metrics.record_latency('pdb', (time.time() - _search_start) * 1000)
                     logger.info(f"Found {len(pdb_ids)} PDB entries with similar ligands")
                     return pdb_ids
 
                 elif response.status_code == 204:
                     # No content - no results found
+                    metrics.increment('api_calls_total')
+                    metrics.record_latency('pdb', (time.time() - _search_start) * 1000)
                     logger.info("No PDB entries found with similar ligands")
                     return []
 
@@ -195,10 +203,14 @@ def search_similar_ligands(
                         continue
                     else:
                         logger.error("PDB server returned 500 error after all retry attempts")
+                        metrics.increment('api_calls_total')
+                        metrics.increment('api_calls_failed')
                         return []
 
                 else:
                     logger.error(f"PDB query failed with status {response.status_code}: {response.text}")
+                    metrics.increment('api_calls_total')
+                    metrics.increment('api_calls_failed')
                     return []
 
             except requests.exceptions.Timeout:
@@ -207,6 +219,8 @@ def search_similar_ligands(
                     time.sleep(retry_delay)
                 else:
                     logger.error(f"PDB query timed out after {max_retries + 1} attempts")
+                    metrics.increment('api_calls_total')
+                    metrics.increment('api_calls_failed')
                     return []
 
             except requests.exceptions.RequestException as req_error:
@@ -215,10 +229,14 @@ def search_similar_ligands(
                     time.sleep(retry_delay)
                 else:
                     logger.error(f"PDB query failed after {max_retries + 1} attempts: {str(req_error)}")
+                    metrics.increment('api_calls_total')
+                    metrics.increment('api_calls_failed')
                     return []
 
             except json.JSONDecodeError as json_error:
                 logger.error(f"Invalid JSON response from PDB API: {str(json_error)}")
+                metrics.increment('api_calls_total')
+                metrics.increment('api_calls_failed')
                 return []
 
     except Exception as e:
@@ -226,6 +244,8 @@ def search_similar_ligands(
         logger.error(f"Error searching PDB for similar ligands: {error_msg}")
         logger.error(f"SMILES: {smiles}")
         logger.info("PDB evidence will not be available for this compound, but processing will continue.")
+        metrics.increment('api_calls_total')
+        metrics.increment('api_calls_failed')
         return []
 
 
@@ -344,6 +364,7 @@ def get_batch_structure_resolutions_graphql(pdb_ids: List[str]) -> Dict[str, Opt
     """
 
     try:
+        _gql_start = time.time()
         response = requests.post(
             "https://data.rcsb.org/graphql",
             json={"query": graphql_query, "variables": {"ids": pdb_ids_normalized}},
@@ -359,10 +380,14 @@ def get_batch_structure_resolutions_graphql(pdb_ids: List[str]) -> Dict[str, Opt
                 res_list = entry.get("rcsb_entry_info", {}).get("resolution_combined", [])
                 resolutions[pdb_id] = res_list[0] if res_list else None
 
+        metrics.increment('api_calls_total')
+        metrics.record_latency('pdb', (time.time() - _gql_start) * 1000)
         logger.info(f"GraphQL fetched {len(resolutions)}/{len(pdb_ids)} resolutions")
         return resolutions
 
     except Exception as e:
+        metrics.increment('api_calls_total')
+        metrics.increment('api_calls_failed')
         logger.error(f"GraphQL resolution fetch failed: {e}")
         # Return empty - caller can use REST as fallback
         return {}
@@ -373,7 +398,7 @@ def _fetch_resolutions_parallel_rest(pdb_ids: List[str]) -> Dict[str, Optional[f
     from concurrent.futures import as_completed
 
     results = {}
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=MAX_PDB_WORKERS) as executor:
         futures = {
             executor.submit(get_structure_resolution, pid): pid
             for pid in pdb_ids
@@ -754,6 +779,21 @@ def get_pdb_summary_for_compound(smiles: str) -> str:
             summary_parts.append(f"  {pdb_id}: Resolution N/A")
 
     return "\n".join(summary_parts)
+
+
+def shutdown_pdb_client():
+    """Close module-level session and reset thread-local sessions.
+
+    Called during application lifespan teardown (STAB-16).
+    """
+    global session, _thread_local
+    if session is not None:
+        try:
+            session.close()
+        except Exception:
+            pass
+    _thread_local = threading.local()
+    logger.info("PDB client sessions reset")
 
 
 # Example usage for testing

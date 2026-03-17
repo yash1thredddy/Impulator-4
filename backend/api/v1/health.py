@@ -57,17 +57,68 @@ async def health_check(db: Session = Depends(get_db)) -> HealthResponse:
 
 
 @router.get("/ready")
-async def readiness_check(db: Session = Depends(get_db)) -> dict:
+async def readiness_check(db: Session = Depends(get_db)):
+    """Readiness probe with real subsystem checks (STAB-08, STAB-12).
+
+    Returns 200 for healthy/degraded, 503 for unhealthy.
+    Unhealthy = database down OR scheduler dead with PENDING jobs.
     """
-    Kubernetes/container readiness probe.
-    Returns 200 if service is ready to accept traffic.
-    """
+    import shutil
+    from fastapi.responses import JSONResponse
+    from backend.core.scheduler import job_scheduler
+    from backend.models.database import Job, JobStatus
+
+    status = "healthy"
+    checks = {}
+
+    # Database check (critical -- 503 if down)
     try:
         db.execute(text("SELECT 1"))
-        return {"status": "ready"}
+        checks["database"] = "healthy"
     except Exception:
-        # Return non-200 so probes/load balancers correctly mark instance unready.
-        raise HTTPException(status_code=503, detail="Database connection failed")
+        checks["database"] = "unhealthy"
+        return JSONResponse(status_code=503, content={"status": "unhealthy", "checks": checks})
+
+    # Scheduler liveness (critical if PENDING jobs exist -- STAB-12)
+    pending_count = db.query(Job).filter(Job.status == JobStatus.PENDING).count()
+    scheduler_alive = job_scheduler.is_running()
+    if pending_count > 0 and not scheduler_alive:
+        checks["scheduler"] = "unhealthy"
+        return JSONResponse(status_code=503, content={
+            "status": "unhealthy",
+            "checks": checks,
+            "detail": f"Scheduler dead with {pending_count} PENDING jobs",
+        })
+    checks["scheduler"] = "healthy" if scheduler_alive or pending_count == 0 else "degraded"
+
+    # Azure connectivity (degraded, not unhealthy -- STAB-08)
+    if is_azure_configured():
+        try:
+            from backend.core.azure_sync import _get_blob_client
+            blob = _get_blob_client("impulator.db")
+            if blob is not None:
+                blob.exists()  # Actual network call
+                checks["azure"] = "healthy"
+            else:
+                checks["azure"] = "degraded"
+                status = "degraded"
+        except Exception:
+            checks["azure"] = "degraded"
+            status = "degraded"
+    else:
+        checks["azure"] = "not_configured"
+
+    # Disk space check
+    try:
+        usage = shutil.disk_usage("/")
+        free_gb = usage.free / (1024 ** 3)
+        checks["disk"] = {"status": "healthy" if free_gb > 1.0 else "degraded", "free_gb": round(free_gb, 2)}
+        if free_gb <= 1.0:
+            status = "degraded"
+    except Exception:
+        checks["disk"] = {"status": "unknown"}
+
+    return JSONResponse(status_code=200, content={"status": status, "checks": checks})
 
 
 @router.get("/live")
@@ -134,11 +185,32 @@ async def detailed_health_check(db: Session = Depends(get_db)) -> Dict[str, Any]
         "has_capacity": executor_stats.get("has_capacity", False),
     }
 
-    # Azure configuration
-    checks["azure"] = {
-        "status": "healthy" if is_azure_configured() else "not_configured",
-        "configured": is_azure_configured(),
+    # Scheduler status (STAB-12)
+    from backend.core.scheduler import job_scheduler
+    sched_stats = job_scheduler.stats()
+    checks["scheduler"] = {
+        "status": "healthy" if sched_stats["running"] else "idle",
+        "running": sched_stats["running"],
+        "last_activity": sched_stats["last_activity"],
+        "poll_interval": sched_stats["poll_interval"],
     }
+
+    # Azure connectivity (STAB-08)
+    if is_azure_configured():
+        try:
+            from backend.core.azure_sync import _get_blob_client
+            blob = _get_blob_client("impulator.db")
+            if blob is not None and blob.exists():
+                checks["azure"] = {"status": "healthy", "configured": True}
+            else:
+                checks["azure"] = {"status": "degraded", "configured": True}
+        except Exception as e:
+            checks["azure"] = {"status": "degraded", "configured": True, "error": str(e)}
+    else:
+        checks["azure"] = {"status": "not_configured", "configured": False}
+
+    # Add upload failure count from metrics
+    checks["azure"]["upload_failures"] = metrics.to_dict().get("azure_upload_failed_permanently", 0)
 
     # Rate limiter (import here to avoid circular imports)
     try:

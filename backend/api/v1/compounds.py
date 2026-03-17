@@ -17,6 +17,7 @@ from backend.core.auth import validate_session_id, truncate_session_id
 from backend.core.azure_sync import delete_result_from_azure_by_entry_id
 from backend.core.audit import log_job_deleted
 from backend.models.database import Compound, DeletedCompound
+from backend.services.job_service import _db_write_lock
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
@@ -284,20 +285,17 @@ async def delete_compound(
     Returns:
         Deletion confirmation with details
     """
-    # Find the compound
+    # Fast-fail: check compound exists before doing any I/O
     compound = db.query(Compound).filter(Compound.entry_id == entry_id).first()
-
     if not compound:
         raise HTTPException(status_code=404, detail="Compound not found")
 
-    compound_name = compound.compound_name
-
-    # Delete from Azure (UUID-based storage only)
+    # Delete from Azure FIRST (UUID-based storage only) -- outside lock
     azure_deleted = delete_result_from_azure_by_entry_id(entry_id)
     if azure_deleted:
         logger.info(f"Deleted result from Azure: {entry_id}")
 
-    # Delete local ZIP file (UUID-based path only)
+    # Delete local ZIP file -- outside lock
     local_deleted = []
     prefix = entry_id[:2].lower()
     local_zip = settings.RESULTS_DIR / prefix / f"{entry_id}.zip"
@@ -309,34 +307,43 @@ async def delete_compound(
         except Exception as e:
             logger.warning(f"Failed to delete local result {local_zip}: {e}")
 
-    # Promote children before deleting a main compound
-    _handle_children_before_delete(db, compound)
+    # DB mutations under write lock
+    with _db_write_lock:
+        # Re-query compound inside lock (it may have been deleted by another thread)
+        compound = db.query(Compound).filter(Compound.entry_id == entry_id).first()
+        if not compound:
+            raise HTTPException(status_code=404, detail="Compound not found")
 
-    # Archive to deleted_compounds table before deletion
-    deleted_record = DeletedCompound(
-        original_id=compound.id,
-        entry_id=compound.entry_id,
-        compound_name=compound.compound_name,
-        chembl_id=compound.chembl_id,
-        smiles=compound.smiles,
-        inchikey=compound.inchikey,
-        author_name=compound.author_name,
-        is_duplicate=compound.is_duplicate,
-        duplicate_of=compound.duplicate_of,
-        activity_types=compound.activity_types,
-        storage_path=compound.storage_path,
-        deleted_by_session=session_id,
-        deleted_by_job_id=None,  # Direct deletion, not via job
-        deletion_reason="user_request",
-        original_processed_at=compound.processed_at,
-    )
-    db.add(deleted_record)
+        compound_name = compound.compound_name
 
-    # Delete from compounds table
-    db.delete(compound)
-    db.commit()
+        # Promote children before deleting a main compound
+        _handle_children_before_delete(db, compound)
 
-    # Audit log
+        # Archive to deleted_compounds table before deletion
+        deleted_record = DeletedCompound(
+            original_id=compound.id,
+            entry_id=compound.entry_id,
+            compound_name=compound.compound_name,
+            chembl_id=compound.chembl_id,
+            smiles=compound.smiles,
+            inchikey=compound.inchikey,
+            author_name=compound.author_name,
+            is_duplicate=compound.is_duplicate,
+            duplicate_of=compound.duplicate_of,
+            activity_types=compound.activity_types,
+            storage_path=compound.storage_path,
+            deleted_by_session=session_id,
+            deleted_by_job_id=None,  # Direct deletion, not via job
+            deletion_reason="user_request",
+            original_processed_at=compound.processed_at,
+        )
+        db.add(deleted_record)
+
+        # Delete from compounds table
+        db.delete(compound)
+        db.commit()
+
+    # Audit log (outside lock -- no DB mutation)
     log_job_deleted(truncate_session_id(session_id), entry_id, compound_name)
 
     logger.info(f"Deleted compound: {compound_name} (entry_id={entry_id})")
@@ -389,47 +396,49 @@ async def batch_delete_compounds(
             seen.add(eid)
             unique_entry_ids.append(eid)
 
-    for eid in unique_entry_ids:
-        compound = db.query(Compound).filter(Compound.entry_id == eid).first()
+    # DB mutations under write lock
+    with _db_write_lock:
+        for eid in unique_entry_ids:
+            compound = db.query(Compound).filter(Compound.entry_id == eid).first()
 
-        if not compound:
-            not_found.append(eid)
-            continue
+            if not compound:
+                not_found.append(eid)
+                continue
 
-        compound_name = compound.compound_name
+            compound_name = compound.compound_name
 
-        # Promote children before deleting a main compound
-        _handle_children_before_delete(db, compound)
+            # Promote children before deleting a main compound
+            _handle_children_before_delete(db, compound)
 
-        # Archive to deleted_compounds
-        deleted_record = DeletedCompound(
-            original_id=compound.id,
-            entry_id=compound.entry_id,
-            compound_name=compound.compound_name,
-            chembl_id=compound.chembl_id,
-            smiles=compound.smiles,
-            inchikey=compound.inchikey,
-            author_name=compound.author_name,
-            is_duplicate=compound.is_duplicate,
-            duplicate_of=compound.duplicate_of,
-            activity_types=compound.activity_types,
-            storage_path=compound.storage_path,
-            deleted_by_session=session_id,
-            deleted_by_job_id=None,
-            deletion_reason="batch_delete",
-            original_processed_at=compound.processed_at,
-        )
-        db.add(deleted_record)
-        db.delete(compound)
+            # Archive to deleted_compounds
+            deleted_record = DeletedCompound(
+                original_id=compound.id,
+                entry_id=compound.entry_id,
+                compound_name=compound.compound_name,
+                chembl_id=compound.chembl_id,
+                smiles=compound.smiles,
+                inchikey=compound.inchikey,
+                author_name=compound.author_name,
+                is_duplicate=compound.is_duplicate,
+                duplicate_of=compound.duplicate_of,
+                activity_types=compound.activity_types,
+                storage_path=compound.storage_path,
+                deleted_by_session=session_id,
+                deleted_by_job_id=None,
+                deletion_reason="batch_delete",
+                original_processed_at=compound.processed_at,
+            )
+            db.add(deleted_record)
+            db.delete(compound)
 
-        # Audit log
-        log_job_deleted(truncate_session_id(session_id), eid, compound_name)
-        deleted.append({"entry_id": eid, "compound_name": compound_name})
+            # Audit log
+            log_job_deleted(truncate_session_id(session_id), eid, compound_name)
+            deleted.append({"entry_id": eid, "compound_name": compound_name})
 
-        logger.info(f"Batch delete - archived: {compound_name} ({eid})")
+            logger.info(f"Batch delete - archived: {compound_name} ({eid})")
 
-    # Commit DB first — only delete storage after successful commit
-    db.commit()
+        # Commit DB first — only delete storage after successful commit
+        db.commit()
 
     # Now safe to delete storage (DB is committed, no data loss risk)
     for item in deleted:

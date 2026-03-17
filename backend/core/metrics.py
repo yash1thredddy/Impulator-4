@@ -43,6 +43,10 @@ class Metrics:
     cache_misses: int = 0
     rate_limit_exceeded: int = 0
 
+    # Azure sync counters
+    azure_upload_failed_permanently: int = 0
+    azure_upload_retried: int = 0
+
     # Gauges (current values)
     active_jobs: int = 0
     pending_jobs: int = 0
@@ -61,6 +65,7 @@ class Metrics:
             'cache_hits', 'cache_misses',
             'rate_limit_exceeded',
             'active_jobs', 'pending_jobs',
+            'azure_upload_failed_permanently', 'azure_upload_retried',
         }),
         repr=False,
     )
@@ -193,6 +198,8 @@ class Metrics:
                 'cache_hits': self.cache_hits,
                 'cache_misses': self.cache_misses,
                 'rate_limit_exceeded': self.rate_limit_exceeded,
+                'azure_upload_failed_permanently': self.azure_upload_failed_permanently,
+                'azure_upload_retried': self.azure_upload_retried,
 
                 # Gauges
                 'active_jobs': self.active_jobs,
@@ -222,6 +229,8 @@ class Metrics:
             self.cache_hits = 0
             self.cache_misses = 0
             self.rate_limit_exceeded = 0
+            self.azure_upload_failed_permanently = 0
+            self.azure_upload_retried = 0
             self.active_jobs = 0
             self.pending_jobs = 0
             self.api_latencies.clear()

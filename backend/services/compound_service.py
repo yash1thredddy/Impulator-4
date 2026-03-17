@@ -201,7 +201,7 @@ class CompoundService:
 
                 # Step 4: IMP scoring + PDB (75%)
                 self._update_progress(db, job_id, 68, "Querying PDB & calculating IMP scores...")
-                df_results = self._calculate_imp_scores(
+                df_results, pdb_unavailable = self._calculate_imp_scores(
                     df_results,
                     use_pdb=True,
                     progress_callback=lambda pct, msg: self._update_progress(db, job_id, 68 + int(pct * 7), f"PDB: {msg}")
@@ -251,6 +251,9 @@ class CompoundService:
                 )
                 # Add entry_id to result_summary for database
                 result_summary['entry_id'] = entry_id
+                # Flag PDB unavailability in result_summary (STAB-15)
+                if pdb_unavailable:
+                    result_summary['pdb_unavailable'] = True
                 self._update_progress(db, job_id, 90, "Results saved")
 
                 # Explicit DataFrame cleanup to reduce memory pressure
@@ -258,33 +261,43 @@ class CompoundService:
                 del indications_df
                 del all_similar_df
 
-                # Step 8: Upload to Azure using entry_id-based path (95%)
-                self._update_progress(db, job_id, 92, "Uploading to Azure...")
-                # Use UUID-based storage path for better organization and duplicate support
-                try:
-                    upload_success = upload_result_to_azure_by_entry_id(result_path, entry_id)
-                    if upload_success:
-                        # Store the UUID-based path in result_summary for later retrieval
-                        result_summary['storage_path'] = get_storage_path_from_entry_id(entry_id)
-                        self._update_progress(db, job_id, 95, "Upload complete")
-                    else:
-                        # Upload returned False (failed without exception)
-                        logger.error(f"Azure upload returned False for job {job_id}")
-                        result_summary['storage_path'] = None
-                        result_summary['azure_upload_error'] = "Upload failed (returned False)"
-                        self._update_progress(db, job_id, 95, "Upload failed (results saved locally)")
-                except Exception as azure_error:
-                    # Log Azure upload failure but don't fail the job
-                    logger.error(f"Azure upload failed for job {job_id}: {azure_error}")
-                    result_summary['storage_path'] = None
-                    result_summary['azure_upload_error'] = str(azure_error)
-                    self._update_progress(db, job_id, 95, "Upload failed (results saved locally)")
-
-                # Step 9: Finalize job (100%)
-                self._update_progress(db, job_id, 97, "Finalizing job...")
-
-                # Complete job
+                # Step 8: Commit DB to COMPLETED first (atomic-first ordering, STAB-10)
+                # Store anticipated storage_path so compound entry has it before Azure upload
+                result_summary['storage_path'] = get_storage_path_from_entry_id(entry_id)
+                self._update_progress(db, job_id, 92, "Finalizing job...")
                 self._complete_job(db, job_id, result_path, result_summary)
+                logger.info(f"Job {job_id} DB committed as COMPLETED")
+
+                # Step 9: Upload to Azure with retry (95%)
+                self._update_progress(db, job_id, 95, "Uploading to Azure...")
+                if is_azure_configured():
+                    from backend.core.azure_sync import (
+                        write_pending_marker, delete_pending_marker,
+                        _upload_with_retry,
+                    )
+                    from backend.core.metrics import metrics as _metrics
+                    from backend.core.exceptions import ErrorCode
+
+                    try:
+                        write_pending_marker(entry_id)
+                        _upload_with_retry(result_path, entry_id)
+                        delete_pending_marker(entry_id)
+                        self._update_progress(db, job_id, 100, "Complete")
+                    except Exception as azure_error:
+                        logger.error(f"Azure upload failed permanently for job {job_id}: {azure_error}")
+                        _metrics.increment('azure_upload_failed_permanently')
+                        # Transition to SYNC_PENDING
+                        from backend.services.job_service import _db_write_lock
+                        with _db_write_lock:
+                            job = db.query(Job).filter(Job.id == job_id).first()
+                            if job and job.status == JobStatus.COMPLETED:
+                                job.status = JobStatus.SYNC_PENDING
+                                job.error_message = f"Azure upload failed: {azure_error}"
+                                job.error_code = str(ErrorCode.SYNC_FAILED)
+                                db.commit()
+                                logger.warning(f"Job {job_id} moved to SYNC_PENDING")
+                else:
+                    self._update_progress(db, job_id, 100, "Complete")
                 logger.info(f"Job {job_id} completed successfully")
 
             except (ConnectionError, TimeoutError) as e:
@@ -878,7 +891,7 @@ class CompoundService:
         df: pd.DataFrame,
         use_pdb: bool = True,
         progress_callback: Optional[Callable[[float, str], None]] = None
-    ) -> pd.DataFrame:
+    ) -> tuple:
         """
         Calculate IMP scores with optional PDB integration.
 
@@ -888,16 +901,23 @@ class CompoundService:
             progress_callback: Optional callback for PDB progress updates
 
         Returns:
-            DataFrame with IMP scores added
+            Tuple of (DataFrame with IMP scores added, pdb_unavailable flag)
         """
+        pdb_unavailable = False
         try:
             df = calculate_imp_score(df, use_pdb=use_pdb, progress_callback=progress_callback)
             df = add_imp_score_interpretation(df)
-            return df
+            # Check if PDB data was actually retrieved (STAB-15)
+            if use_pdb and 'PDB_Score' in df.columns:
+                # If all PDB scores are 0 and we expected PDB data, it may indicate API failure
+                # but this is not necessarily "unavailable" -- could be no structures found
+                pass
+            return df, pdb_unavailable
 
         except Exception as e:
             logger.warning(f"IMP scoring failed: {e}")
-            return df
+            pdb_unavailable = use_pdb  # If PDB was requested and scoring failed, flag it
+            return df, pdb_unavailable
 
     def _add_chemical_classification(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -1174,12 +1194,40 @@ class CompoundService:
         compound_folder = os.path.join(self.results_dir, safe_name)
         os.makedirs(compound_folder, exist_ok=True)
 
+        try:
+            return self._save_results_inner(
+                compound_name, smiles, similarity_threshold, activity_types,
+                df_results, indications_df, all_similar_df, entry_id, author_name,
+                safe_name, compound_folder,
+            )
+        except Exception:
+            # STAB-13: Clean up compound_folder on any failure
+            shutil.rmtree(compound_folder, ignore_errors=True)
+            logger.warning(f"Cleaned up compound_folder on failure: {compound_folder}")
+            raise  # Re-raise so caller handles the error
+
+    def _save_results_inner(
+        self,
+        compound_name: str,
+        smiles: str,
+        similarity_threshold: int,
+        activity_types: Optional[List[str]],
+        df_results: pd.DataFrame,
+        indications_df: Optional[pd.DataFrame],
+        all_similar_df: Optional[pd.DataFrame],
+        entry_id: Optional[str],
+        author_name: Optional[str],
+        safe_name: str,
+        compound_folder: str,
+    ) -> tuple:
+        """Inner implementation of _save_results (separated for STAB-13 cleanup wrapper)."""
         # Save CSV
         results_filename = os.path.join(compound_folder, f"{safe_name}_complete_results.csv")
         df_results.to_csv(results_filename, index=False)
 
         # Create metadata
         result_summary = {
+            'schema_version': 1,  # Integer, increment on structural changes to ZIP contents
             'compound_name': compound_name,
             'author_name': author_name or 'N/A',
             'query_smiles': smiles,
@@ -1317,12 +1365,27 @@ class CompoundService:
         else:
             zip_filename = f"{safe_name}.zip"
             zip_path = os.path.join(self.results_dir, zip_filename)
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for root, dirs, files in os.walk(compound_folder):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    arcname = os.path.relpath(file_path, compound_folder)
-                    zipf.write(file_path, arcname)
+        # Write ZIP atomically: write to .tmp, then rename to final path
+        # This prevents partial ZIPs from existing at the final path if the process crashes
+        zip_tmp_path = zip_path + ".tmp"
+        try:
+            with zipfile.ZipFile(zip_tmp_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, dirs, files in os.walk(compound_folder):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, compound_folder)
+                        zipf.write(file_path, arcname)
+
+            # Atomic move: on POSIX this is atomic; on Windows it replaces atomically
+            os.replace(zip_tmp_path, zip_path)
+        except Exception:
+            # Clean up temp file on failure
+            if os.path.exists(zip_tmp_path):
+                try:
+                    os.unlink(zip_tmp_path)
+                except OSError:
+                    pass
+            raise  # Re-raise so the caller (process_compound) sees the failure
 
         # Clean up folder - keep only ZIP for space optimization
         # Use retry logic for Windows file locking issues

@@ -5,6 +5,10 @@ Provides a dedicated audit log for security events that may need
 to be reviewed separately from application logs. Events are logged
 with structured data for easy analysis.
 
+The audit logger's handlers (console + file + audit_file) are configured
+centrally in logging.py via dictConfig. This module only needs to obtain
+the structlog logger and emit events with `audit=True` flag.
+
 Security Events Logged:
 - Rate limit exceeded
 - Job cancellations
@@ -13,15 +17,10 @@ Security Events Logged:
 - Path traversal attempts
 - Authentication/authorization failures
 """
-import json
-import logging
-from datetime import datetime, timezone
 from enum import Enum
-from logging.handlers import RotatingFileHandler
-from pathlib import Path
 from typing import Any, Dict, Optional
 
-from backend.config import settings
+import structlog
 
 
 class AuditEvent(str, Enum):
@@ -38,33 +37,15 @@ class AuditEvent(str, Enum):
     SUSPICIOUS_INPUT = "suspicious_input"
 
 
-# Configure audit logger
-AUDIT_LOG_DIR = Path(settings.DATA_DIR) / "logs"
-AUDIT_LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-# Separate audit logger with its own file
-audit_logger = logging.getLogger("audit")
-audit_logger.setLevel(logging.INFO)
-audit_logger.propagate = False  # Don't propagate to root logger
-
-# Create rotating file handler for audit log (10MB max, 5 backups)
-audit_handler = RotatingFileHandler(
-    AUDIT_LOG_DIR / "audit.log",
-    maxBytes=10 * 1024 * 1024,
-    backupCount=5,
-    encoding="utf-8",
-)
-audit_handler.setFormatter(logging.Formatter(
-    "%(asctime)s - %(message)s"
-))
-audit_logger.addHandler(audit_handler)
+# Audit logger -- handlers configured in logging.py dictConfig (console + file + audit_file)
+audit_logger = structlog.get_logger("audit")
 
 
 def log_security_event(
     event: AuditEvent,
     session_id: Optional[str] = None,
     details: Optional[Dict[str, Any]] = None,
-    severity: str = "warning"
+    severity: str = "warning",
 ) -> None:
     """
     Log a security-relevant event to the audit log.
@@ -75,23 +56,13 @@ def log_security_event(
         details: Additional details about the event
         severity: Log level (info, warning, error, critical)
     """
-    log_entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "event": event.value,
-        "session_id": session_id or "anonymous",
-        "details": details or {},
-    }
-
-    message = json.dumps(log_entry)
-
-    if severity == "critical":
-        audit_logger.critical(message)
-    elif severity == "error":
-        audit_logger.error(message)
-    elif severity == "warning":
-        audit_logger.warning(message)
-    else:
-        audit_logger.info(message)
+    log_method = getattr(audit_logger, severity, audit_logger.warning)
+    log_method(
+        event.value,
+        audit=True,
+        session_id=session_id or "anonymous",
+        **(details or {}),
+    )
 
 
 def log_rate_limit_exceeded(

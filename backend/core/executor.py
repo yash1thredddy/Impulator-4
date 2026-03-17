@@ -1,7 +1,20 @@
 """
 ThreadPoolExecutor wrapper for background job execution.
 Manages concurrent job processing with configurable worker limit.
+
+Thread Budget (STAB-20):
+========================
+Job workers:      2  (settings.MAX_WORKERS -- compound processing)
+ChEMBL timeout:   6  (_timeout_executor in api_client.py)
+PDB parallel:     6  (MAX_PDB_WORKERS=3 per job x 2 concurrent jobs)
+Scheduler:        1  (daemon thread in scheduler.py)
+-----------------------------------------------
+Total max:       15  threads (14 worker + 1 scheduler)
+
+Bound by: MAX_WORKERS (job), api_client._timeout_executor (ChEMBL),
+          pdb_client.MAX_PDB_WORKERS (PDB), scheduler daemon thread.
 """
+import contextvars
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, Future
@@ -67,7 +80,10 @@ class JobExecutor:
                 logger.warning(f"Job {job_id} already exists, skipping")
                 return job_id
 
-            future = self._executor.submit(func, job_id, *args, **kwargs)
+            # Capture current context (includes request_id, session_id from middleware)
+            ctx = contextvars.copy_context()
+            # Submit with context propagation -- worker thread inherits caller's contextvars
+            future = self._executor.submit(ctx.run, func, job_id, *args, **kwargs)
             self._futures[job_id] = future
 
         # Auto-cleanup on completion (callback runs in worker thread)

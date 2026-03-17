@@ -14,6 +14,7 @@ class JobStatus(str, enum.Enum):
 
     PENDING = "pending"
     PROCESSING = "processing"
+    SYNC_PENDING = "sync_pending"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -60,6 +61,10 @@ class Job(Base):
 
     # Error handling
     error_message = Column(Text, nullable=True)
+
+    # Correlation and error tracking (Phase 1: Foundation)
+    request_id = Column(String(36), nullable=True)   # Correlation ID from originating HTTP request
+    error_code = Column(String(50), nullable=True)    # Machine-readable failure classification (ErrorCode enum value)
 
     # Timestamps
     created_at = Column(DateTime, default=func.now())

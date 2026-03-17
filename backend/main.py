@@ -2,7 +2,6 @@
 FastAPI application entry point.
 Single-container deployment optimized for local, HF Spaces, Streamlit Cloud.
 """
-import sys
 import logging
 import threading
 from contextlib import asynccontextmanager
@@ -11,44 +10,39 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from fastapi.exceptions import RequestValidationError
 
 from backend.config import settings
+
+# Ensure logs directory exists BEFORE configure_logging (file handlers need it)
+LOG_DIR = Path("./data/logs")
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+# Configure structured logging BEFORE any other imports that trigger logging
+# This must be the FIRST thing after basic imports
+from backend.core.logging import configure_logging, CorrelationIdMiddleware
+configure_logging()
+
 from backend.core.database import init_db, get_db_session
 from backend.core.executor import job_executor
 from backend.core.scheduler import job_scheduler
 from backend.core.azure_sync import (
-    AzureSyncRotatingFileHandler,
     download_db_from_azure,
     sync_db_to_azure,
     sync_logs_to_azure,
     is_azure_configured,
 )
+from backend.core.exceptions import (
+    AppException,
+    ErrorCode,
+    http_exception_handler,
+    validation_exception_handler,
+    app_exception_handler,
+)
 from backend.api.v1.router import api_router
 from backend.models.database import Job, JobStatus
 
-# Ensure logs directory exists
-LOG_DIR = Path("./data/logs")
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-# Configure logging with both console and file handlers
-log_level = logging.DEBUG if settings.DEBUG else logging.INFO
-log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-
-# Root logger configuration with console + Azure-syncing file handler
-# When log file is full, it's automatically compressed and uploaded to Azure
-logging.basicConfig(
-    level=log_level,
-    format=log_format,
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        AzureSyncRotatingFileHandler(
-            LOG_DIR / "backend.log",
-            maxBytes=10_000_000,  # 10MB - uploads to Azure when full
-            backupCount=2,  # Keep fewer local backups since they're in Azure
-            encoding="utf-8"
-        )
-    ]
-)
 logger = logging.getLogger(__name__)
 
 
@@ -82,10 +76,51 @@ def _recover_stalled_jobs():
             db.commit()
             logger.info(f"Recovered {len(stalled)} stalled jobs")
 
-        # Trigger scheduler if there are pending jobs
-        if stalled or pending_count > 0:
+        # Handle SYNC_PENDING jobs: retry Azure upload on startup
+        sync_pending = db.query(Job).filter(Job.status == JobStatus.SYNC_PENDING).all()
+        if sync_pending:
+            logger.info(f"Found {len(sync_pending)} SYNC_PENDING jobs for Azure retry")
+
+        # Trigger scheduler if there are pending jobs or SYNC_PENDING jobs
+        if stalled or pending_count > 0 or sync_pending:
             job_scheduler.trigger()
-            logger.info(f"Scheduler triggered ({len(stalled)} recovered + {pending_count} pending)")
+            logger.info(f"Scheduler triggered ({len(stalled)} recovered + {pending_count} pending + {len(sync_pending)} sync_pending)")
+
+
+def _cleanup_stale_folders():
+    """Remove stale compound processing folders from data/results/.
+
+    During processing, compound_service creates folders like data/results/Aspirin/
+    which are converted to ZIPs and deleted. If the process crashes mid-processing,
+    these folders remain as orphans. Since _recover_stalled_jobs() has already reset
+    PROCESSING jobs to PENDING, any remaining folders are stale.
+
+    Only removes directories (not ZIP files or UUID-prefix subdirs).
+    """
+    import shutil
+
+    results_dir = settings.RESULTS_DIR
+    if not results_dir.exists():
+        return
+
+    cleaned = 0
+    for item in results_dir.iterdir():
+        if not item.is_dir():
+            continue
+        # Skip UUID-prefix subdirs (2-char hex: "3a", "7f", etc.) -- these contain ZIPs
+        if len(item.name) == 2 and all(c in '0123456789abcdef' for c in item.name.lower()):
+            continue
+        # This is a compound processing folder (e.g., "Aspirin", "Caffeine")
+        # It's stale because _recover_stalled_jobs already reset all PROCESSING -> PENDING
+        try:
+            shutil.rmtree(item)
+            cleaned += 1
+            logger.info(f"Cleaned up stale compound folder: {item.name}")
+        except Exception as e:
+            logger.warning(f"Failed to clean up stale folder {item.name}: {e}")
+
+    if cleaned:
+        logger.info(f"Cleaned up {cleaned} stale compound folder(s)")
 
 
 @asynccontextmanager
@@ -119,6 +154,22 @@ async def lifespan(app: FastAPI):
     # Recover stalled jobs and start scheduler if needed
     _recover_stalled_jobs()
 
+    # Remove orphaned processing folders from crashed runs
+    _cleanup_stale_folders()
+
+    # Reconcile orphaned Azure uploads (STAB-18)
+    if is_azure_configured():
+        try:
+            from backend.core.azure_sync import reconcile_orphaned_uploads
+            with get_db_session() as db:
+                from backend.models.database import Compound
+                db_entry_ids = {row[0] for row in db.query(Compound.entry_id).all() if row[0]}
+                cleaned = reconcile_orphaned_uploads(db_entry_ids)
+                if cleaned:
+                    logger.info(f"Reconciled {cleaned} orphaned Azure uploads")
+        except Exception as e:
+            logger.warning(f"Orphan reconciliation failed (non-fatal): {e}")
+
     logger.info(f"Job executor ready (max_workers={settings.MAX_WORKERS})")
 
     yield
@@ -126,19 +177,56 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down...")
 
-    # Shutdown executor gracefully (wait for running jobs)
+    # Step 1: Requeue PROCESSING jobs to PENDING (STAB-03)
+    # Do this BEFORE shutting down executor so scheduler doesn't claim them again
+    try:
+        from backend.services.job_service import _db_write_lock
+        with get_db_session() as db:
+            processing_jobs = db.query(Job).filter(Job.status == JobStatus.PROCESSING).all()
+            if processing_jobs:
+                with _db_write_lock:
+                    for job in processing_jobs:
+                        db.refresh(job)
+                        if job.status == JobStatus.PROCESSING:
+                            job.status = JobStatus.PENDING
+                            job.started_at = None
+                            job.current_step = "Queued (requeued on shutdown)"
+                    db.commit()
+                logger.info(f"Requeued {len(processing_jobs)} PROCESSING jobs to PENDING on shutdown")
+    except Exception as e:
+        logger.error(f"Failed to requeue jobs on shutdown: {e}")
+
+    # Step 2: Shutdown API client timeout executor (STAB-14)
+    try:
+        from backend.modules.api_client import shutdown_api_client
+        shutdown_api_client()
+    except Exception as e:
+        logger.warning(f"Error shutting down API client: {e}")
+
+    # Step 3: Shutdown job executor (wait for threads to finish)
     logger.info("Waiting for running jobs to complete...")
     job_executor.shutdown(wait=True, cancel_futures=False)
 
-    # Final sync to Azure
+    # Step 4: Reset module-level sessions (STAB-16)
+    try:
+        from backend.modules.pdb_client import shutdown_pdb_client
+        shutdown_pdb_client()
+    except Exception as e:
+        logger.warning(f"Error shutting down PDB client: {e}")
+    try:
+        from backend.modules.chemical_classifier import shutdown_classifier
+        shutdown_classifier()
+    except Exception as e:
+        logger.warning(f"Error shutting down classifier: {e}")
+
+    # Step 5: Final sync to Azure
     if is_azure_configured():
         logger.info("Final sync to Azure...")
         sync_db_to_azure()
-        # Upload current log file (the one that hasn't rotated yet)
         logger.info("Uploading current logs to Azure...")
         sync_logs_to_azure()
 
-    # Close Azure Blob client to release network connections
+    # Step 6: Close Azure Blob client
     from backend.core.azure_sync import close_azure_client
     close_azure_client()
 
@@ -155,6 +243,16 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+# Register standard error response handlers
+app.exception_handler(StarletteHTTPException)(http_exception_handler)
+app.exception_handler(RequestValidationError)(validation_exception_handler)
+app.exception_handler(AppException)(app_exception_handler)
+
+# Add CorrelationIdMiddleware BEFORE CORSMiddleware
+# Middleware executes in reverse registration order, so CorrelationIdMiddleware
+# runs first (registered before CORS) ensuring request_id is available during processing
+app.add_middleware(CorrelationIdMiddleware)
+
 # Add CORS middleware with explicit allowed methods and headers
 # Note: For HF Spaces, we use allow_origin_regex to support *.hf.space pattern
 app.add_middleware(
@@ -164,6 +262,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],  # Only needed methods
     allow_headers=["Content-Type", "X-Session-ID", "Accept"],  # Explicit headers
+    expose_headers=["X-Request-ID"],
 )
 
 
@@ -176,11 +275,17 @@ async def global_exception_handler(request: Request, exc: Exception):
     Prevents internal server paths and sensitive information from being
     exposed in API responses. The full error is still logged for debugging.
     """
-    # Log the full error for debugging
-    logger.error(
-        f"Unhandled exception on {request.method} {request.url.path}: "
-        f"{type(exc).__name__}: {str(exc)}",
-        exc_info=True
+    import structlog
+    from backend.core.logging import request_id_var
+
+    log = structlog.get_logger(__name__)
+    log.error(
+        "unhandled_exception",
+        method=request.method,
+        path=request.url.path,
+        exc_type=type(exc).__name__,
+        exc_msg=str(exc),
+        exc_info=True,
     )
 
     # Return sanitized error message
@@ -199,7 +304,11 @@ async def global_exception_handler(request: Request, exc: Exception):
 
     return JSONResponse(
         status_code=500,
-        content={"detail": error_message, "error_code": "INTERNAL_ERROR"}
+        content={
+            "detail": error_message,
+            "error_code": str(ErrorCode.INTERNAL_ERROR),
+            "request_id": request_id_var.get(""),
+        },
     )
 
 
