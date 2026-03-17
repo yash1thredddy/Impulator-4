@@ -109,6 +109,22 @@ async def lifespan(app: FastAPI):  # pragma: no cover -- startup/shutdown lifecy
         except Exception as e:
             logger.warning(f"Orphan reconciliation failed (non-fatal): {e}")
 
+    # Remove orphaned processing folders from crashed runs
+    _cleanup_stale_folders()
+
+    # Reconcile orphaned Azure uploads (STAB-18)
+    if is_azure_configured():
+        try:
+            from backend.core.azure_sync import reconcile_orphaned_uploads
+            with get_db_session() as db:
+                from backend.models.database import Compound
+                db_entry_ids = {row[0] for row in db.query(Compound.entry_id).all() if row[0]}
+                cleaned = reconcile_orphaned_uploads(db_entry_ids)
+                if cleaned:
+                    logger.info(f"Reconciled {cleaned} orphaned Azure uploads")
+        except Exception as e:
+            logger.warning(f"Orphan reconciliation failed (non-fatal): {e}")
+
     logger.info(f"Job executor ready (max_workers={settings.MAX_WORKERS})")
 
     yield
