@@ -5,69 +5,22 @@ Provides access to processed compound data from the database.
 Includes CRUD operations for compound management.
 """
 import logging
-from datetime import datetime
 from typing import Optional, List
 
 from fastapi import APIRouter, Body, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
 
 from backend.core.database import get_db
 from backend.core.auth import validate_session_id, truncate_session_id
 from backend.core.azure_sync import delete_result_from_azure_by_entry_id
 from backend.core.audit import log_job_deleted
-from backend.models.database import Compound, DeletedCompound
-from backend.services.job_service import _db_write_lock
+from backend.models.database import Compound
+from backend.repositories import compound_repo, _db_write_lock
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/compounds", tags=["Compounds"])
-
-
-def _handle_children_before_delete(db: Session, compound: Compound) -> None:
-    """Handle child compounds before deleting a main compound.
-
-    If the compound being deleted is a main compound (not a duplicate),
-    promotes the oldest child to main and re-points remaining children.
-    This prevents orphaned duplicate_of references.
-
-    Args:
-        db: Database session (caller must commit)
-        compound: The compound about to be deleted
-    """
-    if compound.is_duplicate:
-        return  # Duplicates don't have children
-
-    children = db.query(Compound).filter(
-        Compound.duplicate_of == compound.entry_id
-    ).all()
-
-    if not children:
-        return
-
-    # Sort by processed_at ascending (oldest first)
-    children_sorted = sorted(
-        children,
-        key=lambda c: c.processed_at or datetime.min,
-    )
-
-    # Promote oldest child to main
-    promoted = children_sorted[0]
-    promoted.is_duplicate = False
-    promoted.duplicate_of = None
-    logger.info(
-        f"Promoted '{promoted.compound_name}' ({promoted.entry_id}) to main "
-        f"(was duplicate of '{compound.compound_name}')"
-    )
-
-    # Re-point remaining children to the promoted compound
-    for child in children_sorted[1:]:
-        child.duplicate_of = promoted.entry_id
-        logger.info(
-            f"Re-pointed '{child.compound_name}' ({child.entry_id}) "
-            f"duplicate_of -> {promoted.entry_id}"
-        )
 
 
 @router.get("")
@@ -93,36 +46,13 @@ async def list_compounds(
     Returns:
         Paginated list of compounds with metadata
     """
-    query = db.query(Compound)
-
-    # Filter out duplicates unless requested
-    if not include_duplicates:
-        query = query.filter(Compound.is_duplicate == False)  # noqa: E712
-
-    # Apply search filter with escaped wildcards to prevent SQL injection
-    if search:
-        # Escape SQL ILIKE special characters to prevent pattern injection attacks
-        # IMPORTANT: Escape backslash FIRST, then wildcards (order matters!)
-        # Without this, input like '\' would escape the trailing '%' wildcard
-        search_escaped = (
-            search
-            .replace('\\', '\\\\')  # Escape backslash first (escape char itself)
-            .replace('%', '\\%')    # Then escape % wildcard
-            .replace('_', '\\_')    # Then escape _ wildcard
-        )
-        query = query.filter(Compound.compound_name.ilike(f"%{search_escaped}%", escape='\\'))
-
-    # Get total count
-    total = query.count()
-
-    # Apply pagination and ordering
     offset = (page - 1) * per_page
-    compounds = (
-        query
-        .order_by(desc(Compound.processed_at))
-        .offset(offset)
-        .limit(per_page)
-        .all()
+    compounds, total = compound_repo.get_compounds_paginated(
+        db,
+        search=search,
+        is_duplicate_filter=True if include_duplicates else False,
+        offset=offset,
+        limit=per_page,
     )
 
     # Convert to response format
@@ -172,29 +102,15 @@ async def get_compound_versions(
     Returns:
         List of version items with is_original and is_current flags
     """
-    compound = db.query(Compound).filter(Compound.entry_id == entry_id).first()
-    if not compound:
-        raise HTTPException(status_code=404, detail="Compound not found")
-
-    inchikey = compound.inchikey
-    if not inchikey or "-" not in inchikey:
-        return {"versions": [], "current_entry_id": entry_id}
-
-    # Extract protonation-insensitive structure key (AAAA-BBBB)
-    parts = inchikey.split("-")
-    if len(parts) < 2:
-        return {"versions": [], "current_entry_id": entry_id}
-    structure_key = f"{parts[0]}-{parts[1]}"
-
-    # Find all compounds with the same structure key
-    siblings = (
-        db.query(Compound)
-        .filter(Compound.inchikey.like(f"{structure_key}%"))
-        .order_by(Compound.processed_at.asc())
-        .all()
-    )
+    siblings = compound_repo.get_versions(db, entry_id)
 
     if len(siblings) <= 1:
+        # get_versions returns [] if compound not found or no siblings;
+        # check if compound exists for proper 404
+        if not siblings:
+            compound = compound_repo.get_by_entry_id(db, entry_id)
+            if not compound:
+                raise HTTPException(status_code=404, detail="Compound not found")
         return {"versions": [], "current_entry_id": entry_id}
 
     # Identify the original: oldest non-duplicate, fallback to oldest overall
@@ -210,12 +126,10 @@ async def get_compound_versions(
     parent_entry_ids = {s.duplicate_of for s in siblings if s.duplicate_of}
     parent_names = {}
     if parent_entry_ids:
-        parents = (
-            db.query(Compound.entry_id, Compound.compound_name)
-            .filter(Compound.entry_id.in_(parent_entry_ids))
-            .all()
-        )
-        parent_names = {p.entry_id: p.compound_name for p in parents}
+        for pid in parent_entry_ids:
+            parent = compound_repo.get_by_entry_id(db, pid)
+            if parent:
+                parent_names[pid] = parent.compound_name
 
     versions = []
     for s in siblings:
@@ -255,7 +169,7 @@ async def get_compound(
     Returns:
         Compound metadata
     """
-    compound = db.query(Compound).filter(Compound.entry_id == entry_id).first()
+    compound = compound_repo.get_by_entry_id(db, entry_id)
 
     if not compound:
         raise HTTPException(status_code=404, detail="Compound not found")
@@ -286,7 +200,7 @@ async def delete_compound(
         Deletion confirmation with details
     """
     # Fast-fail: check compound exists before doing any I/O
-    compound = db.query(Compound).filter(Compound.entry_id == entry_id).first()
+    compound = compound_repo.get_by_entry_id(db, entry_id)
     if not compound:
         raise HTTPException(status_code=404, detail="Compound not found")
 
@@ -310,34 +224,22 @@ async def delete_compound(
     # DB mutations under write lock
     with _db_write_lock:
         # Re-query compound inside lock (it may have been deleted by another thread)
-        compound = db.query(Compound).filter(Compound.entry_id == entry_id).first()
+        compound = compound_repo.get_by_entry_id(db, entry_id)
         if not compound:
             raise HTTPException(status_code=404, detail="Compound not found")
 
         compound_name = compound.compound_name
 
         # Promote children before deleting a main compound
-        _handle_children_before_delete(db, compound)
+        compound_repo.handle_children_before_delete(db, entry_id)
 
         # Archive to deleted_compounds table before deletion
-        deleted_record = DeletedCompound(
-            original_id=compound.id,
-            entry_id=compound.entry_id,
-            compound_name=compound.compound_name,
-            chembl_id=compound.chembl_id,
-            smiles=compound.smiles,
-            inchikey=compound.inchikey,
-            author_name=compound.author_name,
-            is_duplicate=compound.is_duplicate,
-            duplicate_of=compound.duplicate_of,
-            activity_types=compound.activity_types,
-            storage_path=compound.storage_path,
-            deleted_by_session=session_id,
-            deleted_by_job_id=None,  # Direct deletion, not via job
+        compound_repo.archive_compound(
+            db,
+            compound,
+            session_id=session_id,
             deletion_reason="user_request",
-            original_processed_at=compound.processed_at,
         )
-        db.add(deleted_record)
 
         # Delete from compounds table
         db.delete(compound)
@@ -399,7 +301,7 @@ async def batch_delete_compounds(
     # DB mutations under write lock
     with _db_write_lock:
         for eid in unique_entry_ids:
-            compound = db.query(Compound).filter(Compound.entry_id == eid).first()
+            compound = compound_repo.get_by_entry_id(db, eid)
 
             if not compound:
                 not_found.append(eid)
@@ -408,27 +310,15 @@ async def batch_delete_compounds(
             compound_name = compound.compound_name
 
             # Promote children before deleting a main compound
-            _handle_children_before_delete(db, compound)
+            compound_repo.handle_children_before_delete(db, eid)
 
             # Archive to deleted_compounds
-            deleted_record = DeletedCompound(
-                original_id=compound.id,
-                entry_id=compound.entry_id,
-                compound_name=compound.compound_name,
-                chembl_id=compound.chembl_id,
-                smiles=compound.smiles,
-                inchikey=compound.inchikey,
-                author_name=compound.author_name,
-                is_duplicate=compound.is_duplicate,
-                duplicate_of=compound.duplicate_of,
-                activity_types=compound.activity_types,
-                storage_path=compound.storage_path,
-                deleted_by_session=session_id,
-                deleted_by_job_id=None,
+            compound_repo.archive_compound(
+                db,
+                compound,
+                session_id=session_id,
                 deletion_reason="batch_delete",
-                original_processed_at=compound.processed_at,
             )
-            db.add(deleted_record)
             db.delete(compound)
 
             # Audit log
@@ -437,7 +327,7 @@ async def batch_delete_compounds(
 
             logger.info(f"Batch delete - archived: {compound_name} ({eid})")
 
-        # Commit DB first — only delete storage after successful commit
+        # Commit DB first -- only delete storage after successful commit
         db.commit()
 
     # Now safe to delete storage (DB is committed, no data loss risk)

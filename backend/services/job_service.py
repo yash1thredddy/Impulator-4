@@ -5,22 +5,20 @@ Handles job creation, progress updates, and completion tracking.
 import json
 import uuid
 import logging
-import threading
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any, Callable
 
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, func, case
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 
 from backend.models.database import Job, JobStatus, JobType
+from backend.models.schemas import InputParams, ResultSummary
 from backend.core.azure_sync import sync_db_to_azure
 from backend.core.metrics import metrics
+from backend.repositories import job_repo, compound_repo, _db_write_lock
 
 logger = logging.getLogger(__name__)
-
-# Module-level lock for SQLite write serialization
-# SQLite doesn't support SELECT ... FOR UPDATE, so we use application-level locking
-_db_write_lock = threading.Lock()
 
 # Valid status transitions for job state machine
 VALID_TRANSITIONS = {
@@ -161,7 +159,7 @@ class JobService:
 
     def get_job(self, db: Session, job_id: str) -> Optional[Job]:
         """Get a job by ID."""
-        return db.query(Job).filter(Job.id == job_id).first()
+        return job_repo.get_by_job_id(db, job_id)
 
     def _get_job_for_update(self, db: Session, job_id: str) -> Optional[Job]:
         """Get a job by ID with thread-safe locking.
@@ -170,7 +168,7 @@ class JobService:
         locking via _db_write_lock. All callers must acquire the lock before
         calling this method and hold it through commit.
         """
-        return db.query(Job).filter(Job.id == job_id).first()
+        return job_repo.get_by_job_id(db, job_id)
 
     def _execute_with_lock(self, db: Session, operation: Callable) -> Any:
         """Execute a database write operation with thread-safe locking.
@@ -197,9 +195,19 @@ class JobService:
 
         result = job.to_dict()
         if job.input_params:
-            result["input_params"] = _safe_json_loads(job.input_params, {})
+            try:
+                params = InputParams.model_validate_json(job.input_params)
+                result["input_params"] = params.model_dump()
+            except Exception:
+                raw = job.input_params
+                result["input_params"] = _safe_json_loads(raw, {})
         if job.result_summary:
-            result["result_summary"] = _safe_json_loads(job.result_summary, {})
+            try:
+                summary = ResultSummary.model_validate_json(job.result_summary)
+                result["result_summary"] = summary.model_dump()
+            except Exception:
+                raw = job.result_summary
+                result["result_summary"] = _safe_json_loads(raw, {})
         return result
 
     def list_jobs(
@@ -223,25 +231,15 @@ class JobService:
         Returns:
             Dict with items, total, page info
         """
-        query = db.query(Job)
-
-        # Filter by session_id for user isolation
-        if session_id:
-            query = query.filter(Job.session_id == session_id)
-
-        if statuses:
-            query = query.filter(Job.status.in_(statuses))
-
-        total = query.count()
-        pages = (total + page_size - 1) // page_size
-
-        # Add Job.id as tie-breaker to ensure stable pagination order
-        jobs = (
-            query.order_by(desc(Job.created_at), desc(Job.id))
-            .offset((page - 1) * page_size)
-            .limit(page_size)
-            .all()
+        offset = (page - 1) * page_size
+        jobs, total = job_repo.get_jobs_paginated(
+            db,
+            session_id=session_id,
+            status_filter=statuses,
+            offset=offset,
+            limit=page_size,
         )
+        pages = (total + page_size - 1) // page_size
 
         return {
             "items": jobs,
@@ -274,32 +272,15 @@ class JobService:
         from datetime import timedelta
 
         # Get pending/processing jobs
-        active_query = db.query(Job).filter(
-            Job.status.in_([JobStatus.PENDING, JobStatus.PROCESSING])
-        )
-        if session_id:
-            active_query = active_query.filter(Job.session_id == session_id)
-        active_jobs = active_query.all()
+        active_jobs = job_repo.get_active_jobs(db, session_id)
 
         # Recently completed jobs (auto-dismiss after N minutes)
         recent_cutoff = datetime.now(timezone.utc) - timedelta(minutes=include_recent_minutes)
-        completed_query = db.query(Job).filter(
-            Job.status == JobStatus.COMPLETED,
-            Job.completed_at >= recent_cutoff
-        )
-        if session_id:
-            completed_query = completed_query.filter(Job.session_id == session_id)
-        completed_jobs = completed_query.all()
+        completed_jobs = job_repo.get_completed_jobs_since(db, recent_cutoff, session_id)
 
         # Failed jobs for session (auto-dismiss after 20 minutes)
         failed_cutoff = datetime.now(timezone.utc) - timedelta(minutes=20)
-        failed_query = db.query(Job).filter(
-            Job.status == JobStatus.FAILED,
-            Job.completed_at >= failed_cutoff
-        )
-        if session_id:
-            failed_query = failed_query.filter(Job.session_id == session_id)
-        failed_jobs = failed_query.all()
+        failed_jobs = job_repo.get_failed_jobs_since(db, failed_cutoff, session_id)
 
         # Combine and sort: completed jobs first, then by created_at (newest first within each group)
         all_jobs = active_jobs + completed_jobs + failed_jobs
@@ -330,9 +311,18 @@ class JobService:
                 "created_at": job.created_at.isoformat() if job.created_at else None,
                 "completed_at": job.completed_at.isoformat() if job.completed_at else None,
             }
-            # Extract compound name from input params
-            params = _safe_json_loads(job.input_params, {})
-            compound_name = params.get("compound_name", "Unknown")
+            # Extract compound name from input params using typed model
+            compound_name = "Unknown"
+            params_dict = {}
+            if job.input_params:
+                try:
+                    params = InputParams.model_validate_json(job.input_params)
+                    compound_name = params.compound_name or "Unknown"
+                    params_dict = params.model_dump()
+                except Exception:
+                    raw = job.input_params
+                    params_dict = _safe_json_loads(raw, {})
+                    compound_name = params_dict.get("compound_name", "Unknown")
             item["compound_name"] = compound_name
 
             # For completed jobs, include entry_id and storage_path for UUID-based storage lookup
@@ -340,9 +330,16 @@ class JobService:
             storage_path = None
             if job.status == JobStatus.COMPLETED:
                 # First try result_summary
-                result_data = _safe_json_loads(job.result_summary, {})
-                entry_id = result_data.get("entry_id")
-                storage_path = result_data.get("storage_path")
+                if job.result_summary:
+                    try:
+                        summary = ResultSummary.model_validate_json(job.result_summary)
+                        entry_id = summary.entry_id
+                        storage_path = summary.storage_path
+                    except Exception:
+                        raw = job.result_summary
+                        result_data = _safe_json_loads(raw, {})
+                        entry_id = result_data.get("entry_id")
+                        storage_path = result_data.get("storage_path")
 
                 # Fallback: derive from the job result path (UUID-based filename)
                 if not entry_id and job.result_path:
@@ -356,7 +353,7 @@ class JobService:
                 # Build storage_path deterministically from entry_id
                 if entry_id and not storage_path:
                     try:
-                        from backend.core.azure_sync import get_storage_path_from_entry_id
+                        from backend.core.storage_paths import get_storage_path_from_entry_id
                         storage_path = get_storage_path_from_entry_id(entry_id)
                     except Exception as e:
                         logger.debug(f"Could not derive storage_path from entry_id {entry_id}: {e}")
@@ -367,12 +364,19 @@ class JobService:
 
             # For failed jobs, include cascade similarity results and input params for resubmission
             if job.status == JobStatus.FAILED and job.result_summary:
-                failed_data = _safe_json_loads(job.result_summary, {})
-                cascade = failed_data.get("cascade_results")
-                if cascade:
-                    item["cascade_results"] = cascade
-                    # Include input params so the frontend can resubmit at a lower threshold
-                    item["input_params"] = params
+                try:
+                    failed_summary = ResultSummary.model_validate_json(job.result_summary)
+                    cascade = getattr(failed_summary, 'cascade_results', None)
+                    if cascade:
+                        item["cascade_results"] = cascade
+                        item["input_params"] = params_dict
+                except Exception:
+                    raw = job.result_summary
+                    failed_data = _safe_json_loads(raw, {})
+                    cascade = failed_data.get("cascade_results")
+                    if cascade:
+                        item["cascade_results"] = cascade
+                        item["input_params"] = params_dict
 
             result.append(item)
 
@@ -389,46 +393,7 @@ class JobService:
         Returns:
             Dict with batch statistics
         """
-        # Single aggregated query for all status counts
-        summary = db.query(
-            func.count(Job.id).label('total'),
-            func.sum(case((Job.status == JobStatus.COMPLETED, 1), else_=0)).label('completed'),
-            func.sum(case((Job.status == JobStatus.PROCESSING, 1), else_=0)).label('processing'),
-            func.sum(case((Job.status == JobStatus.PENDING, 1), else_=0)).label('pending'),
-            func.sum(case((Job.status == JobStatus.FAILED, 1), else_=0)).label('failed'),
-            func.sum(case((Job.status == JobStatus.CANCELLED, 1), else_=0)).label('cancelled'),
-            func.avg(Job.progress).label('avg_progress'),
-            func.min(Job.created_at).label('first_created'),
-        ).filter(Job.batch_id == batch_id).first()
-
-        if not summary or summary.total == 0:
-            return {}
-
-        # Get compound names for first 5 jobs (separate query, limited)
-        first_jobs = (
-            db.query(Job.input_params)
-            .filter(Job.batch_id == batch_id)
-            .order_by(Job.created_at)
-            .limit(5)
-            .all()
-        )
-        compound_names = []
-        for (input_params,) in first_jobs:
-            params = _safe_json_loads(input_params, {})
-            compound_names.append(params.get("compound_name", "Unknown"))
-
-        return {
-            "batch_id": batch_id,
-            "total_jobs": summary.total,
-            "completed": summary.completed or 0,
-            "processing": summary.processing or 0,
-            "pending": summary.pending or 0,
-            "failed": summary.failed or 0,
-            "cancelled": summary.cancelled or 0,
-            "overall_progress": summary.avg_progress or 0,
-            "created_at": summary.first_created.isoformat() if summary.first_created else None,
-            "compound_names": compound_names,
-        }
+        return job_repo.get_batch_summary(db, batch_id)
 
     def cancel_batch(self, db: Session, batch_id: str) -> int:
         """
@@ -441,29 +406,10 @@ class JobService:
         Returns:
             Number of jobs cancelled
         """
-        jobs = (
-            db.query(Job)
-            .filter(
-                Job.batch_id == batch_id,
-                Job.status.in_([JobStatus.PENDING, JobStatus.PROCESSING])
-            )
-            .all()
-        )
-
-        cancelled_count = 0
-        with _db_write_lock:
-            for job in jobs:
-                job.status = JobStatus.CANCELLED
-                job.current_step = "Cancelled"
-                job.completed_at = datetime.now(timezone.utc)
-                cancelled_count += 1
-
-            if cancelled_count > 0:
-                db.commit()
-
+        cancelled_count = job_repo.cancel_batch_jobs(db, batch_id)
         if cancelled_count > 0:
+            db.commit()
             logger.info(f"Cancelled {cancelled_count} jobs in batch {batch_id}")
-
         return cancelled_count
 
     def check_existing_compounds(
@@ -485,8 +431,6 @@ class JobService:
         Returns:
             Dict mapping compound_name -> exists (True if already processed)
         """
-        from backend.models.database import Compound
-
         def _normalize_name(name: str) -> str:
             return (name or "").strip().lower()
 
@@ -495,12 +439,7 @@ class JobService:
             return {name: False for name in compound_names}
 
         # Case-insensitive batch query so CSV casing differences still match
-        existing_compounds = (
-            db.query(func.lower(func.trim(Compound.compound_name)))
-            .filter(func.lower(func.trim(Compound.compound_name)).in_(list(normalized_input)))
-            .all()
-        )
-        local_existing = {row[0] for row in existing_compounds if row[0]}
+        local_existing = compound_repo.find_existing_names(db, list(normalized_input))
 
         result = {}
         for name in compound_names:
@@ -543,19 +482,15 @@ class JobService:
         result = {}
 
         # Fetch all pending/processing jobs in one query
-        pending_jobs = (
-            db.query(Job)
-            .filter(Job.status.in_([JobStatus.PENDING, JobStatus.PROCESSING]))
-            .all()
-        )
+        pending_jobs = job_repo.get_active_jobs(db)
 
         # Parse JSON and match compound names
         for job in pending_jobs:
             if not job.input_params:
                 continue
             try:
-                params = json.loads(job.input_params)
-                job_compound_name = params.get('compound_name')
+                params = InputParams.model_validate_json(job.input_params)
+                job_compound_name = params.compound_name
                 normalized_job_name = _normalize_name(job_compound_name) if job_compound_name else ""
                 if normalized_job_name and normalized_job_name in names_to_check:
                     original_name = normalized_to_original[normalized_job_name]
@@ -565,7 +500,7 @@ class JobService:
                     # Early exit if all found
                     if not names_to_check:
                         break
-            except (json.JSONDecodeError, TypeError):
+            except Exception:
                 continue
 
         return result
@@ -650,12 +585,12 @@ class JobService:
             job.result_path = result_path
             job.result_summary = json.dumps(result_summary)
 
-            # Extract duplicate metadata from job input_params
-            job_params = {}
+            # Extract duplicate metadata from job input_params using typed model
+            job_params = InputParams()
             if job.input_params:
                 try:
-                    job_params = json.loads(job.input_params)
-                except (json.JSONDecodeError, TypeError):
+                    job_params = InputParams.model_validate_json(job.input_params)
+                except Exception:
                     pass
 
             # Try to update compound entry FIRST -- if this fails, job must be FAILED
@@ -664,10 +599,10 @@ class JobService:
                     db,
                     result_summary,
                     result_path,
-                    is_duplicate=job_params.get('is_duplicate', False),
-                    duplicate_of=job_params.get('duplicate_of'),
-                    inherit_children_from=job_params.get('inherit_children_from'),
-                    replace_entry_id=job_params.get('replace_entry_id'),
+                    is_duplicate=job_params.is_duplicate,
+                    duplicate_of=job_params.duplicate_of,
+                    inherit_children_from=job_params.inherit_children_from,
+                    replace_entry_id=job_params.replace_entry_id,
                     session_id=job.session_id,
                     job_id=job_id,
                 )
@@ -695,7 +630,7 @@ class JobService:
         # All network I/O happens OUTSIDE the lock to avoid blocking other threads
 
         # Clean up replaced compound's files (Azure + local)
-        replace_entry_id = job_params.get('replace_entry_id')
+        replace_entry_id = job_params.replace_entry_id
         if replace_entry_id:
             try:
                 from backend.core.azure_sync import delete_result_from_azure_by_entry_id
@@ -767,6 +702,13 @@ class JobService:
         inchikey = generate_inchikey(smiles) if smiles else None
         canonical_smiles = generate_canonical_smiles(smiles) if smiles else None
 
+        # Compute inchikey_structure_key
+        inchikey_structure_key = None
+        if inchikey and '-' in inchikey:
+            parts = inchikey.split('-')
+            if len(parts) >= 2:
+                inchikey_structure_key = f"{parts[0]}-{parts[1]}"
+
         # Use entry_id from result_summary if available (generated by compound_service)
         # Otherwise generate a new one
         entry_id_from_summary = result_summary.get('entry_id')
@@ -793,6 +735,7 @@ class JobService:
                     smiles=smiles,
                     canonical_smiles=canonical_smiles,
                     inchikey=inchikey,
+                    inchikey_structure_key=inchikey_structure_key,
                     chembl_id=result_summary.get('chembl_id', ''),
                     total_activities=result_summary.get('total_activities', 0),
                     imp_candidates=result_summary.get('imp_candidates', 0),
@@ -813,28 +756,27 @@ class JobService:
                 return
 
             # Check if compound exists, preferring InChIKey match over name
-            # When replacing, ALWAYS create a fresh entry — never update another
+            # When replacing, ALWAYS create a fresh entry -- never update another
             # compound that happens to share the InChIKey or name. The old compound
             # (replace_entry_id) will be deleted after this new one is saved.
             existing = None
             if not replace_entry_id:
                 if inchikey:
-                    existing = db.query(Compound).filter(Compound.inchikey == inchikey).first()
+                    existing = compound_repo.find_by_inchikey(db, inchikey)
+                    existing = existing[0] if existing else None
 
                 # Only fall back to exact name match if:
                 # 1. No InChIKey provided for the new compound, AND
                 # 2. The existing record has no InChIKey (to avoid false matches)
                 if not existing and not inchikey:
-                    existing = db.query(Compound).filter(
-                        Compound.compound_name == compound_name,
-                        Compound.inchikey.is_(None)
-                    ).first()
+                    existing = compound_repo.find_by_name_no_inchikey(db, compound_name)
 
             if existing:
                 # Update existing entry
                 existing.smiles = smiles
                 existing.canonical_smiles = canonical_smiles
                 existing.inchikey = inchikey
+                existing.inchikey_structure_key = inchikey_structure_key
                 existing.chembl_id = result_summary.get('chembl_id', '')
                 existing.total_activities = result_summary.get('total_activities', 0)
                 existing.imp_candidates = result_summary.get('imp_candidates', 0)
@@ -860,6 +802,7 @@ class JobService:
                     smiles=smiles,
                     canonical_smiles=canonical_smiles,
                     inchikey=inchikey,
+                    inchikey_structure_key=inchikey_structure_key,
                     chembl_id=result_summary.get('chembl_id', ''),
                     total_activities=result_summary.get('total_activities', 0),
                     imp_candidates=result_summary.get('imp_candidates', 0),
@@ -885,9 +828,7 @@ class JobService:
                     new_entry_id = existing.entry_id
                 else:
                     new_entry_id = entry_id  # Set in the "else" branch above
-                children = db.query(Compound).filter(
-                    Compound.duplicate_of == inherit_children_from
-                ).all()
+                children = compound_repo.find_children(db, inherit_children_from)
                 for child in children:
                     child.duplicate_of = new_entry_id
                     logger.info(
@@ -902,18 +843,14 @@ class JobService:
             # NOTE: Azure/local file cleanup is deferred to AFTER the lock is released
             # (see complete_job) to avoid blocking other threads on network I/O.
             if replace_entry_id:
-                old_compound = db.query(Compound).filter(
-                    Compound.entry_id == replace_entry_id
-                ).first()
+                old_compound = compound_repo.get_by_entry_id(db, replace_entry_id)
                 if old_compound:
                     old_name = old_compound.compound_name
 
                     # Promote children before deleting (prevents orphans)
                     if not old_compound.is_duplicate:
                         # Re-point any remaining children to the new compound
-                        remaining_children = db.query(Compound).filter(
-                            Compound.duplicate_of == replace_entry_id
-                        ).all()
+                        remaining_children = compound_repo.find_children(db, replace_entry_id)
                         new_id = existing.entry_id if existing else entry_id
                         for child in remaining_children:
                             child.duplicate_of = new_id
@@ -949,6 +886,15 @@ class JobService:
                         f"(entry_id={replace_entry_id}) after successful replacement"
                     )
 
+        except IntegrityError as e:
+            # Unique constraint on inchikey_structure_key -- concurrent duplicate submission
+            # lost the race. Roll back and log; the other submission's compound will be kept.
+            db.rollback()
+            logger.warning(
+                f"Duplicate structure key race for {compound_name} "
+                f"(structure_key={inchikey_structure_key}): {e}"
+            )
+            return
         except Exception as e:
             logger.error(f"Failed to update Compound entry for {compound_name}: {e}")
             raise  # Propagate to complete_job -- job must not be marked COMPLETED
@@ -1038,16 +984,11 @@ class JobService:
         Returns:
             True if deleted, False if not found
         """
-        job = self.get_job(db, job_id)
-        if not job:
-            return False
-
-        with _db_write_lock:
-            db.delete(job)
+        result = job_repo.delete_job(db, job_id)
+        if result:
             db.commit()
-
-        logger.info(f"Job {job_id} deleted")
-        return True
+            logger.info(f"Job {job_id} deleted")
+        return result
 
 
 # Global service instance

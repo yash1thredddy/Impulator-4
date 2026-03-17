@@ -11,8 +11,7 @@ to prevent wasting time on compounds with no ChEMBL data.
 import uuid
 from datetime import datetime, timezone
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from sqlalchemy.orm import sessionmaker
 
 

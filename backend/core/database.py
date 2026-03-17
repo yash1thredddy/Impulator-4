@@ -39,6 +39,7 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor.execute("PRAGMA busy_timeout=60000")  # 60s busy timeout (STAB-05)
     # FULL sync ensures data integrity - important for scientific data
     cursor.execute("PRAGMA synchronous=FULL")
+    cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
 
 
@@ -414,6 +415,102 @@ def _apply_migrations() -> None:
             if 'activity_types' not in del_columns:
                 conn.execute(text("ALTER TABLE deleted_compounds ADD COLUMN activity_types TEXT"))
                 migrations_applied.append('deleted_compounds.activity_types')
+
+        # ========== PHASE 3: COMPOUNDS TABLE INTEGRITY CONSTRAINTS ==========
+        # Add FK on duplicate_of, conditional unique index on inchikey_structure_key
+        result = conn.execute(text("PRAGMA table_info(compounds)"))
+        compounds_cols_p3 = {row[1] for row in result.fetchall()}
+
+        if 'inchikey_structure_key' not in compounds_cols_p3:
+            # Clean orphaned duplicate_of references before FK is added
+            conn.execute(text("""
+                UPDATE compounds SET duplicate_of = NULL
+                WHERE duplicate_of IS NOT NULL
+                  AND duplicate_of NOT IN (SELECT entry_id FROM compounds WHERE entry_id IS NOT NULL)
+            """))
+
+            # Recreate compounds table with FK constraint and new column
+            conn.execute(text("DROP TABLE IF EXISTS compounds_new"))
+            conn.execute(text("""
+                CREATE TABLE compounds_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entry_id VARCHAR(36) UNIQUE,
+                    compound_name VARCHAR(255) NOT NULL,
+                    chembl_id VARCHAR(50),
+                    smiles TEXT,
+                    inchikey VARCHAR(27),
+                    inchikey_structure_key VARCHAR(27),
+                    canonical_smiles TEXT,
+                    is_duplicate BOOLEAN DEFAULT 0,
+                    duplicate_of VARCHAR(36) REFERENCES compounds_new(entry_id) ON DELETE SET NULL,
+                    total_activities INTEGER DEFAULT 0,
+                    similar_compounds INTEGER DEFAULT 0,
+                    imp_candidates INTEGER DEFAULT 0,
+                    imp_score FLOAT,
+                    similarity_threshold INTEGER DEFAULT 90,
+                    activity_types TEXT,
+                    qed FLOAT,
+                    num_outliers INTEGER DEFAULT 0,
+                    author_name VARCHAR(100),
+                    storage_path VARCHAR(500),
+                    processed_at DATETIME
+                )
+            """))
+
+            # Copy data with computed inchikey_structure_key (first two blocks of InChIKey)
+            conn.execute(text("""
+                INSERT INTO compounds_new (
+                    id, entry_id, compound_name, chembl_id, smiles,
+                    inchikey, inchikey_structure_key, canonical_smiles,
+                    is_duplicate, duplicate_of,
+                    total_activities, similar_compounds, imp_candidates, imp_score,
+                    similarity_threshold, activity_types, qed, num_outliers,
+                    author_name, storage_path, processed_at
+                )
+                SELECT
+                    id, entry_id, compound_name, chembl_id, smiles,
+                    inchikey,
+                    CASE
+                        WHEN inchikey IS NOT NULL AND inchikey LIKE '%-%-%'
+                        THEN SUBSTR(inchikey, 1, INSTR(inchikey, '-') - 1) || '-' ||
+                             SUBSTR(
+                                SUBSTR(inchikey, INSTR(inchikey, '-') + 1),
+                                1,
+                                CASE WHEN INSTR(SUBSTR(inchikey, INSTR(inchikey, '-') + 1), '-') > 0
+                                     THEN INSTR(SUBSTR(inchikey, INSTR(inchikey, '-') + 1), '-') - 1
+                                     ELSE LENGTH(SUBSTR(inchikey, INSTR(inchikey, '-') + 1))
+                                END
+                             )
+                        ELSE NULL
+                    END,
+                    canonical_smiles,
+                    is_duplicate, duplicate_of,
+                    total_activities, similar_compounds, imp_candidates, imp_score,
+                    similarity_threshold, activity_types, qed, num_outliers,
+                    author_name, storage_path, processed_at
+                FROM compounds
+            """))
+
+            # Drop old table and rename
+            conn.execute(text("DROP TABLE compounds"))
+            conn.execute(text("ALTER TABLE compounds_new RENAME TO compounds"))
+
+            # Recreate ALL indexes (not carried over in table recreation)
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_compounds_entry_id ON compounds(entry_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_compounds_compound_name ON compounds(compound_name)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_compounds_chembl_id ON compounds(chembl_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_compounds_inchikey ON compounds(inchikey)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_compounds_is_duplicate ON compounds(is_duplicate)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_compounds_inchikey_structure_key ON compounds(inchikey_structure_key)"))
+
+            # Conditional unique index: prevent concurrent non-duplicate compounds with same structure key
+            conn.execute(text("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uix_compounds_structure_key_non_dup
+                ON compounds(inchikey_structure_key)
+                WHERE is_duplicate = 0 AND inchikey_structure_key IS NOT NULL
+            """))
+
+            migrations_applied.append('Phase 3: compounds table recreation (FK, unique constraint, inchikey_structure_key)')
 
         if migrations_applied:
             logger.info(f"Applied migrations: {migrations_applied}")

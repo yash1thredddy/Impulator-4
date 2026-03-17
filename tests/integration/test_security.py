@@ -4,7 +4,6 @@ Integration tests for security fixes.
 Tests ownership checks, session validation, and other security measures.
 """
 import os
-import time
 import pytest
 from unittest.mock import patch
 
@@ -23,7 +22,9 @@ def test_client():
     # Stop any running scheduler from previous tests
     from backend.core.scheduler import job_scheduler
     job_scheduler._running = False
-    time.sleep(0.1)  # Brief pause to let scheduler thread exit
+    if job_scheduler._thread and job_scheduler._thread.is_alive():
+        job_scheduler._thread.join(timeout=1)
+    job_scheduler._thread = None
 
     with patch('backend.core.azure_sync.is_azure_configured', return_value=False):
         with patch('backend.core.azure_sync.download_db_from_azure'):
@@ -286,7 +287,7 @@ class TestInputValidation:
         # Create a batch with too many compounds (over 1000)
         compounds = [
             {"compound_name": f"Compound{i}", "author_name": "Test Author", "smiles": "CCO", "similarity_threshold": 90}
-            for i in range(1001)
+            for i in range(1005)  # Just over the 1000 limit
         ]
 
         response = test_client.post(

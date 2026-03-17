@@ -140,7 +140,7 @@ class TestGetDbTransactionHandling:
 class TestMigrationIndexes:
     """Tests for issues 1.4/1.5: Migration transaction and indexes."""
 
-    @pytest.fixture
+    @pytest.fixture(scope="class")
     def file_db(self):
         """Create a file-based test database for migration testing."""
         from backend.core.database import Base
@@ -205,7 +205,7 @@ class TestMigrationIndexes:
 class TestPragmaSynchronous:
     """Tests for issue 1.8: PRAGMA synchronous=FULL."""
 
-    @pytest.fixture
+    @pytest.fixture(scope="class")
     def file_db_with_pragma(self):
         """Create a file-based test database to test PRAGMAs."""
         from backend.core.database import Base

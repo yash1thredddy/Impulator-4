@@ -30,7 +30,10 @@ class TestGetClassyFireClassification:
             'description': 'A flavonoid compound'
         }
 
-        with patch('backend.modules.chemical_classifier.session.get', return_value=mock_response):
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_response
+
+        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
             result = get_classyfire_classification('REFJWTPEDVJJIY-UHFFFAOYSA-N')
 
         assert result is not None
@@ -44,7 +47,10 @@ class TestGetClassyFireClassification:
         mock_response = MagicMock()
         mock_response.status_code = 404
 
-        with patch('backend.modules.chemical_classifier.session.get', return_value=mock_response):
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_response
+
+        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
             result = get_classyfire_classification('UNKNOWN-INCHIKEY')
 
         assert result is None
@@ -54,8 +60,10 @@ class TestGetClassyFireClassification:
         from backend.modules.chemical_classifier import get_classyfire_classification
         import requests
 
-        with patch('backend.modules.chemical_classifier.session.get',
-                   side_effect=requests.exceptions.Timeout()):
+        mock_session = MagicMock()
+        mock_session.get.side_effect = requests.exceptions.Timeout()
+
+        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
             result = get_classyfire_classification('REFJWTPEDVJJIY-UHFFFAOYSA-N')
 
         assert result is None
@@ -65,8 +73,10 @@ class TestGetClassyFireClassification:
         from backend.modules.chemical_classifier import get_classyfire_classification
         import requests
 
-        with patch('backend.modules.chemical_classifier.session.get',
-                   side_effect=requests.exceptions.RequestException("Network error")):
+        mock_session = MagicMock()
+        mock_session.get.side_effect = requests.exceptions.RequestException("Network error")
+
+        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
             result = get_classyfire_classification('REFJWTPEDVJJIY-UHFFFAOYSA-N')
 
         assert result is None
@@ -88,7 +98,10 @@ class TestGetNPClassifierClassification:
             'isglycoside': False
         }
 
-        with patch('backend.modules.chemical_classifier.session.get', return_value=mock_response):
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_response
+
+        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
             result = get_npclassifier_classification('c1ccc(cc1)O')
 
         assert result is not None
@@ -110,7 +123,10 @@ class TestGetNPClassifierClassification:
             'isglycoside': True
         }
 
-        with patch('backend.modules.chemical_classifier.session.get', return_value=mock_response):
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_response
+
+        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
             result = get_npclassifier_classification('glycoside_smiles')
 
         assert result is not None
@@ -129,7 +145,10 @@ class TestGetNPClassifierClassification:
             'isglycoside': False
         }
 
-        with patch('backend.modules.chemical_classifier.session.get', return_value=mock_response):
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_response
+
+        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
             result = get_npclassifier_classification('CCO')
 
         assert result is not None
@@ -141,8 +160,10 @@ class TestGetNPClassifierClassification:
         from backend.modules.chemical_classifier import get_npclassifier_classification
         import requests
 
-        with patch('backend.modules.chemical_classifier.session.get',
-                   side_effect=requests.exceptions.Timeout()):
+        mock_session = MagicMock()
+        mock_session.get.side_effect = requests.exceptions.Timeout()
+
+        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
             result = get_npclassifier_classification('c1ccc(cc1)O')
 
         assert result is None
@@ -227,8 +248,10 @@ class TestGetCompleteClassification:
             'isglycoside': False
         }
 
-        with patch('backend.modules.chemical_classifier.session.get',
-                   side_effect=[cf_response, np_response]):
+        mock_session = MagicMock()
+        mock_session.get.side_effect = [cf_response, np_response]
+
+        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
             result = get_complete_classification(
                 smiles='c1ccc(cc1)O',
                 inchikey='REFJWTPEDVJJIY-UHFFFAOYSA-N'
@@ -256,8 +279,11 @@ class TestGetCompleteClassification:
         np_response = MagicMock()
         np_response.status_code = 500
 
-        with patch('backend.modules.chemical_classifier.session.get',
-                   side_effect=[cf_response, np_response]):
+        mock_session = MagicMock()
+        # ClassyFire gets 200, NPClassifier gets 500 (retry adapter retries on 500)
+        mock_session.get.side_effect = [cf_response, np_response, np_response, np_response]
+
+        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
             result = get_complete_classification('CCCC', 'IJDNQMDRQITEOD-UHFFFAOYSA-N')
 
         assert result['Class'] == 'Alkanes'
@@ -270,7 +296,11 @@ class TestGetCompleteClassification:
         mock_response = MagicMock()
         mock_response.status_code = 500
 
-        with patch('backend.modules.chemical_classifier.session.get', return_value=mock_response):
+        mock_session = MagicMock()
+        # All calls return 500 (retry adapter retries on 500)
+        mock_session.get.return_value = mock_response
+
+        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
             result = get_complete_classification('CCCC', 'UNKNOWN')
 
         assert result['Kingdom'] == ''
@@ -444,7 +474,10 @@ class TestLegacyGetClassification:
         mock_response.status_code = 200
         mock_response.json.return_value = {'class': {'name': 'Test'}}
 
-        with patch('backend.modules.chemical_classifier.session.get', return_value=mock_response):
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_response
+
+        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
             result = get_classification('TEST-INCHIKEY')
 
         assert result is not None

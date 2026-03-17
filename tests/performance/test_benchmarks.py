@@ -229,14 +229,14 @@ class TestAPIRateLimiterPerformance:
         """Rate limiter cleanup should not block."""
         from backend.api.v1.jobs import RateLimiter
 
-        limiter = RateLimiter(window_seconds=1)  # 1 second window
+        limiter = RateLimiter(window_seconds=0.2)  # 0.2 second window
 
         # Add sessions
         for i in range(100):
             limiter.check_rate_limit(f'session_{i}', 10)
 
         # Wait for window to expire
-        time.sleep(1.1)
+        time.sleep(0.25)
 
         # Check should trigger cleanup
         start = time.time()

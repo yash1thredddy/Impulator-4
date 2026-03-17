@@ -9,7 +9,6 @@ Tests security event logging including:
 - Security threat logging
 """
 from unittest.mock import patch
-import json
 
 
 class TestAuditEvent:
@@ -47,13 +46,13 @@ class TestLogSecurityEvent:
         )
 
         mock_logger.info.assert_called_once()
-        call_args = mock_logger.info.call_args[0][0]
-        log_data = json.loads(call_args)
-
-        assert log_data["event"] == "job_cancelled"
-        assert log_data["session_id"] == "test-session"
-        assert log_data["details"]["job_id"] == "123"
-        assert "timestamp" in log_data
+        call_args = mock_logger.info.call_args
+        # structlog: first positional arg is event name
+        assert call_args[0][0] == "job_cancelled"
+        # kwargs contain context (details are unpacked as top-level kwargs)
+        assert call_args[1]["session_id"] == "test-session"
+        assert call_args[1]["job_id"] == "123"
+        assert call_args[1]["audit"] is True
 
     @patch('backend.core.audit.audit_logger')
     def test_log_event_warning_severity(self, mock_logger):
@@ -104,10 +103,8 @@ class TestLogSecurityEvent:
         )
 
         mock_logger.warning.assert_called_once()
-        call_args = mock_logger.warning.call_args[0][0]
-        log_data = json.loads(call_args)
-
-        assert log_data["session_id"] == "anonymous"
+        call_args = mock_logger.warning.call_args
+        assert call_args[1]["session_id"] == "anonymous"
 
     @patch('backend.core.audit.audit_logger')
     def test_log_event_empty_details(self, mock_logger):
@@ -120,10 +117,10 @@ class TestLogSecurityEvent:
         )
 
         mock_logger.warning.assert_called_once()
-        call_args = mock_logger.warning.call_args[0][0]
-        log_data = json.loads(call_args)
-
-        assert log_data["details"] == {}
+        call_args = mock_logger.warning.call_args
+        # With no details, only audit and session_id kwargs
+        assert call_args[1]["audit"] is True
+        assert call_args[1]["session_id"] == "anonymous"
 
 
 class TestLogRateLimitExceeded:
@@ -141,13 +138,11 @@ class TestLogRateLimitExceeded:
         )
 
         mock_logger.warning.assert_called_once()
-        call_args = mock_logger.warning.call_args[0][0]
-        log_data = json.loads(call_args)
-
-        assert log_data["event"] == "rate_limit_exceeded"
-        assert log_data["session_id"] == "user-123"
-        assert log_data["details"]["limit_type"] == "jobs_per_hour"
-        assert log_data["details"]["limit_value"] == 10
+        call_args = mock_logger.warning.call_args
+        assert call_args[0][0] == "rate_limit_exceeded"
+        assert call_args[1]["session_id"] == "user-123"
+        assert call_args[1]["limit_type"] == "jobs_per_hour"
+        assert call_args[1]["limit_value"] == 10
 
 
 class TestLogJobCancelled:
@@ -165,12 +160,10 @@ class TestLogJobCancelled:
         )
 
         mock_logger.info.assert_called_once()
-        call_args = mock_logger.info.call_args[0][0]
-        log_data = json.loads(call_args)
-
-        assert log_data["event"] == "job_cancelled"
-        assert log_data["details"]["job_id"] == "job-456"
-        assert log_data["details"]["compound_name"] == "Aspirin"
+        call_args = mock_logger.info.call_args
+        assert call_args[0][0] == "job_cancelled"
+        assert call_args[1]["job_id"] == "job-456"
+        assert call_args[1]["compound_name"] == "Aspirin"
 
     @patch('backend.core.audit.audit_logger')
     def test_job_cancelled_without_name(self, mock_logger):
@@ -183,10 +176,8 @@ class TestLogJobCancelled:
         )
 
         mock_logger.info.assert_called_once()
-        call_args = mock_logger.info.call_args[0][0]
-        log_data = json.loads(call_args)
-
-        assert log_data["details"]["compound_name"] is None
+        call_args = mock_logger.info.call_args
+        assert call_args[1]["compound_name"] is None
 
 
 class TestLogJobDeleted:
@@ -204,11 +195,9 @@ class TestLogJobDeleted:
         )
 
         mock_logger.info.assert_called_once()
-        call_args = mock_logger.info.call_args[0][0]
-        log_data = json.loads(call_args)
-
-        assert log_data["event"] == "job_deleted"
-        assert log_data["details"]["job_id"] == "job-456"
+        call_args = mock_logger.info.call_args
+        assert call_args[0][0] == "job_deleted"
+        assert call_args[1]["job_id"] == "job-456"
 
 
 class TestLogValidationFailed:
@@ -227,12 +216,10 @@ class TestLogValidationFailed:
         )
 
         mock_logger.warning.assert_called_once()
-        call_args = mock_logger.warning.call_args[0][0]
-        log_data = json.loads(call_args)
-
-        assert log_data["event"] == "validation_failed"
-        assert log_data["details"]["field"] == "smiles"
-        assert log_data["details"]["reason"] == "Invalid SMILES syntax"
+        call_args = mock_logger.warning.call_args
+        assert call_args[0][0] == "validation_failed"
+        assert call_args[1]["field"] == "smiles"
+        assert call_args[1]["reason"] == "Invalid SMILES syntax"
 
     @patch('backend.core.audit.audit_logger')
     def test_validation_failed_truncates_long_value(self, mock_logger):
@@ -249,12 +236,10 @@ class TestLogValidationFailed:
         )
 
         mock_logger.warning.assert_called_once()
-        call_args = mock_logger.warning.call_args[0][0]
-        log_data = json.loads(call_args)
-
+        call_args = mock_logger.warning.call_args
         # Value should be truncated to 100 chars + "..."
-        assert len(log_data["details"]["value"]) == 103
-        assert log_data["details"]["value"].endswith("...")
+        assert len(call_args[1]["value"]) == 103
+        assert call_args[1]["value"].endswith("...")
 
 
 class TestLogPathTraversalBlocked:
@@ -270,11 +255,9 @@ class TestLogPathTraversalBlocked:
         )
 
         mock_logger.error.assert_called_once()
-        call_args = mock_logger.error.call_args[0][0]
-        log_data = json.loads(call_args)
-
-        assert log_data["event"] == "path_traversal_blocked"
-        assert "../../../etc/passwd" in log_data["details"]["attempted_path"]
+        call_args = mock_logger.error.call_args
+        assert call_args[0][0] == "path_traversal_blocked"
+        assert "../../../etc/passwd" in call_args[1]["attempted_path"]
 
 
 class TestLogSuspiciousInput:
@@ -292,36 +275,28 @@ class TestLogSuspiciousInput:
         )
 
         mock_logger.warning.assert_called_once()
-        call_args = mock_logger.warning.call_args[0][0]
-        log_data = json.loads(call_args)
-
-        assert log_data["event"] == "suspicious_input"
-        assert log_data["details"]["field"] == "compound_name"
-        assert log_data["details"]["pattern_matched"] == "sql_injection"
+        call_args = mock_logger.warning.call_args
+        assert call_args[0][0] == "suspicious_input"
+        assert call_args[1]["field"] == "compound_name"
+        assert call_args[1]["pattern_matched"] == "sql_injection"
 
 
 class TestAuditLogStructure:
     """Tests for audit log entry structure."""
 
     @patch('backend.core.audit.audit_logger')
-    def test_log_entry_has_timestamp(self, mock_logger):
-        """Test that all log entries have ISO timestamp."""
+    def test_log_entry_has_audit_flag(self, mock_logger):
+        """Test that all log entries have audit=True flag."""
         from backend.core.audit import log_security_event, AuditEvent
-        import re
 
-        # Use severity="info" to call audit_logger.info
         log_security_event(AuditEvent.JOB_CANCELLED, session_id="test", severity="info")
 
-        call_args = mock_logger.info.call_args[0][0]
-        log_data = json.loads(call_args)
-
-        # Check ISO 8601 format
-        iso_pattern = r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}'
-        assert re.match(iso_pattern, log_data["timestamp"])
+        call_args = mock_logger.info.call_args
+        assert call_args[1]["audit"] is True
 
     @patch('backend.core.audit.audit_logger')
-    def test_log_entry_is_valid_json(self, mock_logger):
-        """Test that all log entries are valid JSON."""
+    def test_log_entry_has_structured_kwargs(self, mock_logger):
+        """Test that all log entries use structured keyword args."""
         from backend.core.audit import log_security_event, AuditEvent
 
         log_security_event(
@@ -330,8 +305,10 @@ class TestAuditLogStructure:
             details={"key": "value", "nested": {"a": 1}}
         )
 
-        call_args = mock_logger.warning.call_args[0][0]
-
-        # Should not raise
-        parsed = json.loads(call_args)
-        assert isinstance(parsed, dict)
+        call_args = mock_logger.warning.call_args
+        # Event name is first positional arg
+        assert call_args[0][0] == "validation_failed"
+        # Context is in kwargs
+        assert call_args[1]["session_id"] == "test"
+        assert call_args[1]["key"] == "value"
+        assert call_args[1]["nested"] == {"a": 1}

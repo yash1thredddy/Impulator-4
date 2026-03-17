@@ -9,15 +9,10 @@ Tests:
 4. Edge cases (empty responses, None data)
 """
 
-import sys
-import os
 import pytest
 import requests
 
-# Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-from backend.modules.api_client import (  # noqa: E402
+from backend.modules.api_client import (
     # Constants
     CHEMBL_RESPONSE_KEYS,
     CHEMBL_MAX_LIMIT,

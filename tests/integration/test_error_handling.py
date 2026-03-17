@@ -13,7 +13,6 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 
 
 def _force_stop_scheduler_thread() -> None:
@@ -35,25 +34,35 @@ def isolate_scheduler():
     _force_stop_scheduler_thread()
 
 
-@pytest.fixture(scope="function")
-def test_engine(tmp_path):
-    """Override conftest's in-memory engine with a file-backed DB.
+@pytest.fixture(scope="module")
+def test_engine():
+    """In-memory engine shared across tests in this module.
 
-    A file-backed DB + NullPool avoids shared single-connection races under
-    concurrent request tests.
+    Uses StaticPool for connection sharing across threads via TestClient.
     """
     from backend.core.database import Base
     from backend.models.database import Job, Compound  # noqa: F401
+    from sqlalchemy.pool import StaticPool
 
-    db_path = tmp_path / "test_error_handling.sqlite"
     engine = create_engine(
-        f"sqlite:///{db_path}",
-        connect_args={"check_same_thread": False, "timeout": 30},
-        poolclass=NullPool,
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
     )
     Base.metadata.create_all(bind=engine)
     yield engine
-    engine.dispose()
+    Base.metadata.drop_all(bind=engine)
+
+
+@pytest.fixture(autouse=True)
+def _clean_tables(test_engine):
+    """Truncate all tables after each test."""
+    yield
+    from backend.core.database import Base
+    with test_engine.connect() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            conn.execute(table.delete())
+        conn.commit()
 
 
 @pytest.fixture

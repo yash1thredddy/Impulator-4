@@ -3,10 +3,10 @@ Pydantic schemas for API request/response validation.
 """
 import re
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Any, Optional, List, Dict
 from enum import Enum
 
-from pydantic import BaseModel, Field, ConfigDict, field_validator
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 
 # Try to import RDKit for SMILES validation
 try:
@@ -797,3 +797,74 @@ class CompoundVersionsResponse(BaseModel):
 
     versions: List[CompoundVersionItem] = []
     current_entry_id: str
+
+
+# ============================================================================
+# Typed JSON blob models (ARCH-17)
+# ============================================================================
+# These models parse the JSON stored in Job.input_params and Job.result_summary
+# columns. They use extra="allow" so unknown/future fields are preserved rather
+# than rejected.
+
+
+class InputParams(BaseModel, extra="allow"):
+    """Typed model for Job.input_params JSON blob.
+
+    Handles legacy field aliases (e.g. similarity_threshold -> threshold).
+    """
+
+    compound_name: Optional[str] = None
+    smiles: Optional[str] = None
+    threshold: Optional[int] = 90
+    activity_types: Optional[List[str]] = Field(default_factory=list)
+    is_duplicate: bool = False
+    duplicate_of: Optional[str] = None
+    replace_entry_id: Optional[str] = None
+    inherit_children_from: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_aliases(cls, data: Any) -> Any:
+        """Map legacy field names to canonical names."""
+        if isinstance(data, dict):
+            if "threshold" not in data and "similarity_threshold" in data:
+                data["threshold"] = data["similarity_threshold"]
+        return data
+
+
+class ResultSummary(BaseModel, extra="allow"):
+    """Typed model for Job.result_summary JSON blob.
+
+    Handles legacy field aliases (e.g. total_similar/total_compounds -> similar_count).
+    """
+
+    compound_name: Optional[str] = None
+    smiles: Optional[str] = None
+    entry_id: Optional[str] = None
+    storage_path: Optional[str] = None
+    similarity_threshold: Optional[int] = 90
+    activity_types: Optional[List[str]] = Field(default_factory=list)
+    similar_count: int = 0
+    qed: float = 0.0
+    num_outliers: int = 0
+    chembl_id: Optional[str] = None
+    total_activities: int = 0
+    imp_candidates: int = 0
+    imp_score: Optional[float] = None
+    author_name: Optional[str] = None
+    pdb_unavailable: bool = False
+    sync_retry_count: int = 0
+    schema_version: int = 1
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_aliases(cls, data: Any) -> Any:
+        """Map legacy field names to canonical names."""
+        if isinstance(data, dict):
+            if "similar_count" not in data:
+                data["similar_count"] = (
+                    data.get("total_similar")
+                    or data.get("total_compounds")
+                    or 0
+                )
+        return data

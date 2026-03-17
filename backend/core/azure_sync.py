@@ -6,7 +6,6 @@ Azure Blob serves as the single source of truth for data persistence.
 import gzip
 import os
 import re
-import shutil
 import logging
 import threading
 from datetime import datetime, timezone
@@ -20,7 +19,6 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
     retry_if_exception_type,
-    before_sleep_log,
 )
 
 from backend.config import settings
@@ -510,26 +508,8 @@ def _cleanup_old_log_archives(keep_count: int = 10) -> None:
 # This avoids issues with special characters in names and enables true duplicate support.
 
 
-def get_storage_path_from_entry_id(entry_id: str) -> str:
-    """
-    Generate storage path from entry_id (UUID).
-
-    Uses first 2 characters as prefix for directory distribution.
-    This helps avoid having too many files in a single directory.
-
-    Args:
-        entry_id: UUID string (e.g., "3a4f8c9e-1b2d-4e5f-9a1c-2d3e4f5a6b7c")
-
-    Returns:
-        Path like "results/3a/3a4f8c9e-1b2d-4e5f-9a1c-2d3e4f5a6b7c.zip"
-    """
-    if not entry_id:
-        raise ValueError("entry_id cannot be empty")
-
-    # Normalize to lowercase for consistent paths
-    entry_id = entry_id.lower()
-    prefix = entry_id[:2]
-    return f"results/{prefix}/{entry_id}.zip"
+# Re-export from canonical location for backward compatibility (ARCH-19)
+from backend.core.storage_paths import get_storage_path_from_entry_id  # noqa: F401
 
 
 def upload_result_to_azure_by_entry_id(local_path: str, entry_id: str) -> bool:

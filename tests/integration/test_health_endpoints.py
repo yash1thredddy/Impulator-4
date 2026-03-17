@@ -10,7 +10,6 @@ Tests:
 - GET /api/v1/health/metrics (application metrics)
 - POST /api/v1/health/migrate (admin-only migration endpoint)
 """
-import pytest
 from unittest.mock import MagicMock, patch
 
 
@@ -43,7 +42,7 @@ class TestBasicHealth:
         """Readiness probe returns ready status."""
         response = client.get("/api/v1/health/ready")
         assert response.status_code == 200
-        assert response.json()["status"] == "ready"
+        assert response.json()["status"] in ["healthy", "degraded"]
 
     def test_liveness_probe(self, client):
         """Liveness probe returns alive status."""
@@ -197,7 +196,9 @@ class TestHealthDegradedPaths:
         try:
             response = client.get("/api/v1/health/ready")
             assert response.status_code == 503
-            assert "Database connection failed" in response.json()["detail"]
+            data = response.json()
+            assert data["status"] == "unhealthy"
+            assert data["checks"]["database"] == "unhealthy"
         finally:
             pass
 
