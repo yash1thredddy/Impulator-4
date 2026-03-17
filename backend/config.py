@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     APP_VERSION: str = "2.1.3"  # Updated version after fixes
     DEBUG: bool = False
 
+    # Logging
+    LOG_LEVEL: str = "INFO"        # DEBUG, INFO, WARNING, ERROR, CRITICAL
+    LOG_FORMAT: str = "auto"       # "json", "console", or "auto" (json when not DEBUG, console when DEBUG)
+
     # Server
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
@@ -45,7 +49,7 @@ class Settings(BaseSettings):
     MAX_BATCH_SIZE: int = 1000  # Max compounds per batch
 
     # Cache (in-memory with TTL)
-    CACHE_SIZE: int = 2000  # Per function cache size
+    CACHE_SIZE: int = 500  # Bounded at 500 to limit memory (STAB-04)
     CACHE_TTL_SECONDS: int = 3600  # 1 hour TTL
 
     # External APIs

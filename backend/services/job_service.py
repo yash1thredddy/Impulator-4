@@ -25,7 +25,8 @@ _db_write_lock = threading.Lock()
 # Valid status transitions for job state machine
 VALID_TRANSITIONS = {
     JobStatus.PENDING: {JobStatus.PROCESSING, JobStatus.CANCELLED},
-    JobStatus.PROCESSING: {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED},
+    JobStatus.PROCESSING: {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.SYNC_PENDING},
+    JobStatus.SYNC_PENDING: {JobStatus.COMPLETED, JobStatus.FAILED},
     JobStatus.COMPLETED: set(),  # Terminal state
     JobStatus.FAILED: set(),     # Terminal state
     JobStatus.CANCELLED: set(),  # Terminal state
@@ -644,12 +645,10 @@ class JobService:
                 logger.warning(f"Job {job_id} is {job.status.value}, not completing")
                 return None
 
-            job.status = JobStatus.COMPLETED
-            job.progress = 100.0
-            job.current_step = "Completed"
+            # Preserve result metadata on both success and failure paths
+            # (ZIP exists regardless -- allows re-processing on failure)
             job.result_path = result_path
             job.result_summary = json.dumps(result_summary)
-            job.completed_at = datetime.now(timezone.utc)
 
             # Extract duplicate metadata from job input_params
             job_params = {}
@@ -659,19 +658,36 @@ class JobService:
                 except (json.JSONDecodeError, TypeError):
                     pass
 
-            # Update Compound table for local DB consistency
-            self._update_compound_entry(
-                db,
-                result_summary,
-                result_path,
-                is_duplicate=job_params.get('is_duplicate', False),
-                duplicate_of=job_params.get('duplicate_of'),
-                inherit_children_from=job_params.get('inherit_children_from'),
-                replace_entry_id=job_params.get('replace_entry_id'),
-                session_id=job.session_id,
-                job_id=job_id,
-            )
+            # Try to update compound entry FIRST -- if this fails, job must be FAILED
+            try:
+                self._update_compound_entry(
+                    db,
+                    result_summary,
+                    result_path,
+                    is_duplicate=job_params.get('is_duplicate', False),
+                    duplicate_of=job_params.get('duplicate_of'),
+                    inherit_children_from=job_params.get('inherit_children_from'),
+                    replace_entry_id=job_params.get('replace_entry_id'),
+                    session_id=job.session_id,
+                    job_id=job_id,
+                )
+            except Exception as e:
+                # Compound entry failed -- mark job as FAILED, not COMPLETED
+                # ZIP result still exists -- user can re-submit
+                logger.error(f"Job {job_id}: compound entry update failed, marking FAILED: {e}")
+                job.status = JobStatus.FAILED
+                job.error_message = f"Compound entry could not be saved: {e}"
+                job.completed_at = datetime.now(timezone.utc)
+                db.commit()
+                db.refresh(job)
+                metrics.increment('jobs_failed')
+                return job
 
+            # Compound entry succeeded -- now safe to mark COMPLETED
+            job.status = JobStatus.COMPLETED
+            job.progress = 100.0
+            job.current_step = "Completed"
+            job.completed_at = datetime.now(timezone.utc)
             db.commit()
             db.refresh(job)
             metrics.increment('jobs_completed')
@@ -935,6 +951,7 @@ class JobService:
 
         except Exception as e:
             logger.error(f"Failed to update Compound entry for {compound_name}: {e}")
+            raise  # Propagate to complete_job -- job must not be marked COMPLETED
 
     def fail_job(
         self,

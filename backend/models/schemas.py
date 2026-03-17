@@ -703,12 +703,14 @@ class ErrorResponse(BaseModel):
 
     detail: str
     error_code: Optional[str] = None
+    request_id: Optional[str] = None
 
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "detail": "Compound not found",
                 "error_code": "NOT_FOUND",
+                "request_id": "550e8400-e29b-41d4-a716-446655440000",
             }
         }
     )

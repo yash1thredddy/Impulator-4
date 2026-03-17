@@ -12,7 +12,16 @@ import threading
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
+
+import structlog
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log,
+)
 
 from backend.config import settings
 
@@ -30,32 +39,47 @@ class AzureSyncRotatingFileHandler(RotatingFileHandler):
 
     def doRollover(self):
         """
-        Override to upload the rotated file to Azure before rotation.
+        Override to compress and upload the rotated file to Azure asynchronously.
+
+        Compression is synchronous (fast, local I/O). Azure upload runs in a
+        daemon thread so log rotation is never blocked by network I/O.
         """
         # Get the file that's about to be rotated (current log file)
         if self.stream:
             self.stream.close()
             self.stream = None
 
-        # Upload current log to Azure before rotation
+        # Compress and upload current log to Azure before rotation
         if self.baseFilename and Path(self.baseFilename).exists():
-            self._upload_to_azure(self.baseFilename)
+            # Compress synchronously (fast, local I/O)
+            gz_path = self._compress_to_gz(self.baseFilename)
+            if gz_path:
+                # Upload to Azure in background daemon thread (non-blocking)
+                upload_thread = threading.Thread(
+                    target=self._upload_gz_to_azure,
+                    args=(gz_path,),
+                    daemon=True,
+                    name="azure-log-upload",
+                )
+                upload_thread.start()
 
         # Call parent rollover (handles file rotation)
         super().doRollover()
 
-    def _upload_to_azure(self, filepath: str) -> bool:
-        """Compress and upload a log file to Azure."""
-        try:
-            # Check if Azure is configured (avoid circular import)
-            if not settings.AZURE_CONNECTION_STRING:
-                return False
+    def _compress_to_gz(self, filepath: str) -> Path | None:
+        """Compress a log file to gzip format.
 
+        Args:
+            filepath: Path to the log file to compress.
+
+        Returns:
+            Path to the compressed file, or None on failure.
+        """
+        try:
             path = Path(filepath)
             if not path.exists() or path.stat().st_size == 0:
-                return False
+                return None
 
-            # Create compressed version
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             gz_name = f"backend_{timestamp}.log.gz"
             gz_path = path.parent / gz_name
@@ -64,8 +88,64 @@ class AzureSyncRotatingFileHandler(RotatingFileHandler):
                 with gzip.open(gz_path, 'wb') as f_out:
                     f_out.writelines(f_in)
 
-            # Upload to Azure
-            blob_name = f"logs/{gz_name}"
+            return gz_path
+        except Exception as e:
+            print(f"[AzureSync] Failed to compress log file: {e}")
+            return None
+
+    def _upload_gz_to_azure(self, gz_path: Path) -> None:
+        """Upload a compressed log file to Azure Blob storage.
+
+        Runs in a daemon thread -- must not raise exceptions.
+
+        Args:
+            gz_path: Path to the .gz file to upload.
+        """
+        try:
+            if not settings.AZURE_CONNECTION_STRING:
+                gz_path.unlink(missing_ok=True)
+                return
+
+            blob_name = f"logs/{gz_path.name}"
+            blob = _get_blob_client(blob_name)
+            if blob is None:
+                gz_path.unlink(missing_ok=True)
+                return
+
+            with open(gz_path, 'rb') as f:
+                blob.upload_blob(f, overwrite=True)
+
+            # Cleanup local compressed file
+            gz_path.unlink(missing_ok=True)
+
+            # Use print since logger might cause recursion in file handler
+            print(f"[AzureSync] Uploaded rotated log to Azure: {blob_name}")
+
+            # Cleanup old archives (keep last 5)
+            _cleanup_old_log_archives(keep_count=5)
+
+        except Exception as e:
+            print(f"[AzureSync] Failed to upload log to Azure: {e}")
+            # Cleanup on failure
+            try:
+                gz_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _upload_to_azure(self, filepath: str) -> bool:
+        """Compress and upload a log file to Azure (synchronous).
+
+        Kept for backward compatibility -- used by sync_logs_to_azure().
+        """
+        try:
+            if not settings.AZURE_CONNECTION_STRING:
+                return False
+
+            gz_path = self._compress_to_gz(filepath)
+            if gz_path is None:
+                return False
+
+            blob_name = f"logs/{gz_path.name}"
             blob = _get_blob_client(blob_name)
             if blob is None:
                 gz_path.unlink(missing_ok=True)
@@ -74,15 +154,9 @@ class AzureSyncRotatingFileHandler(RotatingFileHandler):
             with open(gz_path, 'rb') as f:
                 blob.upload_blob(f, overwrite=True)
 
-            # Cleanup local compressed file
             gz_path.unlink(missing_ok=True)
-
-            # Use print since logger might cause recursion
             print(f"[AzureSync] Uploaded rotated log to Azure: {blob_name}")
-
-            # Cleanup old archives (keep last 5)
             _cleanup_old_log_archives(keep_count=5)
-
             return True
 
         except Exception as e:
@@ -650,3 +724,170 @@ def check_result_exists_in_azure_by_entry_id(entry_id: str) -> bool:
     except Exception as e:
         logger.error(f"Failed to check if result exists in Azure by entry_id: {e}")
         return False
+
+
+# ============================================================================
+# AZURE UPLOAD RETRY + TWO-PHASE COMMIT MARKERS (Phase 2: Stability)
+# ============================================================================
+
+_upload_log = structlog.get_logger("azure_sync")
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_exception_type(Exception),
+    reraise=True,
+)
+def _upload_with_retry(local_path: str, entry_id: str) -> bool:
+    """Upload result ZIP to Azure with tenacity retry (3 attempts, exponential backoff).
+
+    Wraps upload_result_to_azure_by_entry_id with automatic retry on any exception.
+    On permanent failure (after 3 attempts), the exception is reraised.
+
+    Args:
+        local_path: Path to the local ZIP file.
+        entry_id: UUID for the compound entry.
+
+    Returns:
+        True if upload successful and verified.
+
+    Raises:
+        Exception: After 3 failed attempts (reraised from last attempt).
+    """
+    from backend.core.metrics import metrics
+    metrics.increment('azure_upload_retried')
+    _upload_log.info("azure_upload_attempt", entry_id=entry_id)
+
+    success = upload_result_to_azure_by_entry_id(local_path, entry_id)
+    if not success:
+        raise RuntimeError(f"Azure upload returned False for entry_id={entry_id}")
+    return True
+
+
+def write_pending_marker(entry_id: str) -> bool:
+    """Write a zero-byte .pending marker blob for two-phase commit tracking.
+
+    The marker signals that an upload is in progress. It is deleted after
+    successful upload. Orphaned markers (no matching DB record) are cleaned
+    up on startup by reconcile_orphaned_uploads().
+
+    Args:
+        entry_id: UUID for the compound entry.
+
+    Returns:
+        True if marker written successfully, False otherwise.
+    """
+    if not is_azure_configured() or not entry_id:
+        return False
+
+    entry_id = entry_id.lower()
+    prefix = entry_id[:2]
+    blob_name = f"results/{prefix}/.pending-{entry_id}"
+
+    try:
+        blob = _get_blob_client(blob_name)
+        if blob is None:
+            return False
+        blob.upload_blob(b"", overwrite=True)
+        _upload_log.debug("pending_marker_written", entry_id=entry_id)
+        return True
+    except Exception as e:
+        _upload_log.warning("pending_marker_write_failed", entry_id=entry_id, error=str(e))
+        return False
+
+
+def delete_pending_marker(entry_id: str) -> bool:
+    """Delete the .pending marker blob after successful upload.
+
+    Args:
+        entry_id: UUID for the compound entry.
+
+    Returns:
+        True if deleted or blob doesn't exist, False on error.
+    """
+    if not is_azure_configured() or not entry_id:
+        return False
+
+    entry_id = entry_id.lower()
+    prefix = entry_id[:2]
+    blob_name = f"results/{prefix}/.pending-{entry_id}"
+
+    try:
+        blob = _get_blob_client(blob_name)
+        if blob is None:
+            return False
+        if blob.exists():
+            blob.delete_blob()
+        _upload_log.debug("pending_marker_deleted", entry_id=entry_id)
+        return True
+    except Exception as e:
+        _upload_log.warning("pending_marker_delete_failed", entry_id=entry_id, error=str(e))
+        return False
+
+
+def list_pending_markers() -> List[str]:
+    """List all .pending marker blobs and extract entry_ids.
+
+    Returns:
+        List of entry_id strings that have pending markers.
+    """
+    if not is_azure_configured():
+        return []
+
+    container = _get_container_client()
+    if container is None:
+        return []
+
+    try:
+        blobs = container.list_blobs(name_starts_with="results/")
+        pending_ids = []
+        for blob in blobs:
+            # Match pattern: results/xx/.pending-<uuid>
+            name = blob.name
+            if "/.pending-" in name:
+                # Extract entry_id from results/xx/.pending-<entry_id>
+                parts = name.rsplit("/.pending-", 1)
+                if len(parts) == 2:
+                    pending_ids.append(parts[1])
+        return pending_ids
+    except Exception as e:
+        _upload_log.error("list_pending_markers_failed", error=str(e))
+        return []
+
+
+def reconcile_orphaned_uploads(db_entry_ids: set) -> int:
+    """Clean up orphaned .pending markers and their corresponding ZIPs.
+
+    An orphan is a .pending marker whose entry_id does not appear in the
+    database. This can happen when a job was deleted while an upload was
+    in progress, or when a container crashed mid-upload and the DB was
+    later restored without that record.
+
+    Args:
+        db_entry_ids: Set of all entry_ids present in the database.
+
+    Returns:
+        Number of orphaned markers cleaned up.
+    """
+    if not is_azure_configured():
+        return 0
+
+    pending = list_pending_markers()
+    if not pending:
+        return 0
+
+    cleaned = 0
+    for entry_id in pending:
+        if entry_id not in db_entry_ids:
+            _upload_log.info("orphan_cleanup", entry_id=entry_id)
+            # Delete the pending marker
+            delete_pending_marker(entry_id)
+            # Delete the corresponding ZIP if it exists
+            try:
+                delete_result_from_azure_by_entry_id(entry_id)
+            except Exception as e:
+                _upload_log.warning("orphan_zip_delete_failed", entry_id=entry_id, error=str(e))
+            cleaned += 1
+
+    return cleaned

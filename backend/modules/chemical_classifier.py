@@ -15,22 +15,43 @@ Usage:
 """
 
 import logging
+import threading
 from typing import Dict, Optional
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-logger = logging.getLogger(__name__)
+from backend.core.metrics import metrics
 
-# Configure session with retries
-session = requests.Session()
-retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
-adapter = HTTPAdapter(max_retries=retry)
-session.mount('http://', adapter)
-session.mount('https://', adapter)
+logger = logging.getLogger(__name__)
 
 # API timeout
 API_TIMEOUT = 10
+
+
+def _create_session():
+    """Create a requests session with retry configuration."""
+    s = requests.Session()
+    retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    adapter = HTTPAdapter(max_retries=retry)
+    s.mount('http://', adapter)
+    s.mount('https://', adapter)
+    return s
+
+
+# Thread-local sessions (requests.Session is NOT thread-safe)
+_thread_local = threading.local()
+
+
+def _get_thread_session():
+    """Get a thread-local requests session."""
+    if not hasattr(_thread_local, 'session'):
+        _thread_local.session = _create_session()
+    return _thread_local.session
+
+
+# Module-level session for backward compatibility in single-threaded contexts
+session = _create_session()
 
 
 def get_classyfire_classification(inchikey: str, max_retries: int = 2) -> Optional[Dict]:
@@ -59,7 +80,10 @@ def get_classyfire_classification(inchikey: str, max_retries: int = 2) -> Option
 
     for attempt in range(max_retries):
         try:
-            response = session.get(url, timeout=API_TIMEOUT)
+            _cf_start = time.time()
+            response = _get_thread_session().get(url, timeout=API_TIMEOUT)
+            metrics.increment('api_calls_total')
+            metrics.record_latency('classyfire', (time.time() - _cf_start) * 1000)
 
             if response.status_code == 200:
                 return response.json()
@@ -71,6 +95,7 @@ def get_classyfire_classification(inchikey: str, max_retries: int = 2) -> Option
                     continue
                 else:
                     logger.error(f"ClassyFire returned {response.status_code} after {max_retries} attempts")
+                    metrics.increment('api_calls_failed')
                     return None
             else:
                 # 4xx errors - don't retry
@@ -78,6 +103,8 @@ def get_classyfire_classification(inchikey: str, max_retries: int = 2) -> Option
                 return None
 
         except requests.exceptions.Timeout:
+            metrics.increment('api_calls_total')
+            metrics.increment('api_calls_failed')
             if attempt < max_retries - 1:
                 logger.warning(f"ClassyFire timeout for {inchikey} (attempt {attempt + 1}), retrying...")
                 time.sleep(1 * (attempt + 1))
@@ -85,6 +112,8 @@ def get_classyfire_classification(inchikey: str, max_retries: int = 2) -> Option
                 logger.error(f"ClassyFire timeout for {inchikey} after {max_retries} attempts")
                 return None
         except requests.exceptions.ConnectionError:
+            metrics.increment('api_calls_total')
+            metrics.increment('api_calls_failed')
             if attempt < max_retries - 1:
                 logger.warning(f"ClassyFire connection error for {inchikey} (attempt {attempt + 1}), retrying...")
                 time.sleep(1 * (attempt + 1))
@@ -92,6 +121,8 @@ def get_classyfire_classification(inchikey: str, max_retries: int = 2) -> Option
                 logger.error(f"ClassyFire connection error for {inchikey} after {max_retries} attempts")
                 return None
         except Exception as e:
+            metrics.increment('api_calls_total')
+            metrics.increment('api_calls_failed')
             logger.error(f"ClassyFire error for {inchikey}: {str(e)}")
             return None
 
@@ -126,7 +157,10 @@ def get_npclassifier_classification(smiles: str, max_retries: int = 2) -> Option
 
     for attempt in range(max_retries):
         try:
-            response = session.get(url, params=params, timeout=API_TIMEOUT)
+            _np_start = time.time()
+            response = _get_thread_session().get(url, params=params, timeout=API_TIMEOUT)
+            metrics.increment('api_calls_total')
+            metrics.record_latency('npclassifier', (time.time() - _np_start) * 1000)
 
             if response.status_code == 200:
                 data = response.json()
@@ -147,6 +181,7 @@ def get_npclassifier_classification(smiles: str, max_retries: int = 2) -> Option
                     continue
                 else:
                     logger.error(f"NPClassifier returned {response.status_code} after {max_retries} attempts")
+                    metrics.increment('api_calls_failed')
                     return None
             else:
                 # 4xx errors - don't retry
@@ -154,6 +189,8 @@ def get_npclassifier_classification(smiles: str, max_retries: int = 2) -> Option
                 return None
 
         except requests.exceptions.Timeout:
+            metrics.increment('api_calls_total')
+            metrics.increment('api_calls_failed')
             if attempt < max_retries - 1:
                 logger.warning(f"NPClassifier timeout (attempt {attempt + 1}) for SMILES: {smiles_preview}")
                 time.sleep(1 * (attempt + 1))
@@ -161,6 +198,8 @@ def get_npclassifier_classification(smiles: str, max_retries: int = 2) -> Option
                 logger.error(f"NPClassifier timeout for SMILES: {smiles_preview} after {max_retries} attempts")
                 return None
         except requests.exceptions.ConnectionError:
+            metrics.increment('api_calls_total')
+            metrics.increment('api_calls_failed')
             if attempt < max_retries - 1:
                 logger.warning(f"NPClassifier connection error (attempt {attempt + 1}) for SMILES: {smiles_preview}")
                 time.sleep(1 * (attempt + 1))
@@ -168,6 +207,8 @@ def get_npclassifier_classification(smiles: str, max_retries: int = 2) -> Option
                 logger.error(f"NPClassifier connection error for SMILES: {smiles_preview} after {max_retries} attempts")
                 return None
         except Exception as e:
+            metrics.increment('api_calls_total')
+            metrics.increment('api_calls_failed')
             logger.error(f"NPClassifier error for SMILES: {str(e)}")
             return None
 
@@ -385,6 +426,13 @@ def get_classification_summary(classification: Dict) -> str:
         lines.append(f"Molecular Framework: {classification['Molecular_Framework']}")
 
     return "\n".join(lines)
+
+
+def shutdown_classifier():
+    """Reset thread-local sessions on shutdown (STAB-16)."""
+    global _thread_local
+    _thread_local = threading.local()
+    logger.info("Chemical classifier sessions reset")
 
 
 # For backward compatibility with existing code

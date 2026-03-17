@@ -36,10 +36,35 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
     """Configure SQLite for better concurrency and data safety."""
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.execute("PRAGMA busy_timeout=60000")  # 60s busy timeout (STAB-05)
     # FULL sync ensures data integrity - important for scientific data
     cursor.execute("PRAGMA synchronous=FULL")
     cursor.close()
+
+
+def execute_with_retry(db: Session, operation, max_retries: int = 1):
+    """Execute a DB operation with single retry on SQLITE_BUSY.
+
+    Used inside _db_write_lock for additional resilience (STAB-05).
+    The busy_timeout PRAGMA handles most contention; this catches edge cases
+    where busy_timeout expires but a retry would succeed.
+
+    Args:
+        db: SQLAlchemy session
+        operation: Callable that performs the DB operation
+        max_retries: Number of retries (default 1 = single retry)
+    """
+    from sqlalchemy.exc import OperationalError as _OperationalError
+
+    for attempt in range(max_retries + 1):
+        try:
+            return operation()
+        except _OperationalError as e:
+            if "database is locked" in str(e) and attempt < max_retries:
+                logger.warning(f"SQLite BUSY, retrying ({attempt + 1}/{max_retries})")
+                time.sleep(1.0)
+                continue
+            raise
 
 
 # Session factory
@@ -194,6 +219,16 @@ def _apply_migrations() -> None:
                 ON jobs(session_id, idempotency_key)
                 WHERE idempotency_key IS NOT NULL
             """))
+
+            # Add request_id column if missing (correlation ID from originating HTTP request)
+            if 'request_id' not in jobs_columns:
+                conn.execute(text("ALTER TABLE jobs ADD COLUMN request_id VARCHAR(36)"))
+                migrations_applied.append('jobs.request_id')
+
+            # Add error_code column if missing (machine-readable failure classification)
+            if 'error_code' not in jobs_columns:
+                conn.execute(text("ALTER TABLE jobs ADD COLUMN error_code VARCHAR(50)"))
+                migrations_applied.append('jobs.error_code')
 
             # Performance indexes for jobs table
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_jobs_created_at ON jobs(created_at)"))
