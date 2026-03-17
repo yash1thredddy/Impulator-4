@@ -2,7 +2,7 @@
 Unit tests for the JobExecutor (ThreadPoolExecutor wrapper).
 """
 import pytest
-import time
+import threading
 
 
 class TestJobExecutor:
@@ -55,14 +55,16 @@ class TestJobExecutor:
 
     def test_submit_and_wait(self, executor):
         """Test submitting a job and waiting for completion."""
+        done_event = threading.Event()
         result_holder = {}
 
         def task(job_id):
             result_holder[job_id] = "done"
+            done_event.set()
             return "done"
 
         executor.submit("test-wait", task)
-        time.sleep(0.2)  # Wait for task to complete
+        done_event.wait(timeout=2)
         assert result_holder.get("test-wait") == "done"
 
 
@@ -81,12 +83,17 @@ class TestJobExecutorConcurrency:
         from backend.core.executor import JobExecutor
         executor = JobExecutor(max_workers=2)
 
-        def slow_task(job_id):
-            time.sleep(0.5)
+        started = threading.Event()
+        release = threading.Event()
+
+        def controlled_task(job_id):
+            started.set()
+            release.wait(timeout=2)
             return job_id
 
-        executor.submit("job-1", slow_task)
-        time.sleep(0.1)  # Give time to start
+        executor.submit("job-1", controlled_task)
+        started.wait(timeout=2)
 
         assert executor.get_active_count() >= 0  # May be 0 or 1 depending on timing
+        release.set()
         executor.shutdown(wait=True)

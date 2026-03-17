@@ -11,7 +11,6 @@ Key features:
 - Integration with existing chemistry modules
 """
 import os
-import sys
 import json
 import logging
 import shutil
@@ -22,37 +21,29 @@ from typing import Callable, Dict, List, Optional
 import pandas as pd
 import numpy as np
 
-# Ensure project root is in path for module imports (do this ONCE at module level)
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
-from backend.config import settings  # noqa: E402
-from backend.core.database import get_db_session  # noqa: E402
-from backend.core.azure_sync import (  # noqa: E402
-    upload_result_to_azure_by_entry_id,
-    get_storage_path_from_entry_id,
-)
-from backend.core import sanitize_compound_name  # noqa: E402
-from backend.models.database import JobStatus  # noqa: E402
+from backend.config import settings
+from backend.core.database import get_db_session
+from backend.core.storage_paths import get_storage_path_from_entry_id
+from backend.core import sanitize_compound_name
+from backend.models.database import JobStatus
 
 # Import chemistry modules (clean absolute imports)
-from backend.modules.api_client import (  # noqa: E402
+from backend.modules.api_client import (
     get_chembl_ids,
     get_drug_indications_batch,
     cascade_similarity_counts,
 )
-from backend.modules.efficiency_metrics import calculate_efficiency_metrics_dataframe  # noqa: E402
-from backend.modules.efficiency_planes import calculate_plane_metrics_dataframe  # noqa: E402
-from backend.modules.outlier_detection import detect_efficiency_outliers  # noqa: E402
-from backend.modules.imp_scoring import (  # noqa: E402
+from backend.modules.efficiency_metrics import calculate_efficiency_metrics_dataframe
+from backend.modules.efficiency_planes import calculate_plane_metrics_dataframe
+from backend.modules.outlier_detection import detect_efficiency_outliers
+from backend.modules.imp_scoring import (
     calculate_imp_score,
     add_imp_score_interpretation,
     create_detailed_pdb_summary,
 )
-from backend.modules.imp_classifier import classify_imp_candidates  # noqa: E402
-from backend.modules.assay_interference_filter import get_interference_flags_from_smiles, InterferenceFlags  # noqa: E402
-from backend.modules.chemical_classifier import get_complete_classification  # noqa: E402
+from backend.modules.imp_classifier import classify_imp_candidates
+from backend.modules.assay_interference_filter import get_interference_flags_from_smiles, InterferenceFlags
+from backend.modules.chemical_classifier import get_complete_classification
 
 logger = logging.getLogger(__name__)
 
@@ -287,9 +278,9 @@ class CompoundService:
                         logger.error(f"Azure upload failed permanently for job {job_id}: {azure_error}")
                         _metrics.increment('azure_upload_failed_permanently')
                         # Transition to SYNC_PENDING
-                        from backend.services.job_service import _db_write_lock
+                        from backend.repositories import job_repo, _db_write_lock
                         with _db_write_lock:
-                            job = db.query(Job).filter(Job.id == job_id).first()
+                            job = job_repo.get_by_job_id(db, job_id)
                             if job and job.status == JobStatus.COMPLETED:
                                 job.status = JobStatus.SYNC_PENDING
                                 job.error_message = f"Azure upload failed: {azure_error}"

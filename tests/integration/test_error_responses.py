@@ -7,7 +7,6 @@ across 404, 422, and 500 status codes, and that error_code values
 match the STATUS_TO_ERROR_CODE mapping.
 """
 import re
-import pytest
 from backend.core.exceptions import ErrorCode
 
 

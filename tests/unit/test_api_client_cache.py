@@ -11,11 +11,6 @@ import time
 import pytest
 import threading
 
-# Import the modules we're testing
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
 from backend.modules.api_client import cache_non_none, RateLimiter
 
 
@@ -78,7 +73,7 @@ class TestCacheNonNone:
         """Test that cached entries expire after TTL (fix for 3.9)."""
         call_count = [0]
 
-        @cache_non_none(maxsize=10, ttl_seconds=0.5)  # 0.5 second TTL
+        @cache_non_none(maxsize=10, ttl_seconds=0.1)  # 0.1 second TTL
         def fetch_data(key):
             call_count[0] += 1
             return f"data_{key}"
@@ -94,7 +89,7 @@ class TestCacheNonNone:
         assert call_count[0] == 1
 
         # Wait for TTL to expire
-        time.sleep(0.6)
+        time.sleep(0.15)
 
         # Call after TTL - should execute function again
         result3 = fetch_data("test")

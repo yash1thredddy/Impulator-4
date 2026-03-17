@@ -10,7 +10,6 @@ Features:
 - 2 workers max: only 2 jobs in executor, rest stay in SQLite
 - Recovery: handles stalled PROCESSING jobs on startup
 """
-import json
 import threading
 import time
 import logging
@@ -18,14 +17,14 @@ import uuid
 from datetime import datetime, timezone
 
 import structlog
-from sqlalchemy import text as _text
 from sqlalchemy.exc import OperationalError
 
 from backend.core.database import get_db_session
 from backend.core.executor import job_executor
 from backend.core.logging import request_id_var, session_id_var
-from backend.models.database import Job, JobStatus
-from backend.services.job_service import _db_write_lock
+from backend.models.database import JobStatus
+from backend.models.schemas import InputParams, ResultSummary
+from backend.repositories import job_repo, _db_write_lock
 
 logger = logging.getLogger(__name__)
 
@@ -108,11 +107,7 @@ class JobScheduler:
         # Check if any jobs are still pending/processing
         try:
             with get_db_session() as db:
-                active_count = (
-                    db.query(Job)
-                    .filter(Job.status.in_([JobStatus.PENDING, JobStatus.PROCESSING]))
-                    .count()
-                )
+                active_count = job_repo.get_pending_processing_count(db)
                 if active_count > 0:
                     return False
         except Exception as e:
@@ -143,11 +138,7 @@ class JobScheduler:
         # Double-check no active jobs
         try:
             with get_db_session() as db:
-                active = (
-                    db.query(Job)
-                    .filter(Job.status.in_([JobStatus.PENDING, JobStatus.PROCESSING]))
-                    .count()
-                )
+                active = job_repo.get_pending_processing_count(db)
                 if active > 0:
                     return  # Jobs active, skip maintenance
         except Exception:
@@ -186,12 +177,7 @@ class JobScheduler:
                 now = datetime.now(timezone.utc)
                 timeout_seconds = settings.JOB_TIMEOUT
 
-                processing_jobs = (
-                    db.query(Job)
-                    .filter(Job.status == JobStatus.PROCESSING)
-                    .filter(Job.started_at.isnot(None))
-                    .all()
-                )
+                processing_jobs = job_repo.get_stalled_processing_jobs(db, timeout_seconds)
 
                 for job in processing_jobs:
                     started = job.started_at
@@ -216,7 +202,7 @@ class JobScheduler:
 
         Jobs enter SYNC_PENDING when Azure upload fails after all retries.
         This method picks them up and retries the upload using the stored
-        result_path. On success → COMPLETED. On failure → stays SYNC_PENDING
+        result_path. On success -> COMPLETED. On failure -> stays SYNC_PENDING
         (retried on next poll cycle, up to 10 total attempts tracked by
         retry_count in result_summary).
         """
@@ -224,25 +210,22 @@ class JobScheduler:
 
         try:
             with get_db_session() as db:
-                sync_jobs = (
-                    db.query(Job)
-                    .filter(Job.status == JobStatus.SYNC_PENDING)
-                    .all()
-                )
+                sync_jobs = job_repo.get_sync_pending_jobs(db)
 
                 for job in sync_jobs:
                     # Parse retry count from result_summary
                     retry_count = 0
                     entry_id = None
-                    try:
-                        summary = json.loads(job.result_summary) if job.result_summary else {}
-                        retry_count = summary.get('sync_retry_count', 0)
-                        entry_id = summary.get('entry_id')
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+                    if job.result_summary:
+                        try:
+                            summary = ResultSummary.model_validate_json(job.result_summary)
+                            retry_count = summary.sync_retry_count
+                            entry_id = summary.entry_id
+                        except Exception:
+                            pass
 
                     if retry_count >= 10:
-                        # Max retries exceeded — mark as FAILED
+                        # Max retries exceeded -- mark as FAILED
                         with _db_write_lock:
                             db.refresh(job)
                             if job.status == JobStatus.SYNC_PENDING:
@@ -272,9 +255,11 @@ class JobScheduler:
                         else:
                             # Increment retry count
                             try:
-                                summary = json.loads(job.result_summary) if job.result_summary else {}
-                                summary['sync_retry_count'] = retry_count + 1
-                                job.result_summary = json.dumps(summary)
+                                summary_data = ResultSummary.model_validate_json(job.result_summary or "{}")
+                                # Use model_dump + update to preserve all fields
+                                dump = summary_data.model_dump()
+                                dump["sync_retry_count"] = retry_count + 1
+                                job.result_summary = ResultSummary(**dump).model_dump_json()
                                 db.commit()
                             except Exception:
                                 pass
@@ -289,8 +274,8 @@ class JobScheduler:
         Submits jobs until executor is full (2 workers).
         Returns True if any work was done.
 
-        Uses ORM with row-level locking (with_for_update) to prevent
-        race conditions where multiple threads claim the same job.
+        Uses round-robin fair scheduling via job_repo.claim_next_pending_job
+        to prevent one session from starving others.
         """
         work_done = False
 
@@ -299,29 +284,11 @@ class JobScheduler:
             try:
                 with get_db_session() as db:
                     # STAB-21: Round-robin fair scheduling by session_id
-                    # Interleaves jobs across sessions: one per session, oldest first.
-                    # User A (999 jobs) + User B (1 job) = A, B, A, A, A...
-                    fair_query = _text("""
-                        SELECT id FROM (
-                            SELECT id, ROW_NUMBER() OVER (
-                                PARTITION BY session_id
-                                ORDER BY created_at
-                            ) as rn
-                            FROM jobs
-                            WHERE UPPER(status) = 'PENDING'
-                        )
-                        ORDER BY rn, id
-                        LIMIT 1
-                    """)
-                    result = db.execute(fair_query).first()
-                    if not result:
+                    job = job_repo.claim_next_pending_job(db)
+                    if not job:
                         break  # No more pending jobs
 
-                    job = db.query(Job).filter(Job.id == result[0]).first()
-                    logger.debug(f"Fair scheduling: selected job {result[0]} (round-robin)")
-
-                    if not job:
-                        break  # Job disappeared between queries (race)
+                    logger.debug(f"Fair scheduling: selected job {job.id} (round-robin)")
 
                     # Claim the job under write lock to prevent cancel-vs-claim race
                     with _db_write_lock:
@@ -336,11 +303,11 @@ class JobScheduler:
                         job.current_step = "Starting..."
                         db.commit()
 
-                    # Parse input params with validation
+                    # Parse input params with typed model
                     job_id = job.id
                     try:
-                        params = json.loads(job.input_params) if job.input_params else {}
-                    except json.JSONDecodeError as e:
+                        params = InputParams.model_validate_json(job.input_params or "{}")
+                    except Exception as e:
                         logger.error(f"Job {job_id} has malformed input_params: {e}")
                         job.status = JobStatus.FAILED
                         job.error_message = "Invalid input parameters (malformed JSON)"
@@ -349,8 +316,8 @@ class JobScheduler:
                         continue
 
                     # Validate required parameters
-                    compound_name = params.get('compound_name')
-                    smiles = params.get('smiles')
+                    compound_name = params.compound_name
+                    smiles = params.smiles
                     if not compound_name or not smiles:
                         logger.error(f"Job {job_id} missing required params: compound_name={compound_name}, smiles={bool(smiles)}")
                         job.status = JobStatus.FAILED
@@ -378,9 +345,9 @@ class JobScheduler:
                         process_compound_job,
                         compound_name=compound_name,
                         smiles=smiles,
-                        similarity_threshold=params.get('similarity_threshold', 90),
-                        activity_types=params.get('activity_types', []),
-                        author_name=params.get('author_name'),
+                        similarity_threshold=params.threshold or 90,
+                        activity_types=params.activity_types or [],
+                        author_name=getattr(params, 'author_name', None),
                     )
                     logger.info(f"Scheduler claimed and submitted job {job_id}")
                     work_done = True
@@ -389,7 +356,7 @@ class JobScheduler:
                     logger.error(f"Failed to submit job {job_id} to executor: {submit_error}")
                     try:
                         with get_db_session() as db_retry:
-                            job_to_revert = db_retry.query(Job).filter(Job.id == job_id).first()
+                            job_to_revert = job_repo.get_by_job_id(db_retry, job_id)
                             if job_to_revert:
                                 job_to_revert.status = JobStatus.PENDING
                                 job_to_revert.started_at = None

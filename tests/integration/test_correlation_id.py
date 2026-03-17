@@ -8,7 +8,6 @@ Validates that:
 - Each request gets a unique ID (server-generated, client value ignored)
 """
 import re
-import pytest
 
 
 UUID_PATTERN = re.compile(

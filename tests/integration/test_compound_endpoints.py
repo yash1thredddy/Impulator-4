@@ -10,8 +10,6 @@ Tests:
 import uuid
 from datetime import datetime, timezone
 
-import pytest
-from unittest.mock import patch
 from sqlalchemy.orm import sessionmaker
 
 

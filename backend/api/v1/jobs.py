@@ -58,6 +58,8 @@ from backend.models.schemas import (
 from backend.services.job_service import job_service, generate_inchikey
 from backend.modules.api_client import probe_all_thresholds
 from backend.models.database import Compound, DeletedCompound, Job
+from backend.models.schemas import InputParams
+from backend.repositories import job_repo, compound_repo
 from backend.core.azure_sync import delete_result_from_azure_by_entry_id
 from backend.core.audit import (
     log_rate_limit_exceeded,
@@ -165,11 +167,7 @@ def get_next_version_name(db: Session, base_name: str) -> str:
         true_base = base_name.strip()
 
     # Query all compound names that start with the base name
-    existing_names = db.query(Compound.compound_name).filter(
-        func.lower(func.trim(Compound.compound_name)).like(f"{true_base.lower()}%")
-    ).all()
-
-    existing_names = [name[0] for name in existing_names]
+    existing_names = compound_repo.find_names_by_prefix(db, true_base)
 
     # Find highest existing version number
     max_version = 1  # Start at 1 (original has no suffix, v2 is first duplicate)
@@ -236,14 +234,10 @@ def get_next_version_names_bulk(db: Session, compound_names: List[str]) -> Dict[
     if not name_to_base:
         return {}
 
-    # Build OR conditions for all bases (single query), case-insensitive
-    like_conditions = [
-        func.lower(func.trim(Compound.compound_name)).like(f"{base_norm}%")
-        for base_norm in normalized_base_to_sample.keys()
-    ]
-
-    all_existing = db.query(Compound.compound_name).filter(or_(*like_conditions)).all()
-    existing_names = {row[0] for row in all_existing if row[0]}
+    # Fetch all matching names using repo calls per prefix
+    existing_names: set = set()
+    for base_norm in normalized_base_to_sample.keys():
+        existing_names.update(compound_repo.find_names_by_prefix(db, base_norm))
 
     # Compute max version for each normalized base name
     base_max_versions = {base_norm: 1 for base_norm in normalized_base_to_sample.keys()}
@@ -369,8 +363,6 @@ router = APIRouter(prefix="/jobs", tags=["Jobs"])
 
 def _job_to_response(job) -> JobResponse:
     """Convert Job model to JobResponse, extracting compound info from input_params."""
-    import json
-
     data = {
         "id": job.id,
         "job_type": job.job_type,
@@ -386,13 +378,13 @@ def _job_to_response(job) -> JobResponse:
         "batch_id": job.batch_id,
     }
 
-    # Extract compound_name and smiles from input_params
+    # Extract compound_name and smiles from input_params using typed model
     if job.input_params:
         try:
-            params = json.loads(job.input_params)
-            data["compound_name"] = params.get("compound_name", "Unknown")
-            data["smiles"] = params.get("smiles", "")
-        except (json.JSONDecodeError, TypeError):
+            params = InputParams.model_validate_json(job.input_params)
+            data["compound_name"] = params.compound_name or "Unknown"
+            data["smiles"] = params.smiles or ""
+        except Exception:
             data["compound_name"] = "Unknown"
             data["smiles"] = ""
 
@@ -413,7 +405,7 @@ def _verify_job_ownership(db: Session, job_id: str, session_id: str) -> Job:
     Raises:
         HTTPException: 404 if job not found, 403 if unauthorized
     """
-    job = db.query(Job).filter(Job.id == job_id).first()
+    job = job_repo.get_by_job_id(db, job_id)
 
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -512,9 +504,7 @@ def _check_single_availability(
     inchikey = generate_inchikey(smiles)
     structure_key = _inchikey_structure_key(inchikey)
     if structure_key:
-        existing = db.query(Compound).filter(
-            Compound.inchikey.like(f"{structure_key}%")
-        ).all()
+        existing = compound_repo.find_by_inchikey_like(db, structure_key)
         for comp in existing:
             existing_compounds.append(
                 _build_existing_at_threshold(comp, similarity_threshold, submitted_at)
@@ -559,7 +549,7 @@ def check_availability(
             db=db,
         )
         return CheckAvailabilityResponse(result=result)
-    except Exception as e:
+    except Exception:
         logger.exception("Availability check failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -600,12 +590,12 @@ def check_availability_batch(
                 if sk:
                     structure_keys.add(sk)
 
-    # Single DB query for all existing compounds
+    # Single DB query for all existing compounds by structure key
     existing_by_structure: Dict[str, List[Compound]] = {}
     if structure_keys:
-        from sqlalchemy import or_
-        filters = [Compound.inchikey.like(f"{sk}%") for sk in structure_keys]
-        all_existing = db.query(Compound).filter(or_(*filters)).all()
+        all_existing = []
+        for sk in structure_keys:
+            all_existing.extend(compound_repo.find_by_inchikey_like(db, sk))
         for comp in all_existing:
             sk = _inchikey_structure_key(comp.inchikey)
             if sk:
@@ -685,7 +675,7 @@ def check_availability_batch(
             unavailable_count=unavailable_count,
             no_data_count=no_data_count,
         )
-    except Exception as e:
+    except Exception:
         logger.exception("Batch availability check failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -735,10 +725,7 @@ async def create_job(
     if idempotency_key:
         # Truncate to max 64 chars for safety
         idempotency_key = idempotency_key[:64]
-        existing_job = db.query(Job).filter(
-            Job.session_id == session_id,
-            Job.idempotency_key == idempotency_key
-        ).first()
+        existing_job = job_repo.find_by_idempotency_key(db, session_id, idempotency_key)
         if existing_job:
             logger.info(f"Idempotent request - returning existing job {existing_job.id}")
             return _job_to_response(existing_job)
@@ -812,9 +799,7 @@ async def create_job(
         if not inchikey:
             return None
 
-        existing_compounds = db.query(Compound).filter(
-            Compound.inchikey == inchikey
-        ).all()
+        existing_compounds = compound_repo.find_by_inchikey(db, inchikey)
 
         if not existing_compounds:
             return None
@@ -922,7 +907,7 @@ async def resolve_duplicate(
         inherit_children_from = None
         replace_entry_id = None
         if request.existing_entry_id:
-            existing = db.query(Compound).filter(Compound.entry_id == request.existing_entry_id).first()
+            existing = compound_repo.get_by_entry_id(db, request.existing_entry_id)
             if existing:
                 old_name = existing.compound_name
                 old_entry_id = existing.entry_id
@@ -930,9 +915,7 @@ async def resolve_duplicate(
 
                 # Only reparent children if the replaced compound is canonical (not a duplicate itself)
                 if not existing.is_duplicate:
-                    children = db.query(Compound).filter(
-                        Compound.duplicate_of == old_entry_id
-                    ).all()
+                    children = compound_repo.find_children(db, old_entry_id)
                     if children:
                         inherit_children_from = old_entry_id
                         logger.info(
@@ -991,9 +974,7 @@ async def resolve_duplicate(
                 detail="existing_entry_id is required for duplicate action.",
             )
 
-        existing = db.query(Compound).filter(
-            Compound.entry_id == request.existing_entry_id
-        ).first()
+        existing = compound_repo.get_by_entry_id(db, request.existing_entry_id)
         if not existing:
             raise HTTPException(
                 status_code=422,
@@ -1157,9 +1138,7 @@ async def check_duplicates(
 
             if inchikey:
                 # Check if any existing compound has this InChIKey
-                existing_candidates = db.query(Compound).filter(
-                    Compound.inchikey == inchikey
-                ).all()
+                existing_candidates = compound_repo.find_by_inchikey(db, inchikey)
 
                 if existing_candidates:
                     # Prefer same-name candidates when available for better UX parity with single mode.
@@ -1415,7 +1394,7 @@ async def create_batch_job(
                 compound_inchikey = generate_inchikey(compound.smiles) if compound.smiles else None
                 if compound_inchikey:
                     # Prefer canonical (non-duplicate) compound over arbitrary match
-                    candidates = db.query(Compound).filter(Compound.inchikey == compound_inchikey).all()
+                    candidates = compound_repo.find_by_inchikey(db, compound_inchikey)
                     existing = next(
                         (c for c in candidates if not c.is_duplicate),
                         candidates[0] if candidates else None
@@ -1425,9 +1404,7 @@ async def create_batch_job(
 
                     # Check if this main compound has children that need to be inherited
                     if not existing.is_duplicate:
-                        children = db.query(Compound).filter(
-                            Compound.duplicate_of == existing.entry_id
-                        ).all()
+                        children = compound_repo.find_children(db, existing.entry_id)
                         if children:
                             inherit_children_from = existing.entry_id
 
@@ -1451,7 +1428,8 @@ async def create_batch_job(
                 dup_inchikey = generate_inchikey(compound.smiles) if compound.smiles else None
                 dup_existing = None
                 if dup_inchikey:
-                    dup_existing = db.query(Compound).filter(Compound.inchikey == dup_inchikey).first()
+                    dup_matches = compound_repo.find_by_inchikey(db, dup_inchikey)
+                    dup_existing = dup_matches[0] if dup_matches else None
 
                 # Fallback when InChIKey lookup fails/unavailable: try exact name match
                 if not dup_existing:
@@ -1460,14 +1438,8 @@ async def create_batch_job(
                         or compound_name
                     )
                     parent_lookup_name = (parent_lookup_name or "").strip()
-                    name_candidates = (
-                        db.query(Compound)
-                        .filter(
-                            func.lower(func.trim(Compound.compound_name))
-                            == parent_lookup_name.lower()
-                        )
-                        .order_by(Compound.processed_at.desc())
-                        .all()
+                    name_candidates = compound_repo.find_by_name_case_insensitive(
+                        db, parent_lookup_name
                     )
                     dup_existing = next(
                         (c for c in name_candidates if not c.is_duplicate),
@@ -1626,7 +1598,8 @@ async def get_batch_summary(
     Returns overall progress and status counts.
     """
     # Verify ownership by checking first job in batch
-    first_job = db.query(Job).filter(Job.batch_id == batch_id).first()
+    batch_jobs = job_repo.get_batch_jobs(db, batch_id)
+    first_job = batch_jobs[0] if batch_jobs else None
 
     if not first_job:
         raise HTTPException(status_code=404, detail="Batch not found")
@@ -1663,10 +1636,8 @@ async def cancel_batch(
     Requires ownership of the batch (same session that created it).
     Already completed or failed jobs are not affected.
     """
-    from backend.models.database import Job
-
     # Verify the batch exists and belongs to this session
-    batch_jobs = db.query(Job).filter(Job.batch_id == batch_id).all()
+    batch_jobs = job_repo.get_batch_jobs(db, batch_id)
 
     if not batch_jobs:
         raise HTTPException(status_code=404, detail="Batch not found")
@@ -1763,8 +1734,6 @@ async def cancel_job(
     Requires ownership of the job (same session that created it).
     Note: Jobs already running may not be cancelled immediately.
     """
-    import json
-
     # Verify ownership
     job = _verify_job_ownership(db, job_id, session_id)
 
@@ -1778,9 +1747,9 @@ async def cancel_job(
     compound_name = None
     if job.input_params:
         try:
-            params = json.loads(job.input_params)
-            compound_name = params.get("compound_name")
-        except (json.JSONDecodeError, TypeError):
+            params = InputParams.model_validate_json(job.input_params)
+            compound_name = params.compound_name
+        except Exception:
             pass
 
     # Try to cancel in executor
@@ -1818,8 +1787,6 @@ async def delete_job(
     Requires ownership of the job (same session that created it).
     Only completed, failed, or cancelled jobs can be deleted.
     """
-    import json
-
     # Verify ownership
     job = _verify_job_ownership(db, job_id, session_id)
 
@@ -1833,9 +1800,9 @@ async def delete_job(
     compound_name = None
     if job.input_params:
         try:
-            params = json.loads(job.input_params)
-            compound_name = params.get("compound_name")
-        except (json.JSONDecodeError, TypeError):
+            params = InputParams.model_validate_json(job.input_params)
+            compound_name = params.compound_name
+        except Exception:
             pass
 
     # Clean up result files
@@ -1844,15 +1811,15 @@ async def delete_job(
         entry_id = None
         if job.result_summary:
             try:
-                result_data = json.loads(job.result_summary)
-                entry_id = result_data.get("entry_id")
-            except (json.JSONDecodeError, TypeError):
+                summary = ResultSummary.model_validate_json(job.result_summary)
+                entry_id = summary.entry_id
+            except Exception:
                 pass
 
         # Find compound by entry_id (precise) or compound_name (fallback)
         compound_entry = None
         if entry_id:
-            compound_entry = db.query(Compound).filter(Compound.entry_id == entry_id).first()
+            compound_entry = compound_repo.get_by_entry_id(db, entry_id)
         if not compound_entry:
             logger.warning(
                 f"No compound found by entry_id for job {job_id} "

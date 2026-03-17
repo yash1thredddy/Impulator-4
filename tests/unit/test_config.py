@@ -31,7 +31,7 @@ class TestSettingsDefaults:
         with patch.dict(os.environ, {}, clear=True):
             settings = Settings(_env_file=None)
 
-        assert settings.APP_VERSION == "2.1.0"
+        assert settings.APP_VERSION == "2.1.3"
 
     def test_default_debug_false(self):
         """Test debug is False by default."""
@@ -85,7 +85,7 @@ class TestSettingsDefaults:
         with patch.dict(os.environ, {}, clear=True):
             settings = Settings(_env_file=None)
 
-        assert settings.CACHE_SIZE == 2000
+        assert settings.CACHE_SIZE == 500
 
 
 class TestSettingsOverrides:

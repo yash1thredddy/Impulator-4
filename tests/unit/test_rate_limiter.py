@@ -117,8 +117,8 @@ class TestRateLimiter:
         """Test that old timestamps are cleaned up."""
         from backend.api.v1.jobs import RateLimiter
 
-        # Use 1 second window for fast testing
-        limiter = RateLimiter(window_seconds=1)
+        # Use 0.2 second window for fast testing
+        limiter = RateLimiter(window_seconds=0.2)
         session_id = "test-session"
 
         # Make 5 requests (max out limit)
@@ -130,7 +130,7 @@ class TestRateLimiter:
         assert allowed is False
 
         # Wait for window to expire
-        time.sleep(1.1)
+        time.sleep(0.25)
 
         # Should now be allowed again
         allowed, remaining = limiter.check_rate_limit(session_id, limit=5)

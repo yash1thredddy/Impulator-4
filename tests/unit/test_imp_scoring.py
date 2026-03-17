@@ -10,10 +10,6 @@ import pytest
 import numpy as np
 import pandas as pd
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
 from backend.modules.imp_scoring import (
     calculate_efficiency_outlier_score,
     calculate_angle_score,

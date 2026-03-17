@@ -11,7 +11,6 @@ import logging
 import zipfile
 
 import pandas as pd
-import pytest
 from unittest.mock import patch
 
 

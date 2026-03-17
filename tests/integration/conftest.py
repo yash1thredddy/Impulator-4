@@ -2,7 +2,7 @@
 Shared fixtures for integration tests.
 
 Provides:
-- test_engine: In-memory SQLite with all tables created
+- test_engine: In-memory SQLite with all tables created (module-scoped for speed)
 - mock_azure: Patches Azure sync functions to no-ops
 - client: FastAPI TestClient wired to the test database
 """
@@ -14,9 +14,9 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="module")
 def test_engine():
-    """Create a test database engine with all tables using shared in-memory DB."""
+    """Create a test database engine once per module (faster than per-function)."""
     from backend.core.database import Base
     from backend.models.database import Job, Compound, DeletedCompound  # noqa: F401
 
@@ -28,6 +28,17 @@ def test_engine():
     Base.metadata.create_all(bind=engine)
     yield engine
     Base.metadata.drop_all(bind=engine)
+
+
+@pytest.fixture(autouse=True)
+def _clean_tables(test_engine):
+    """Truncate all tables after each test to isolate state."""
+    yield
+    from backend.core.database import Base
+    with test_engine.connect() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            conn.execute(table.delete())
+        conn.commit()
 
 
 @pytest.fixture

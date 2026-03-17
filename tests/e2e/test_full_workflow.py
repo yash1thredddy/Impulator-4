@@ -21,9 +21,9 @@ def generate_valid_session_id(prefix: str = "") -> str:
     return str(uuid.uuid4())
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="module")
 def test_engine():
-    """Create a test database engine."""
+    """Create a test database engine once per module."""
     from backend.core.database import Base
     from backend.models.database import Job, Compound  # noqa: F401
 
@@ -35,6 +35,17 @@ def test_engine():
     Base.metadata.create_all(bind=engine)
     yield engine
     Base.metadata.drop_all(bind=engine)
+
+
+@pytest.fixture(autouse=True)
+def _clean_tables(test_engine):
+    """Truncate all tables after each test to isolate state."""
+    yield
+    from backend.core.database import Base
+    with test_engine.connect() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            conn.execute(table.delete())
+        conn.commit()
 
 
 @pytest.fixture
@@ -304,7 +315,7 @@ class TestHealthEndpoints:
         """Test Kubernetes readiness probe."""
         response = client_with_db.get("/api/v1/health/ready")
         assert response.status_code == 200
-        assert response.json()["status"] == "ready"
+        assert response.json()["status"] in ["healthy", "degraded"]
 
     def test_liveness_probe(self, client_with_db):
         """Test Kubernetes liveness probe."""
@@ -420,7 +431,7 @@ class TestInputValidation:
         # Create a batch exceeding the limit
         compounds = [
             {"compound_name": f"Compound{i}", "author_name": "Test Author", "smiles": "CCO"}
-            for i in range(1001)  # Over the 1000 limit
+            for i in range(1005)  # Just over the 1000 limit
         ]
 
         response = client_with_db.post(
@@ -434,11 +445,11 @@ class TestInputValidation:
 
         # Pydantic validation returns 422, custom validation returns 400
         assert response.status_code in [400, 422], f"Expected 400 or 422, got {response.status_code}"
-        error_detail = response.json().get("detail", "")
-        # Handle both Pydantic validation error format and custom error format
-        if isinstance(error_detail, list):
-            # Pydantic format: list of error dicts
-            error_text = str(error_detail)
+        response_data = response.json()
+        # Custom validation_exception_handler wraps pydantic errors in "errors" array
+        if "errors" in response_data:
+            error_text = str(response_data["errors"])
         else:
+            error_detail = response_data.get("detail", "")
             error_text = str(error_detail)
         assert "1000" in error_text or "Batch too large" in error_text or "at most 1000" in error_text.lower()

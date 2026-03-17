@@ -183,6 +183,19 @@ def cache_non_none(maxsize: int = CACHE_SIZE, ttl_seconds: int = 3600):
 # Thread pool for timeout wrapper (reused across calls)
 # Needs enough workers to handle concurrent compound jobs (2 workers) × multiple API calls each
 _timeout_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="chembl_timeout")
+_timeout_executor_lock = threading.Lock()
+
+
+def _get_timeout_executor():
+    """Get the timeout executor, recreating if previously shut down."""
+    global _timeout_executor
+    if _timeout_executor._shutdown:
+        with _timeout_executor_lock:
+            if _timeout_executor._shutdown:
+                _timeout_executor = ThreadPoolExecutor(
+                    max_workers=6, thread_name_prefix="chembl_timeout"
+                )
+    return _timeout_executor
 
 
 def with_timeout(timeout_seconds: int = CHEMBL_API_TIMEOUT):
@@ -198,7 +211,7 @@ def with_timeout(timeout_seconds: int = CHEMBL_API_TIMEOUT):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            future = _timeout_executor.submit(func, *args, **kwargs)
+            future = _get_timeout_executor().submit(func, *args, **kwargs)
             try:
                 return future.result(timeout=timeout_seconds)
             except FuturesTimeoutError:
@@ -958,7 +971,7 @@ def get_molecule_data(chembl_id: str) -> Optional[Dict]:
     client = _get_chembl_client()
     if 'molecule' in client:
         try:
-            future = _timeout_executor.submit(_fetch_molecule_data_with_timeout, chembl_id)
+            future = _get_timeout_executor().submit(_fetch_molecule_data_with_timeout, chembl_id)
             result = future.result(timeout=CHEMBL_API_TIMEOUT)
             if result is not None:
                 return result
@@ -1039,7 +1052,7 @@ def get_target_name(target_chembl_id: str) -> Optional[str]:
     client = _get_chembl_client()
     if 'target' in client:
         try:
-            future = _timeout_executor.submit(_fetch_target_name_with_timeout, target_chembl_id)
+            future = _get_timeout_executor().submit(_fetch_target_name_with_timeout, target_chembl_id)
             result = future.result(timeout=CHEMBL_API_TIMEOUT)
             if result is not None:
                 return result
@@ -1138,7 +1151,7 @@ def get_drug_indications(chembl_id: str) -> tuple:
         return ()
 
     try:
-        future = _timeout_executor.submit(_fetch_drug_indications_with_timeout, chembl_id)
+        future = _get_timeout_executor().submit(_fetch_drug_indications_with_timeout, chembl_id)
         return future.result(timeout=CHEMBL_API_TIMEOUT)
     except FuturesTimeoutError:
         logger.error(f"Timeout fetching drug indications for {chembl_id}")
@@ -1295,7 +1308,7 @@ def get_chembl_ids(smiles: str, similarity_threshold: int = 90, max_retries: int
         for attempt in range(max_retries):
             try:
                 # Use ThreadPoolExecutor for timeout
-                future = _timeout_executor.submit(
+                future = _get_timeout_executor().submit(
                     _similarity_search_with_timeout, smiles, similarity_threshold
                 )
                 result = future.result(timeout=SIMILARITY_SEARCH_TIMEOUT)
@@ -1549,7 +1562,7 @@ def fetch_batch_molecule_data(
     for i, chembl_id in enumerate(chembl_ids):
         try:
             # Use timeout executor for individual fetches in fallback
-            future = _timeout_executor.submit(get_molecule_data, chembl_id)
+            future = _get_timeout_executor().submit(get_molecule_data, chembl_id)
             mol_data = future.result(timeout=CHEMBL_API_TIMEOUT)
             if mol_data:
                 result[chembl_id] = mol_data
@@ -1668,7 +1681,7 @@ def fetch_batch_target_names(
     for i, target_id in enumerate(unique_ids):
         try:
             # Use timeout executor for individual fetches in fallback
-            future = _timeout_executor.submit(get_target_name, target_id)
+            future = _get_timeout_executor().submit(get_target_name, target_id)
             name = future.result(timeout=CHEMBL_API_TIMEOUT)
             if name:
                 result[target_id] = name
@@ -1969,8 +1982,9 @@ def shutdown_api_client():
     """
     global _timeout_executor, _thread_local
     try:
-        _timeout_executor.shutdown(wait=False, cancel_futures=True)
-        logger.info("ChEMBL timeout executor shut down")
+        if not _timeout_executor._shutdown:
+            _timeout_executor.shutdown(wait=False, cancel_futures=True)
+            logger.info("ChEMBL timeout executor shut down")
     except Exception as e:
         logger.warning(f"Error during API client shutdown: {e}")
     # Reset thread-local sessions

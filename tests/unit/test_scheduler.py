@@ -265,6 +265,9 @@ class TestRecoverStalledJobs:
         mock_pending_filter = MagicMock()
         mock_pending_filter.count.return_value = 0  # No pending jobs
 
+        mock_sync_pending_filter = MagicMock()
+        mock_sync_pending_filter.all.return_value = []  # No SYNC_PENDING jobs
+
         call_count = [0]
 
         def query_side_effect(model):
@@ -275,8 +278,10 @@ class TestRecoverStalledJobs:
                 call_count[0] += 1
                 if call_count[0] == 1:
                     return mock_stalled_filter
-                else:
+                elif call_count[0] == 2:
                     return mock_pending_filter
+                else:
+                    return mock_sync_pending_filter
             query.filter = filter_side_effect
             return query
 
@@ -288,7 +293,7 @@ class TestRecoverStalledJobs:
         from backend.main import _recover_stalled_jobs
         _recover_stalled_jobs()
 
-        # Scheduler should NOT be triggered (no stalled, no pending)
+        # Scheduler should NOT be triggered (no stalled, no pending, no sync_pending)
         mock_scheduler.trigger.assert_not_called()
 
     def test_recover_stalled_jobs_pending_only(self, mock_db_session, mock_scheduler):
@@ -302,6 +307,9 @@ class TestRecoverStalledJobs:
         mock_pending_filter = MagicMock()
         mock_pending_filter.count.return_value = 5  # 5 pending jobs
 
+        mock_sync_pending_filter = MagicMock()
+        mock_sync_pending_filter.all.return_value = []  # No SYNC_PENDING jobs
+
         call_count = [0]
 
         def query_side_effect(model):
@@ -312,8 +320,10 @@ class TestRecoverStalledJobs:
                 call_count[0] += 1
                 if call_count[0] == 1:
                     return mock_stalled_filter
-                else:
+                elif call_count[0] == 2:
                     return mock_pending_filter
+                else:
+                    return mock_sync_pending_filter
             query.filter = filter_side_effect
             return query
 

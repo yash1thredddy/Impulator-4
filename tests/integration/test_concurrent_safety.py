@@ -266,7 +266,7 @@ class TestDatabaseConcurrencySafety:
 
         # Verify write lock exists
         assert _db_write_lock is not None
-        assert isinstance(_db_write_lock, type(threading.Lock()))
+        assert isinstance(_db_write_lock, (type(threading.Lock()), type(threading.RLock())))
 
         # Test acquiring and releasing lock
         acquired = _db_write_lock.acquire(blocking=False)

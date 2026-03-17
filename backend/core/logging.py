@@ -5,7 +5,7 @@ Provides:
 - request_id_var / session_id_var: ContextVar declarations for correlation IDs
 - configure_logging(): structlog + stdlib dictConfig setup
 - CorrelationIdMiddleware: FastAPI middleware for request_id injection
-- HealthProbeFilter: Downgrades health probe logs to DEBUG level
+- PollingNoiseFilter: Downgrades high-frequency polling logs to DEBUG level
 """
 import contextvars
 import logging
@@ -33,21 +33,28 @@ session_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
 # ---------------------------------------------------------------------------
 
 
-class HealthProbeFilter(logging.Filter):
-    """Downgrade health probe access logs to DEBUG level.
+class PollingNoiseFilter(logging.Filter):
+    """Downgrade high-frequency polling requests to DEBUG level.
 
-    Prevents /health/live and /health/ready from flooding INFO logs
-    while still keeping them visible at DEBUG level.
+    The Streamlit frontend polls these endpoints every 1s. Without this
+    filter they flood the console and obscure meaningful log entries.
     """
 
-    PROBE_PATHS = {"/api/v1/health/live", "/api/v1/health/ready"}
+    POLL_PATHS = {
+        "/api/v1/health/live",
+        "/api/v1/health/ready",
+        "/api/v1/health",
+        "/api/v1/jobs/active",
+        "/api/v1/compounds",
+    }
 
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
-        for path in self.PROBE_PATHS:
+        for path in self.POLL_PATHS:
             if path in msg:
                 record.levelno = logging.DEBUG
                 record.levelname = "DEBUG"
+                break
         return True
 
 
@@ -118,8 +125,8 @@ def configure_logging() -> None:
                 },
             },
             "filters": {
-                "health_probe": {
-                    "()": HealthProbeFilter,
+                "polling_noise": {
+                    "()": PollingNoiseFilter,
                 },
             },
             "handlers": {
@@ -159,7 +166,11 @@ def configure_logging() -> None:
                     "handlers": ["console", "file"],
                     "level": "INFO",
                     "propagate": False,
-                    "filters": ["health_probe"],
+                    "filters": ["polling_noise"],
+                },
+                "azure": {
+                    "level": "WARNING",
+                    "propagate": False,
                 },
             },
         }

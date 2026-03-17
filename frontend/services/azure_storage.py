@@ -563,22 +563,8 @@ def delete_compound(entry_id: str) -> bool:
 # Use these when the Compound record has entry_id and storage_path set.
 
 
-def get_storage_path_from_entry_id(entry_id: str) -> str:
-    """
-    Generate storage path from entry_id (UUID).
-
-    Args:
-        entry_id: UUID string (e.g., "3a4f8c9e-1b2d-4e5f-9a1c-2d3e4f5a6b7c")
-
-    Returns:
-        Path like "results/3a/3a4f8c9e-1b2d-4e5f-9a1c-2d3e4f5a6b7c.zip"
-    """
-    if not entry_id:
-        raise ValueError("entry_id cannot be empty")
-
-    entry_id = entry_id.lower()
-    prefix = entry_id[:2]
-    return f"results/{prefix}/{entry_id}.zip"
+# Re-export from canonical location for backward compatibility (ARCH-19)
+from backend.core.storage_paths import get_storage_path_from_entry_id  # noqa: F401, E402
 
 
 def _get_local_cache_path_by_entry_id(entry_id: str) -> Path:

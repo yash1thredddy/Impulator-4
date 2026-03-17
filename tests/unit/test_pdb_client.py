@@ -134,11 +134,10 @@ class TestGetStructureResolution:
             }
         }
 
-        with patch.object(
-            __import__('backend.modules.pdb_client', fromlist=['session']).session,
-            'get',
-            return_value=mock_response
-        ):
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_response
+
+        with patch('backend.modules.pdb_client._get_thread_session', return_value=mock_session):
             get_structure_resolution.cache_clear()
             result = get_structure_resolution('4HHB')
 
@@ -154,11 +153,10 @@ class TestGetStructureResolution:
             'rcsb_entry_info': {}
         }
 
-        with patch.object(
-            __import__('backend.modules.pdb_client', fromlist=['session']).session,
-            'get',
-            return_value=mock_response
-        ):
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_response
+
+        with patch('backend.modules.pdb_client._get_thread_session', return_value=mock_session):
             get_structure_resolution.cache_clear()
             result = get_structure_resolution('XXXX')
 
@@ -169,11 +167,10 @@ class TestGetStructureResolution:
         from backend.modules.pdb_client import get_structure_resolution
         import requests
 
-        with patch.object(
-            __import__('backend.modules.pdb_client', fromlist=['session']).session,
-            'get',
-            side_effect=requests.exceptions.RequestException("Network error")
-        ):
+        mock_session = MagicMock()
+        mock_session.get.side_effect = requests.exceptions.RequestException("Network error")
+
+        with patch('backend.modules.pdb_client._get_thread_session', return_value=mock_session):
             get_structure_resolution.cache_clear()
             result = get_structure_resolution('4HHB')
 
@@ -423,11 +420,10 @@ class TestGetStructureDetails:
             }
         }
 
-        with patch.object(
-            __import__('backend.modules.pdb_client', fromlist=['session']).session,
-            'get',
-            side_effect=[mock_entry_response, mock_entity_response]
-        ):
+        mock_session = MagicMock()
+        mock_session.get.side_effect = [mock_entry_response, mock_entity_response]
+
+        with patch('backend.modules.pdb_client._get_thread_session', return_value=mock_session):
             get_structure_details.cache_clear()
             result = get_structure_details('4HHB')
 
@@ -446,11 +442,10 @@ class TestGetStructureDetails:
         mock_response.status_code = 200
         mock_response.json.return_value = {}
 
-        with patch.object(
-            __import__('backend.modules.pdb_client', fromlist=['session']).session,
-            'get',
-            return_value=mock_response
-        ):
+        mock_session = MagicMock()
+        mock_session.get.return_value = mock_response
+
+        with patch('backend.modules.pdb_client._get_thread_session', return_value=mock_session):
             get_structure_details.cache_clear()
             result = get_structure_details('XXXX')
 

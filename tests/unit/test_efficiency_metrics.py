@@ -9,10 +9,6 @@ import pytest
 import numpy as np
 import pandas as pd
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
 from backend.modules.efficiency_metrics import (
     calculate_sei,
     calculate_bei,

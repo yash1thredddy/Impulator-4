@@ -13,10 +13,6 @@ Tests the complete IMP Score pipeline with weights (sum to 100%):
 import pytest
 import pandas as pd
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
 from backend.modules.imp_scoring import (
     calculate_imp_score_phase1,
     calculate_imp_score_phase2,

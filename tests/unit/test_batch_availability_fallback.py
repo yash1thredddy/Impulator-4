@@ -4,9 +4,7 @@ Tests for batch availability check SMILES/InChI/InChIKey fallback chain.
 Tests the resolution logic added to job_form.py that resolves
 non-SMILES inputs before the availability check API call.
 """
-import pytest
 import pandas as pd
-from unittest.mock import patch, MagicMock
 
 
 class TestBatchAvailabilityFallbackChain:

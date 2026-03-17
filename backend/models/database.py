@@ -2,7 +2,7 @@
 SQLAlchemy ORM models for Jobs and Compounds.
 """
 
-from sqlalchemy import Column, String, Integer, Float, Text, DateTime, Enum, Boolean, UniqueConstraint
+from sqlalchemy import Column, String, Integer, Float, Text, DateTime, Enum, Boolean, UniqueConstraint, ForeignKey
 from sqlalchemy.sql import func
 import enum
 
@@ -107,11 +107,12 @@ class Compound(Base):
 
     # InChIKey for duplicate detection (NOT unique - allows tagged duplicates)
     inchikey = Column(String(27), nullable=True, index=True)
+    inchikey_structure_key = Column(String(27), nullable=True, index=True)  # First two blocks of InChIKey (AAAA-BBBB)
     canonical_smiles = Column(Text, nullable=True)
 
     # Duplicate tracking
     is_duplicate = Column(Boolean, default=False, index=True)
-    duplicate_of = Column(String(36), nullable=True)  # Reference to original entry_id
+    duplicate_of = Column(String(36), ForeignKey("compounds.entry_id", ondelete="SET NULL"), nullable=True)
 
     # Summary statistics
     total_activities = Column(Integer, default=0)
@@ -147,6 +148,7 @@ class Compound(Base):
             "chembl_id": self.chembl_id,
             "smiles": self.smiles,
             "inchikey": self.inchikey,
+            "inchikey_structure_key": self.inchikey_structure_key,
             "canonical_smiles": self.canonical_smiles,
             "is_duplicate": self.is_duplicate,
             "duplicate_of": self.duplicate_of,

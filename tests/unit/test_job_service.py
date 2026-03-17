@@ -465,7 +465,6 @@ class TestCheckPendingCompounds:
     def test_normalizes_names_case_insensitive(self, service, db_session):
         """Name matching should be case-insensitive."""
         from backend.models.database import JobType
-        import json
 
         # Create a pending job with compound name "Aspirin"
         job = service.create_job(
