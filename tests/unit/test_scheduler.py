@@ -92,11 +92,11 @@ class TestJobSchedulerProcessPending:
 
         mock_executor.has_capacity.return_value = True
 
-        # Mock empty result
+        # Mock empty result — .first() returns None (no pending jobs)
         mock_session = MagicMock()
-        mock_result = MagicMock()
-        mock_result.fetchone.return_value = None
-        mock_session.execute.return_value = mock_result
+        mock_execute_result = MagicMock()
+        mock_execute_result.first.return_value = None
+        mock_session.execute.return_value = mock_execute_result
         mock_session.__enter__ = MagicMock(return_value=mock_session)
         mock_session.__exit__ = MagicMock(return_value=False)
         mock_db_session.return_value = mock_session
