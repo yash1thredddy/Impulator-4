@@ -49,6 +49,17 @@ def _clean_tables(test_engine):
         conn.commit()
 
 
+@pytest.fixture(autouse=True)
+def _clean_tables(test_engine):
+    """Truncate all tables after each test to isolate state."""
+    yield
+    from backend.core.database import Base
+    with test_engine.connect() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            conn.execute(table.delete())
+        conn.commit()
+
+
 @pytest.fixture
 def mock_azure():
     """Mock Azure storage for tests."""
