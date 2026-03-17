@@ -645,7 +645,7 @@ class ImpulatorAPIClient:
             response = self._request(
                 'GET',
                 '/api/v1/compounds',
-                params={'page': page, 'per_page': per_page}
+                params={'page': page, 'page_size': per_page}
             )
 
             if response.status_code == 200:
@@ -689,7 +689,7 @@ class ImpulatorAPIClient:
         try:
             params = {
                 'page': page,
-                'per_page': per_page,
+                'page_size': per_page,
                 'include_duplicates': include_duplicates,
             }
             if search:
@@ -746,9 +746,10 @@ class ImpulatorAPIClient:
             return {"success": False, "error": str(e)}
 
     def delete_compound(self, entry_id: str) -> JobResponse:
-        """Delete a compound by entry_id.
+        """Delete compound through backend API (primary) with Azure fallback.
 
-        Deletes from database, Azure storage, and local cache.
+        Primary path routes through backend for audit trail (ARCH-18).
+        Falls back to direct Azure delete only if backend is unreachable.
 
         Args:
             entry_id: UUID of the compound to delete
@@ -774,11 +775,35 @@ class ImpulatorAPIClient:
             else:
                 return JobResponse(success=False, error=f"HTTP {response.status_code}")
 
+        except (requests.ConnectionError, requests.Timeout) as e:
+            logger.warning(
+                f"Backend unreachable for compound deletion, using direct Azure fallback "
+                f"(audit trail will be incomplete): {e}"
+            )
+            # Fallback: direct Azure delete -- no audit trail
+            from frontend.services.azure_storage import delete_compound as azure_delete_compound
+            try:
+                deleted = azure_delete_compound(entry_id)
+                if deleted:
+                    return JobResponse(
+                        success=True,
+                        message="Deleted via fallback (no audit trail)",
+                        data={"entry_id": entry_id, "fallback": True},
+                    )
+                else:
+                    return JobResponse(success=False, error="Fallback delete found nothing to remove")
+            except Exception as fallback_err:
+                logger.error(f"Fallback Azure delete also failed: {fallback_err}")
+                return JobResponse(success=False, error=f"Backend unreachable and fallback failed: {fallback_err}")
+
         except requests.exceptions.RequestException as e:
             return JobResponse(success=False, error=str(e))
 
     def delete_compounds_batch(self, entry_ids: List[str]) -> JobResponse:
-        """Delete multiple compounds by entry_ids in a single batch.
+        """Delete multiple compounds through backend API (primary) with Azure fallback.
+
+        Primary path routes through backend for audit trail (ARCH-18).
+        Falls back to direct Azure delete only if backend is unreachable.
 
         Args:
             entry_ids: List of compound entry UUIDs to delete
@@ -809,6 +834,31 @@ class ImpulatorAPIClient:
                 except (json.JSONDecodeError, ValueError):
                     error = f"HTTP {response.status_code}"
                 return JobResponse(success=False, error=error)
+
+        except (requests.ConnectionError, requests.Timeout) as e:
+            logger.warning(
+                f"Backend unreachable for batch compound deletion, using direct Azure fallback "
+                f"(audit trail will be incomplete): {e}"
+            )
+            # Fallback: direct Azure delete per compound -- no audit trail
+            from frontend.services.azure_storage import delete_compound as azure_delete_compound
+            deleted_count = 0
+            failed_ids = []
+            for eid in entry_ids:
+                try:
+                    if azure_delete_compound(eid):
+                        deleted_count += 1
+                    else:
+                        failed_ids.append(eid)
+                except Exception as fallback_err:
+                    logger.error(f"Fallback Azure delete failed for {eid}: {fallback_err}")
+                    failed_ids.append(eid)
+
+            return JobResponse(
+                success=deleted_count > 0,
+                message=f"Deleted {deleted_count}/{len(entry_ids)} via fallback (no audit trail)",
+                data={"deleted": deleted_count, "failed": failed_ids, "fallback": True},
+            )
 
         except requests.exceptions.RequestException as e:
             return JobResponse(success=False, error=str(e))

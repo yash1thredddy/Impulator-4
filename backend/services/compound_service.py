@@ -25,6 +25,7 @@ from backend.config import settings
 from backend.core.database import get_db_session
 from backend.core.storage_paths import get_storage_path_from_entry_id
 from backend.core import sanitize_compound_name
+from backend.core.azure_sync import is_azure_configured
 from backend.models.database import JobStatus
 
 # Import chemistry modules (clean absolute imports)
@@ -61,6 +62,43 @@ class CompoundService:
     - Background job execution
     - Azure sync on completion
     """
+
+    @classmethod
+    def cleanup_stale_folders(cls) -> int:
+        """Remove stale compound processing folders from data/results/.
+
+        During processing, compound_service creates folders like data/results/Aspirin/
+        which are converted to ZIPs and deleted. If the process crashes mid-processing,
+        these folders remain as orphans. Since recover_on_startup() has already reset
+        PROCESSING jobs to PENDING, any remaining folders are stale.
+
+        Only removes directories (not ZIP files or UUID-prefix subdirs).
+
+        Returns:
+            Number of cleaned folders.
+        """
+        results_dir = settings.RESULTS_DIR
+        if not results_dir.exists():
+            return 0
+
+        cleaned = 0
+        for item in results_dir.iterdir():
+            if not item.is_dir():
+                continue
+            # Skip UUID-prefix subdirs (2-char hex: "3a", "7f", etc.) -- these contain ZIPs
+            if len(item.name) == 2 and all(c in '0123456789abcdef' for c in item.name.lower()):
+                continue
+            # This is a compound processing folder (e.g., "Aspirin", "Caffeine")
+            try:
+                shutil.rmtree(item)
+                cleaned += 1
+                logger.info(f"Cleaned up stale compound folder: {item.name}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up stale folder {item.name}: {e}")
+
+        if cleaned:
+            logger.info(f"Cleaned up {cleaned} stale compound folder(s)")
+        return cleaned
 
     def __init__(self):
         self.results_dir = settings.RESULTS_DIR if hasattr(settings, 'RESULTS_DIR') else "./data/results"
@@ -338,11 +376,17 @@ class CompoundService:
     def _is_job_cancelled(self, db, job_id: str) -> bool:
         """Check if job has been cancelled by user.
 
+        Uses db.refresh() to bypass SQLAlchemy identity map and read
+        current status from database (ARCH-09).
+
         Returns True if job status is CANCELLED, allowing graceful early exit.
         """
         from backend.services.job_service import job_service
         job = job_service.get_job(db, job_id)
-        if job and job.status == JobStatus.CANCELLED:
+        if not job:
+            return False
+        db.refresh(job)  # Force re-read from DB -- identity map may be stale (ARCH-09)
+        if job.status == JobStatus.CANCELLED:
             logger.info(f"Job {job_id} was cancelled, stopping processing")
             return True
         return False
@@ -1426,4 +1470,234 @@ def process_compound_job(
         similarity_threshold=similarity_threshold,
         activity_types=activity_types,
         author_name=author_name,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Compound API service functions (delete, versions, list)
+# These are separate from the processing pipeline above. They handle
+# compound CRUD orchestration for the API layer (ARCH-04).
+# ---------------------------------------------------------------------------
+
+from backend.core.azure_sync import delete_result_from_azure_by_entry_id
+from backend.core.audit import log_job_deleted
+from backend.core.auth import truncate_session_id
+from backend.repositories import compound_repo, _db_write_lock
+from backend.models.schemas import (
+    CompoundListResponse,
+    CompoundListItem,
+    CompoundDetailResponse,
+    CompoundDeleteResponse,
+    CompoundVersionsResponse,
+    BatchDeleteResponse,
+)
+from sqlalchemy.orm import Session
+
+
+def get_compound_versions(db: Session, entry_id: str) -> dict:
+    """Resolve all structural siblings (versions) of a compound.
+
+    Returns dict with 'versions' list and 'current_entry_id'.
+    Raises ValueError if compound not found.
+    """
+    siblings = compound_repo.get_versions(db, entry_id)
+
+    if len(siblings) <= 1:
+        if not siblings:
+            compound = compound_repo.get_by_entry_id(db, entry_id)
+            if not compound:
+                raise ValueError("Compound not found")
+        return {"versions": [], "current_entry_id": entry_id}
+
+    # Identify the original: oldest non-duplicate, fallback to oldest overall
+    original_entry_id = None
+    for s in siblings:
+        if not s.is_duplicate:
+            original_entry_id = s.entry_id
+            break
+    if original_entry_id is None:
+        original_entry_id = siblings[0].entry_id
+
+    # Batch-resolve parent names for duplicates
+    parent_entry_ids = {s.duplicate_of for s in siblings if s.duplicate_of}
+    parent_names = {}
+    if parent_entry_ids:
+        for pid in parent_entry_ids:
+            parent = compound_repo.get_by_entry_id(db, pid)
+            if parent:
+                parent_names[pid] = parent.compound_name
+
+    versions = []
+    for s in siblings:
+        versions.append({
+            "entry_id": s.entry_id,
+            "compound_name": s.compound_name,
+            "similarity_threshold": s.similarity_threshold,
+            "activity_types": s.activity_types,
+            "imp_score": s.imp_score,
+            "qed": s.qed,
+            "similar_compounds": s.similar_compounds or 0,
+            "total_activities": s.total_activities,
+            "is_duplicate": s.is_duplicate or False,
+            "duplicate_of": s.duplicate_of,
+            "duplicate_of_name": parent_names.get(s.duplicate_of),
+            "author_name": s.author_name,
+            "processed_at": s.processed_at.isoformat() if s.processed_at else None,
+            "storage_path": s.storage_path,
+            "is_original": s.entry_id == original_entry_id,
+            "is_current": s.entry_id == entry_id,
+        })
+
+    return {"versions": versions, "current_entry_id": entry_id}
+
+
+def delete_compound_with_cleanup(
+    db: Session, entry_id: str, session_id: str
+) -> CompoundDeleteResponse:
+    """Delete a compound with full cleanup: Azure, local files, DB archive.
+
+    Raises ValueError if compound not found.
+    """
+    # Fast-fail: check compound exists before doing any I/O
+    compound = compound_repo.get_by_entry_id(db, entry_id)
+    if not compound:
+        raise ValueError("Compound not found")
+
+    # Delete from Azure FIRST (UUID-based storage only) -- outside lock
+    azure_deleted = delete_result_from_azure_by_entry_id(entry_id)
+    if azure_deleted:
+        logger.info(f"Deleted result from Azure: {entry_id}")
+
+    # Delete local ZIP file -- outside lock
+    prefix = entry_id[:2].lower()
+    local_zip = settings.RESULTS_DIR / prefix / f"{entry_id}.zip"
+    if local_zip.exists():
+        try:
+            local_zip.unlink()
+            logger.info(f"Deleted local result: {local_zip}")
+        except Exception as e:
+            logger.warning(f"Failed to delete local result {local_zip}: {e}")
+
+    # DB mutations under write lock
+    with _db_write_lock:
+        # Re-query compound inside lock (it may have been deleted by another thread)
+        compound = compound_repo.get_by_entry_id(db, entry_id)
+        if not compound:
+            raise ValueError("Compound not found")
+
+        compound_name = compound.compound_name
+
+        # Promote children before deleting a main compound
+        compound_repo.handle_children_before_delete(db, entry_id)
+
+        # Archive to deleted_compounds table before deletion
+        compound_repo.archive_compound(
+            db,
+            compound,
+            session_id=session_id,
+            deletion_reason="user_request",
+        )
+
+        # Delete from compounds table
+        db.delete(compound)
+        db.commit()
+
+    # Audit log (outside lock -- no DB mutation)
+    log_job_deleted(truncate_session_id(session_id), entry_id, compound_name)
+    logger.info(f"Deleted compound: {compound_name} (entry_id={entry_id})")
+
+    return CompoundDeleteResponse(
+        status="deleted",
+        entry_id=entry_id,
+        message=f"Compound '{compound_name}' deleted successfully",
+    )
+
+
+def batch_delete_with_cleanup(
+    db: Session, entry_ids: list, session_id: str
+) -> BatchDeleteResponse:
+    """Delete multiple compounds with full cleanup.
+
+    Validates input, deduplicates, archives, then cleans storage.
+    Raises ValueError for invalid input.
+    """
+    if not entry_ids:
+        raise ValueError("entry_ids list cannot be empty")
+
+    if len(entry_ids) > 50:
+        raise ValueError("Cannot delete more than 50 compounds at once")
+
+    # Validate all entry_ids are non-empty strings
+    for eid in entry_ids:
+        if not isinstance(eid, str) or not eid.strip():
+            raise ValueError("All entry_ids must be non-empty strings")
+
+    deleted = []
+    not_found = []
+
+    # Deduplicate to prevent same ID appearing in both deleted and not_found
+    seen = set()
+    unique_entry_ids = []
+    for eid in entry_ids:
+        if eid not in seen:
+            seen.add(eid)
+            unique_entry_ids.append(eid)
+
+    # DB mutations under write lock
+    with _db_write_lock:
+        for eid in unique_entry_ids:
+            compound = compound_repo.get_by_entry_id(db, eid)
+
+            if not compound:
+                not_found.append(eid)
+                continue
+
+            compound_name = compound.compound_name
+
+            # Promote children before deleting a main compound
+            compound_repo.handle_children_before_delete(db, eid)
+
+            # Archive to deleted_compounds
+            compound_repo.archive_compound(
+                db,
+                compound,
+                session_id=session_id,
+                deletion_reason="batch_delete",
+            )
+            db.delete(compound)
+
+            # Audit log
+            log_job_deleted(truncate_session_id(session_id), eid, compound_name)
+            deleted.append({"entry_id": eid, "compound_name": compound_name})
+
+            logger.info(f"Batch delete - archived: {compound_name} ({eid})")
+
+        # Commit DB first -- only delete storage after successful commit
+        db.commit()
+
+    # Now safe to delete storage (DB is committed, no data loss risk)
+    for item in deleted:
+        eid = item["entry_id"]
+        try:
+            azure_ok = delete_result_from_azure_by_entry_id(eid)
+            if azure_ok:
+                logger.info(f"Batch delete - Azure deleted: {eid}")
+        except Exception as e:
+            logger.warning(f"Batch delete - Azure cleanup failed for {eid}: {e}")
+
+        prefix = eid[:2].lower()
+        local_zip = settings.RESULTS_DIR / prefix / f"{eid}.zip"
+        if local_zip.exists():
+            try:
+                local_zip.unlink()
+                logger.info(f"Batch delete - local deleted: {local_zip}")
+            except Exception as e:
+                logger.warning(f"Batch delete - failed to delete local {local_zip}: {e}")
+
+    return BatchDeleteResponse(
+        status="completed",
+        deleted=[item["entry_id"] for item in deleted],
+        failed=[{"entry_id": eid, "error": "not found"} for eid in not_found],
+        total_deleted=len(deleted),
+        total_failed=len(not_found),
     )

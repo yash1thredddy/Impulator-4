@@ -132,10 +132,21 @@ def cache_non_none(maxsize: int = CACHE_SIZE, ttl_seconds: int = 3600):
             # Only cache non-None results
             if result is not None:
                 with cache_lock:
+                    # Double-check: another thread may have cached this key
+                    # while we were making the API call (ARCH-10)
+                    if key in cache:
+                        existing_value, existing_ts = cache[key]
+                        if time.time() - existing_ts < ttl_seconds:
+                            # Another thread already cached a valid result -- use theirs
+                            return existing_value
+
+                    # Use fresh timestamp for storage (not the one from before API call)
+                    now = time.time()
+
                     # Evict expired entries first
                     expired_keys = [
                         k for k, (_, ts) in cache.items()
-                        if current_time - ts >= ttl_seconds
+                        if now - ts >= ttl_seconds
                     ]
                     for k in expired_keys:
                         del cache[k]
@@ -145,7 +156,7 @@ def cache_non_none(maxsize: int = CACHE_SIZE, ttl_seconds: int = 3600):
                         oldest_key = next(iter(cache))
                         del cache[oldest_key]
 
-                    cache[key] = (result, current_time)
+                    cache[key] = (result, now)
 
             return result
 

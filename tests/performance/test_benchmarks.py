@@ -208,7 +208,7 @@ class TestAPIRateLimiterPerformance:
     @pytest.mark.benchmark
     def test_rate_limiter_check_performance(self):
         """Rate limiter checks should be fast even with many sessions."""
-        from backend.api.v1.jobs import RateLimiter
+        from backend.core.rate_limiter import RateLimiter
 
         limiter = RateLimiter(window_seconds=60)
 
@@ -227,7 +227,7 @@ class TestAPIRateLimiterPerformance:
     @pytest.mark.benchmark
     def test_rate_limiter_cleanup_performance(self):
         """Rate limiter cleanup should not block."""
-        from backend.api.v1.jobs import RateLimiter
+        from backend.core.rate_limiter import RateLimiter
 
         limiter = RateLimiter(window_seconds=0.2)  # 0.2 second window
 

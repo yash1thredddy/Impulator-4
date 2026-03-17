@@ -45,6 +45,7 @@ def _validate_smiles_field(v: str) -> str:
 class JobStatus(str, Enum):
     PENDING = "pending"
     PROCESSING = "processing"
+    SYNC_PENDING = "sync_pending"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -59,7 +60,7 @@ class JobType(str, Enum):
 class JobCreate(BaseModel):
     """Request schema for creating a job."""
 
-    compound_name: str = Field(..., min_length=1, max_length=100)
+    compound_name: str = Field(..., min_length=1, max_length=255)
     author_name: str = Field(..., min_length=1, max_length=100)
     smiles: str = Field(..., min_length=1, max_length=5000)
     similarity_threshold: int = Field(default=90, ge=40, le=100)
@@ -103,8 +104,8 @@ class JobCreate(BaseModel):
             return None
 
         # Length check
-        if len(v) > 100:
-            raise ValueError('Original compound name too long (max 100 characters)')
+        if len(v) > 255:
+            raise ValueError('Original compound name too long (max 255 characters)')
 
         # Whitelist pattern - only safe characters
         if not COMPOUND_NAME_PATTERN.match(v):
@@ -138,8 +139,8 @@ class JobCreate(BaseModel):
         v = v.strip()
 
         # Length check
-        if len(v) > 100:
-            raise ValueError('Compound name too long (max 100 characters)')
+        if len(v) > 255:
+            raise ValueError('Compound name too long (max 255 characters)')
 
         # Whitelist pattern - only safe characters
         if not COMPOUND_NAME_PATTERN.match(v):
@@ -226,7 +227,7 @@ class BatchJobCreate(BaseModel):
             if not compound_name:
                 raise ValueError('duplicate_decisions keys cannot be empty')
 
-            if len(compound_name) > 100:
+            if len(compound_name) > 255:
                 raise ValueError(f'Compound name too long: {compound_name[:20]}...')
 
             if not COMPOUND_NAME_PATTERN.match(compound_name):
@@ -242,6 +243,36 @@ class BatchJobCreate(BaseModel):
             validated[compound_name] = action
 
         return validated
+
+    @model_validator(mode="after")
+    def validate_all_smiles(self) -> "BatchJobCreate":
+        """Validate all SMILES in the batch synchronously (QUAL-02).
+
+        Returns 422 listing which entries have invalid SMILES.
+        Latency of 1-5s for 1000 compounds is acceptable per CONTEXT.md.
+        """
+        if not RDKIT_AVAILABLE:
+            return self
+
+        invalid_entries = []
+        for i, compound in enumerate(self.compounds):
+            smiles = compound.smiles
+            if smiles:
+                try:
+                    mol = Chem.MolFromSmiles(smiles)
+                    if mol is None:
+                        invalid_entries.append(
+                            f"Entry {i} ('{compound.compound_name}'): invalid SMILES '{smiles}'"
+                        )
+                except Exception:
+                    invalid_entries.append(
+                        f"Entry {i} ('{compound.compound_name}'): unparseable SMILES '{smiles}'"
+                    )
+        if invalid_entries:
+            raise ValueError(
+                f"Batch contains {len(invalid_entries)} invalid SMILES: " + "; ".join(invalid_entries)
+            )
+        return self
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -283,6 +314,25 @@ class JobResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class JobDetailResponse(BaseModel):
+    """Detailed job response with parsed input parameters and result summary."""
+
+    id: str
+    job_type: Optional[str] = None
+    status: Optional[str] = None
+    session_id: Optional[str] = None
+    batch_id: Optional[str] = None
+    progress: Optional[float] = None
+    current_step: Optional[str] = None
+    result_path: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    input_params: Optional[Dict[str, Any]] = None
+    result_summary: Optional[Dict[str, Any]] = None
+
+
 class JobProgress(BaseModel):
     """Schema for job progress updates (polling)."""
 
@@ -316,7 +366,7 @@ class ActiveJobResponse(BaseModel):
 class CompoundStructure(BaseModel):
     """Structure data for a compound in batch duplicate check."""
 
-    compound_name: str = Field(..., min_length=1, max_length=100)
+    compound_name: str = Field(..., min_length=1, max_length=255)
     smiles: Optional[str] = Field(None, description="SMILES string for the compound")
     inchi: Optional[str] = Field(None, description="InChI string for the compound (converted to SMILES if smiles not provided)")
     inchikey: Optional[str] = Field(
@@ -436,7 +486,7 @@ class CheckAvailabilityRequest(BaseModel):
 
 class CompoundInput(BaseModel):
     """Compound identifier for availability checks."""
-    compound_name: str = Field(..., min_length=1, max_length=100)
+    compound_name: str = Field(..., min_length=1, max_length=255)
     smiles: str = Field(..., min_length=1, max_length=5000)
 
     @field_validator('smiles')
@@ -532,7 +582,7 @@ class ResolveDuplicateRequest(BaseModel):
 
     action: DuplicateAction
     smiles: str = Field(..., min_length=1, max_length=5000)
-    compound_name: str = Field(..., min_length=1, max_length=100)
+    compound_name: str = Field(..., min_length=1, max_length=255)
     author_name: str = Field(..., min_length=1, max_length=100)
     existing_entry_id: Optional[str] = None
     new_compound_name: Optional[str] = Field(None, description="New name if user wants to change it (for exact duplicates)")
@@ -553,8 +603,8 @@ class ResolveDuplicateRequest(BaseModel):
         if not v or not v.strip():
             raise ValueError('Compound name cannot be empty')
         v = v.strip()
-        if len(v) > 100:
-            raise ValueError('Compound name too long (max 100 characters)')
+        if len(v) > 255:
+            raise ValueError('Compound name too long (max 255 characters)')
         if not COMPOUND_NAME_PATTERN.match(v):
             raise ValueError('Compound name contains invalid characters')
         if '..' in v or '/' in v or '\\' in v:
@@ -587,8 +637,8 @@ class ResolveDuplicateRequest(BaseModel):
         v = v.strip()
         if not v:
             return None
-        if len(v) > 100:
-            raise ValueError('New compound name too long (max 100 characters)')
+        if len(v) > 255:
+            raise ValueError('New compound name too long (max 255 characters)')
         if not COMPOUND_NAME_PATTERN.match(v):
             raise ValueError('New compound name contains invalid characters')
         if '..' in v or '/' in v or '\\' in v:
@@ -797,6 +847,79 @@ class CompoundVersionsResponse(BaseModel):
 
     versions: List[CompoundVersionItem] = []
     current_entry_id: str
+
+
+# ============================================================================
+# Compound endpoint response models (ARCH-13, ARCH-15)
+# ============================================================================
+
+
+class CompoundListItem(BaseModel):
+    """Single compound in paginated list."""
+    model_config = ConfigDict(from_attributes=True)
+
+    entry_id: str
+    compound_name: str
+    smiles: Optional[str] = None
+    inchikey: Optional[str] = None
+    threshold: Optional[float] = None
+    similarity_threshold: Optional[int] = None
+    activity_types: Optional[str] = None
+    similar_compounds: Optional[int] = None
+    total_activities: Optional[int] = None
+    is_duplicate: bool = False
+    duplicate_of: Optional[str] = None
+    created_at: Optional[datetime] = None
+    processed_at: Optional[datetime] = None
+    storage_path: Optional[str] = None
+    chembl_id: Optional[str] = None
+    imp_candidates: Optional[int] = None
+    imp_score: Optional[float] = None
+    num_outliers: Optional[int] = None
+    qed: Optional[float] = None
+
+
+class CompoundListResponse(BaseModel):
+    """Paginated compound list -- consistent envelope per ARCH-15."""
+    items: List[CompoundListItem]
+    total: int
+    page: int
+    page_size: int
+    pages: int
+
+
+class CompoundDetailResponse(BaseModel):
+    """Single compound metadata response."""
+    model_config = ConfigDict(from_attributes=True)
+
+    entry_id: str
+    compound_name: str
+    smiles: Optional[str] = None
+    inchikey: Optional[str] = None
+    inchikey_structure_key: Optional[str] = None
+    threshold: Optional[float] = None
+    activity_types: Optional[str] = None
+    similar_compounds: Optional[int] = None
+    total_activities: Optional[int] = None
+    is_duplicate: bool = False
+    duplicate_of: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class CompoundDeleteResponse(BaseModel):
+    """Response for single compound deletion."""
+    status: str = "deleted"
+    entry_id: str
+    message: str
+
+
+class BatchDeleteResponse(BaseModel):
+    """Response for batch compound deletion."""
+    status: str = "completed"
+    deleted: List[str]
+    failed: List[Dict[str, str]] = Field(default_factory=list)
+    total_deleted: int
+    total_failed: int
 
 
 # ============================================================================

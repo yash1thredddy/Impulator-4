@@ -143,6 +143,10 @@ class JobRepository(BaseRepository[Job]):
             query = query.filter(Job.session_id == session_id)
         return query.all()
 
+    def get_by_status(self, db: Session, status: JobStatus) -> List[Job]:
+        """Get all jobs with a given status."""
+        return db.query(Job).filter(Job.status == status).all()
+
     def get_sync_pending_jobs(self, db: Session) -> List[Job]:
         """Get jobs in SYNC_PENDING state (for Azure retry)."""
         return db.query(Job).filter(Job.status == JobStatus.SYNC_PENDING).all()
