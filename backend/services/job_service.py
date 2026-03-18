@@ -514,10 +514,17 @@ class JobService:
             input_params=json.dumps(input_params),
             progress=0.0,
             current_step="Queued",
+            created_at=datetime.now(timezone.utc),
         )
         db.add(job)
         db.commit()
-        db.refresh(job)
+        try:
+            db.refresh(job)
+        except InvalidRequestError:
+            # Under concurrent SQLite access, refresh can fail even after
+            # a successful commit. The job is already persisted and all
+            # fields are set from Python-side defaults, so this is safe.
+            pass
         metrics.increment('jobs_created')
         logger.info(f"Created job {job.id} ({job_type.value}) session={session_id} batch={batch_id}")
         return job
