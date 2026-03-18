@@ -1432,12 +1432,14 @@ class JobService:
                         job_id=job_id,
                     )
                     compound_repo.delete_compound(db, compound_entry)
-                    db.commit()
-
-        # Delete the job record
-        with _db_write_lock:
-            job_repo.delete_job(db, job_id)
-            db.commit()
+                # Delete job in same transaction to maintain atomicity
+                job_repo.delete_job(db, job_id)
+                db.commit()
+        else:
+            # No compound to clean up — just delete the job
+            with _db_write_lock:
+                job_repo.delete_job(db, job_id)
+                db.commit()
 
         return DeleteResponse(
             message="Job and results deleted",
