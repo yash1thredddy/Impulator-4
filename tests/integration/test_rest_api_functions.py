@@ -9,6 +9,8 @@ Tests:
 4. Edge cases (empty responses, None data)
 """
 
+import sys
+
 import pytest
 import requests
 

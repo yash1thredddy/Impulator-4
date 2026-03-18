@@ -187,6 +187,7 @@ class TestCompoundEntryWithEntryId:
         session = Session()
         yield session
         session.close()
+        engine.dispose()
 
     def test_create_compound_with_entry_id(self, db_session):
         """Test creating a compound with entry_id."""
@@ -316,6 +317,7 @@ class TestJobServiceCompoundUpdate:
         session = Session()
         yield session
         session.close()
+        engine.dispose()
 
     @pytest.fixture
     def service(self):

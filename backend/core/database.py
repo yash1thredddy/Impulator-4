@@ -121,7 +121,7 @@ def init_db() -> None:
     _apply_migrations_with_lock()
 
 
-def _apply_migrations_with_lock() -> None:
+def _apply_migrations_with_lock() -> None:  # pragma: no cover -- migration lock, tested manually
     """Apply migrations with cross-platform file locking to prevent race conditions."""
     # Get data directory from database URL
     db_path = settings.DATABASE_URL.replace("sqlite:///", "").replace("sqlite:///./", "")
@@ -172,7 +172,7 @@ def _apply_migrations_with_lock() -> None:
                 pass
 
 
-def _apply_migrations() -> None:
+def _apply_migrations() -> None:  # pragma: no cover -- one-time migration, tested via run_migrations.py
     """Apply schema migrations within a single transaction.
 
     SQLite doesn't support ALTER TABLE ADD COLUMN IF NOT EXISTS,

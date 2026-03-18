@@ -1,6 +1,9 @@
 """
 Assay Interference Detection Module
 
+Reference: Dahlin et al., "Assay interference and off-target liabilities of reported histone
+acetyltransferase inhibitors" (IMPs 2.0), Nature Communications, 2017.
+
 Detects compounds with known assay interference mechanisms using
 ONLY peer-reviewed, industry-standard methods from published literature.
 
@@ -671,11 +674,23 @@ def check_fluorescence_interference(mol: Chem.Mol) -> Tuple[bool, List[str]]:
 def calculate_interference_flags(mol: Chem.Mol) -> InterferenceFlags:
     """Calculate all assay interference flags for a molecule.
 
+    Runs all 7 detection methods (PAINS, Aggregator, Thiol, Redox,
+    Fluorescence, BRENK, NIH) and returns a unified result.
+
     Args:
         mol: RDKit Mol object
 
     Returns:
         InterferenceFlags dataclass with all detection results
+
+    Example:
+        Quercetin (a flavonoid known to trigger multiple filters):
+        >>> from rdkit import Chem
+        >>> mol = Chem.MolFromSmiles('O=c1cc(-c2ccc(O)c(O)c2)oc2cc(O)cc(O)c12')
+        >>> flags = calculate_interference_flags(mol)
+        >>> flags.pains  # True (catechol PAINS pattern)
+        >>> flags.fluorescence  # True (flavone scaffold)
+        >>> flags.total_flags  # >= 2
     """
     flags = InterferenceFlags()
 

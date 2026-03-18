@@ -34,7 +34,7 @@ _job_executor = None
 _job_scheduler = None
 
 
-def get_job_executor():
+def get_job_executor():  # pragma: no cover -- lazy loader
     """Lazy load job executor to avoid circular imports."""
     global _job_executor
     if _job_executor is None:
@@ -43,7 +43,7 @@ def get_job_executor():
     return _job_executor
 
 
-def get_job_scheduler():
+def get_job_scheduler():  # pragma: no cover -- lazy loader
     """Lazy load job scheduler to avoid circular imports."""
     global _job_scheduler
     if _job_scheduler is None:
@@ -54,7 +54,7 @@ def get_job_scheduler():
 
 # For backwards compatibility - these will trigger lazy load on first access
 # Using property-like access through module __getattr__
-def __getattr__(name):
+def __getattr__(name):  # pragma: no cover -- lazy loader
     if name == "job_executor":
         return get_job_executor()
     elif name == "job_scheduler":

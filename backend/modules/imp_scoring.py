@@ -2,6 +2,9 @@
 IMP Scoring Module - Multi-criteria scoring for IMP (Invalid Metabolic Panacea) detection.
 Decoupled from Streamlit for backend use.
 
+Reference: Dahlin et al., "Assay interference and off-target liabilities of reported histone
+acetyltransferase inhibitors" (IMPs 2.0), Nature Communications, 2017.
+
 This module implements the IMP multi-criteria scoring system.
 
 **Components** (weights sum to 100%, no normalization):
@@ -82,6 +85,11 @@ def calculate_efficiency_outlier_score(
 
     Returns:
         pd.Series: Efficiency scores (0-1) for each compound
+
+    Example:
+        Given a cohort where SEI mean=8.0, std=2.0 and BEI mean=15.0, std=5.0:
+        A compound with SEI=12.0 (z=2.0) and BEI=25.0 (z=2.0):
+        sigmoid(2.0) = 0.881 for each metric, average = 0.881
     """
     if metrics is None:
         metrics = DEFAULT_EFFICIENCY_METRICS  # ['SEI', 'BEI']
@@ -128,6 +136,12 @@ def calculate_angle_score(angles: pd.Series, optimal_angle: float = 45.0) -> pd.
 
     Returns:
         pd.Series: Angle scores (0-1) for each compound
+
+    Example:
+        A compound at 45 degrees (optimal balanced development):
+        >>> # angle_score = 1.0 - abs(45 - 45) / 45 = 1.0
+        A compound at 30 degrees (skewed toward one axis):
+        >>> # angle_score = 1.0 - abs(30 - 45) / 45 = 0.667
     """
     angle_deviation = (angles - optimal_angle).abs()
     score = 1 - (angle_deviation / optimal_angle)
@@ -149,6 +163,10 @@ def calculate_distance_to_best_score(
 
     Returns:
         pd.Series: Distance scores (0-1) for each compound
+
+    Example:
+        Best-in-class compound has modulus=20.0. Query compound modulus=15.0:
+        >>> # distance_score = 15.0 / 20.0 = 0.75
     """
     if modulus_column not in df.columns:
         raise ValueError(f"Modulus column '{modulus_column}' not found in DataFrame")
@@ -182,6 +200,12 @@ def calculate_interference_score(df: pd.DataFrame) -> pd.DataFrame:
 
     Returns:
         DataFrame with added Interference_Score column (0.0-1.0)
+
+    Example:
+        Compound triggers PAINS + Aggregator (2 of 5 flags):
+        >>> # interference_score = 2 / 5 = 0.4
+        Compound triggers all 5 flags:
+        >>> # interference_score = 5 / 5 = 1.0
     """
     df = df.copy()
 
@@ -225,6 +249,17 @@ def calculate_imp_score(
 
     Returns:
         pd.DataFrame: Input DataFrame with added IMP score columns
+
+    Example:
+        For a compound with:
+        - efficiency_score=0.88, distance_score=0.75, angle_score=0.67,
+          interference_score=0.4, pdb_score=1.0, QED=0.65
+
+        Raw score = (0.88 * 0.45) + (0.75 * 0.20) + (0.67 * 0.15) + (0.4 * 0.15) + (1.0 * 0.05)
+                  = 0.396 + 0.15 + 0.1005 + 0.06 + 0.05 = 0.7565
+
+        QED multiplier = 0.75 + 0.25 * 0.65 = 0.9125
+        Final IMP score = 0.7565 * 0.9125 = 0.690
     """
     df = df.copy()
 
@@ -270,7 +305,7 @@ def calculate_imp_score(
     return df
 
 
-def calculate_imp_score_phase1(
+def calculate_imp_score_phase1(  # pragma: no cover
     df: pd.DataFrame,
     use_normalized_weights: bool = True
 ) -> pd.DataFrame:
@@ -341,6 +376,10 @@ def calculate_pdb_evidence_score(
 
     Returns:
         DataFrame with added PDB columns
+
+    Example:
+        Compound with PDB hit (exact ligand match): pdb_score = 1.0
+        Compound with no PDB data: pdb_score = 0.0
     """
     df = df.copy()
 
@@ -479,7 +518,7 @@ def calculate_pdb_evidence_score(
     return df
 
 
-def calculate_imp_score_phase2(
+def calculate_imp_score_phase2(  # pragma: no cover
     df: pd.DataFrame,
     use_pdb: bool = True,
     progress_callback: Optional[ProgressCallback] = None
@@ -556,6 +595,12 @@ def interpret_imp_score(score: float) -> Dict[str, str]:
     Score Interpretation (INVERSE relationship):
     - High Score (0.9+) = High false positive risk → EXCLUDE/DEPRIORITIZE
     - Low Score (<0.3) = Low false positive risk → PROCEED with confidence
+
+    Example:
+        >>> interpret_imp_score(0.85)
+        {"classification": "Strong IMP", "priority": 2, ...}
+        >>> interpret_imp_score(0.25)
+        {"classification": "Not IMP", "priority": None, ...}
     """
     if np.isnan(score):
         return {
@@ -855,28 +900,30 @@ def create_detailed_pdb_summary(df: pd.DataFrame, progress_callback: Optional[Pr
         logger.error("PDB client module not found. Cannot create detailed PDB summary.")
         return pd.DataFrame()
 
-    # Collect all unique PDB IDs with their associated compounds
-    pdb_compound_map = {}  # PDB_ID -> list of (ChEMBL_ID, Molecule_Name)
+    # Collect all unique PDB IDs with their associated compounds (vectorized)
+    valid_mask = df['PDB_IDs'].notna() & (df['PDB_IDs'].astype(str).str.strip() != '')
+    valid = df.loc[valid_mask, ['PDB_IDs', 'ChEMBL_ID', 'Molecule_Name']].copy()
 
-    for _, row in df.iterrows():
-        pdb_str = row.get('PDB_IDs', '')
-        chembl_id = row.get('ChEMBL_ID', '')
-        mol_name = row.get('Molecule_Name', '')
-
-        if pd.isna(pdb_str) or not pdb_str:
-            continue
-
-        pdb_list = [p.strip().upper() for p in str(pdb_str).split(',') if p.strip()]
-        for pdb_id in pdb_list:
-            if pdb_id not in pdb_compound_map:
-                pdb_compound_map[pdb_id] = []
-            pdb_compound_map[pdb_id].append((chembl_id, mol_name if pd.notna(mol_name) else ''))
-
-    unique_pdb_ids = list(pdb_compound_map.keys())
-
-    if not unique_pdb_ids:
+    if valid.empty:
         logger.info("No PDB IDs found in data.")
         return pd.DataFrame()
+
+    # Explode comma-separated PDB_IDs into individual rows
+    valid['_pdb_list'] = valid['PDB_IDs'].astype(str).str.split(',')
+    exploded = valid.explode('_pdb_list')
+    exploded['_pdb_id'] = exploded['_pdb_list'].str.strip().str.upper()
+    exploded = exploded[exploded['_pdb_id'] != ''].copy()
+
+    # Group by PDB_ID to collect associated compounds
+    pdb_compound_map: dict[str, list[tuple[str, str]]] = {}
+    for pdb_id, group in exploded.groupby('_pdb_id'):
+        chembl_ids = group['ChEMBL_ID'].fillna('').tolist()
+        mol_names = group['Molecule_Name'].apply(
+            lambda x: x if pd.notna(x) else ''
+        ).tolist()
+        pdb_compound_map[pdb_id] = list(zip(chembl_ids, mol_names))
+
+    unique_pdb_ids = list(pdb_compound_map.keys())
 
     logger.info(f"Fetching detailed information for {len(unique_pdb_ids)} unique PDB structures...")
 

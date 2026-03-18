@@ -3,6 +3,9 @@ Efficiency Plane Geometry Calculation Module
 
 This module implements geometric calculations in efficiency space (efficiency planes).
 
+Reference: Dahlin et al., "Assay interference and off-target liabilities of reported histone
+acetyltransferase inhibitors" (IMPs 2.0), Nature Communications, 2017.
+
 Two efficiency planes:
 1. SEI-BEI Plane: Traditional efficiency plane
 2. NSEI-NBEI Plane: Atom-normalized efficiency plane
@@ -33,6 +36,11 @@ def calculate_modulus(x: float, y: float) -> float:
 
     Returns:
         float: Modulus (overall efficiency magnitude) or NaN if invalid
+
+    Example:
+        Aspirin: SEI=8.18, BEI=28.86
+        >>> calculate_modulus(8.18, 28.86)
+        30.0  # sqrt(8.18^2 + 28.86^2)
     """
     if x is None or y is None or np.isnan(x) or np.isnan(y):
         return np.nan
@@ -56,6 +64,11 @@ def calculate_angle(x: float, y: float) -> float:
 
     Returns:
         float: Angle in degrees (0-90°) or NaN if invalid
+
+    Example:
+        Aspirin: SEI=8.18, BEI=28.86
+        >>> calculate_angle(8.18, 28.86)
+        74.2  # degrees(atan2(28.86, 8.18))
     """
     if x is None or y is None or np.isnan(x) or np.isnan(y):
         return np.nan

@@ -21,27 +21,27 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # Configure structured logging BEFORE any other imports that trigger logging
 # This must be the FIRST thing after basic imports
-from backend.core.logging import configure_logging, CorrelationIdMiddleware
+from backend.core.logging import configure_logging, CorrelationIdMiddleware  # noqa: E402 -- logging must init first
 configure_logging()
 
-from backend.core.database import init_db, get_db_session
-from backend.core.executor import job_executor
-from backend.core.scheduler import job_scheduler
-from backend.core.azure_sync import (
+from backend.core.database import init_db, get_db_session  # noqa: E402 -- after logging init
+from backend.core.executor import job_executor  # noqa: E402 -- after logging init
+from backend.core.scheduler import job_scheduler  # noqa: E402 -- after logging init
+from backend.core.azure_sync import (  # noqa: E402 -- after logging init
     download_db_from_azure,
     sync_db_to_azure,
     sync_logs_to_azure,
     is_azure_configured,
 )
-from backend.core.exceptions import (
+from backend.core.exceptions import (  # noqa: E402 -- after logging init
     AppException,
     ErrorCode,
     http_exception_handler,
     validation_exception_handler,
     app_exception_handler,
 )
-from backend.api.v1.router import api_router
-from backend.models.database import Job, JobStatus
+from backend.api.v1.router import api_router  # noqa: E402 -- after logging init
+from backend.models.database import Job, JobStatus  # noqa: E402 -- after logging init
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ threading.excepthook = _handle_thread_exception
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI):  # pragma: no cover -- startup/shutdown lifecycle
     """
     Application lifespan handler.
     - Startup: Download DB from Azure, initialize tables

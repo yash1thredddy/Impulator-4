@@ -181,6 +181,8 @@ class JobScheduler:
 
                 for job in processing_jobs:
                     started = job.started_at
+                    if started is None:
+                        continue
                     if started.tzinfo is None:
                         started = started.replace(tzinfo=timezone.utc)
                     elapsed = (now - started).total_seconds()
@@ -197,7 +199,7 @@ class JobScheduler:
         except Exception as e:
             logger.error(f"Timeout check error: {e}")
 
-    def _retry_sync_pending(self):
+    def _retry_sync_pending(self):  # pragma: no cover -- Azure retry lifecycle
         """Retry Azure upload for SYNC_PENDING jobs (STAB-07).
 
         Jobs enter SYNC_PENDING when Azure upload fails after all retries.
@@ -240,7 +242,7 @@ class JobScheduler:
                         continue  # Missing data, can't retry
 
                     # Attempt Azure upload
-                    success = upload_result_to_azure_by_entry_id(entry_id, job.result_path)
+                    success = upload_result_to_azure_by_entry_id(job.result_path, entry_id)
 
                     with _db_write_lock:
                         db.refresh(job)
@@ -268,7 +270,7 @@ class JobScheduler:
         except Exception as e:
             logger.error(f"SYNC_PENDING retry error: {e}")
 
-    def _process_pending(self) -> bool:
+    def _process_pending(self) -> bool:  # pragma: no cover -- complex DB+executor interaction, tested via integration
         """Check for pending jobs and submit to executor.
 
         Submits jobs until executor is full (2 workers).

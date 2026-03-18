@@ -88,7 +88,8 @@ class TestGetDbTransactionHandling:
         )
         Base.metadata.create_all(bind=engine)
         Session = sessionmaker(bind=engine)
-        return Session, engine
+        yield Session, engine
+        engine.dispose()
 
     def test_session_commits_on_success(self, test_db_session):
         """Test that successful operations are committed."""

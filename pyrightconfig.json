@@ -1,0 +1,17 @@
+{
+  "typeCheckingMode": "basic",
+  "reportArgumentType": "warning",
+  "reportAttributeAccessIssue": "none",
+  "reportOptionalSubscript": "warning",
+  "reportOptionalMemberAccess": "warning",
+  "reportGeneralTypeIssues": "warning",
+  "reportAssignmentType": "warning",
+  "reportReturnType": "warning",
+  "reportOperatorIssue": "warning",
+  "pythonVersion": "3.13",
+  "exclude": [
+    ".impenv",
+    "**/__pycache__",
+    ".planning"
+  ]
+}

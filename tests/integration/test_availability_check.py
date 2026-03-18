@@ -54,7 +54,7 @@ def _mock_probe_low_thresholds_only(smiles, threshold):
 class TestCheckAvailabilitySingle:
     """Tests for POST /api/v1/jobs/check-availability."""
 
-    @patch('backend.api.v1.jobs.probe_all_thresholds', side_effect=_mock_probe_data_available)
+    @patch('backend.modules.api_client.probe_all_thresholds', side_effect=_mock_probe_data_available)
     def test_compound_with_data_returns_available(self, mock_probe, client):
         """Compound with ChEMBL data at requested threshold should return available=True."""
         response = client.post(
@@ -74,7 +74,7 @@ class TestCheckAvailabilitySingle:
         assert result["count_at_threshold"] == 5
         assert len(result["thresholds"]) > 0
 
-    @patch('backend.api.v1.jobs.probe_all_thresholds', side_effect=_mock_probe_no_data)
+    @patch('backend.modules.api_client.probe_all_thresholds', side_effect=_mock_probe_no_data)
     def test_compound_without_data_returns_unavailable(self, mock_probe, client):
         """Compound with no ChEMBL data should return available=False, has_any_data=False."""
         response = client.post(
@@ -91,7 +91,7 @@ class TestCheckAvailabilitySingle:
         assert result["has_any_data"] is False
         assert result["count_at_threshold"] == 0
 
-    @patch('backend.api.v1.jobs.probe_all_thresholds', side_effect=_mock_probe_low_thresholds_only)
+    @patch('backend.modules.api_client.probe_all_thresholds', side_effect=_mock_probe_low_thresholds_only)
     def test_data_at_lower_thresholds_only(self, mock_probe, client):
         """Compound with data only at lower thresholds: available=False but has_any_data=True."""
         response = client.post(
@@ -112,11 +112,11 @@ class TestCheckAvailabilitySingle:
         assert threshold_counts[70] == 3
         assert threshold_counts[40] == 30
 
-    @patch('backend.api.v1.jobs.probe_all_thresholds', side_effect=_mock_probe_data_available)
+    @patch('backend.modules.api_client.probe_all_thresholds', side_effect=_mock_probe_data_available)
     def test_existing_compound_included_in_response(self, mock_probe, test_engine, client):
         """Existing compounds with same structure key should be in existing_compounds."""
         from backend.models.database import Compound
-        from backend.services.job_service import generate_inchikey
+        from backend.services.job_service import generate_inchikey, _inchikey_structure_key
 
         smiles = "CC(=O)OC1=CC=CC=C1C(=O)O"
         inchikey = generate_inchikey(smiles)
@@ -128,6 +128,7 @@ class TestCheckAvailabilitySingle:
             compound_name="Aspirin",
             smiles=smiles,
             inchikey=inchikey,
+            inchikey_structure_key=_inchikey_structure_key(inchikey),
             similarity_threshold=90,
             activity_types="IC50",
             processed_at=datetime.now(timezone.utc),
@@ -163,7 +164,7 @@ class TestCheckAvailabilitySingle:
 class TestCheckAvailabilityBatch:
     """Tests for POST /api/v1/jobs/check-availability/batch."""
 
-    @patch('backend.api.v1.jobs.probe_all_thresholds', side_effect=_mock_probe_data_available)
+    @patch('backend.modules.api_client.probe_all_thresholds', side_effect=_mock_probe_data_available)
     def test_batch_with_multiple_compounds(self, mock_probe, client):
         """Batch check with multiple compounds returns per-compound results."""
         response = client.post(
@@ -184,7 +185,7 @@ class TestCheckAvailabilityBatch:
         assert data["available_count"] == 2
         assert data["no_data_count"] == 0
 
-    @patch('backend.api.v1.jobs.probe_all_thresholds', side_effect=_mock_probe_no_data)
+    @patch('backend.modules.api_client.probe_all_thresholds', side_effect=_mock_probe_no_data)
     def test_batch_all_no_data(self, mock_probe, client):
         """Batch where no compounds have data should report no_data_count."""
         response = client.post(
@@ -203,7 +204,7 @@ class TestCheckAvailabilityBatch:
         assert data["available_count"] == 0
         assert data["no_data_count"] == 2
 
-    @patch('backend.api.v1.jobs.probe_all_thresholds')
+    @patch('backend.modules.api_client.probe_all_thresholds')
     def test_batch_mixed_availability(self, mock_probe, client):
         """Batch with mixed results: some available, some not."""
         def mixed_probe(smiles, threshold):
@@ -230,7 +231,7 @@ class TestCheckAvailabilityBatch:
         assert data["available_count"] == 1
         assert data["no_data_count"] == 1
 
-    @patch('backend.api.v1.jobs.probe_all_thresholds', side_effect=_mock_probe_data_available)
+    @patch('backend.modules.api_client.probe_all_thresholds', side_effect=_mock_probe_data_available)
     def test_batch_returns_summary_counts(self, mock_probe, client):
         """Batch response should include summary counts."""
         response = client.post(
@@ -249,7 +250,7 @@ class TestCheckAvailabilityBatch:
         assert "no_data_count" in data
         assert "results" in data
 
-    @patch('backend.api.v1.jobs.probe_all_thresholds', side_effect=Exception("API timeout"))
+    @patch('backend.modules.api_client.probe_all_thresholds', side_effect=Exception("API timeout"))
     def test_batch_handles_probe_failure_gracefully(self, mock_probe, client):
         """If probe fails for a compound, it should be reported as unavailable, not crash."""
         response = client.post(
@@ -276,11 +277,11 @@ class TestCheckAvailabilityBatch:
         # Should fail validation (empty list)
         assert response.status_code in (200, 422)
 
-    @patch('backend.api.v1.jobs.probe_all_thresholds', side_effect=_mock_probe_data_available)
+    @patch('backend.modules.api_client.probe_all_thresholds', side_effect=_mock_probe_data_available)
     def test_batch_existing_compounds_matched(self, mock_probe, test_engine, client):
         """Batch should find existing compounds by InChIKey for each input."""
         from backend.models.database import Compound
-        from backend.services.job_service import generate_inchikey
+        from backend.services.job_service import generate_inchikey, _inchikey_structure_key
 
         smiles = "CCO"
         inchikey = generate_inchikey(smiles)
@@ -292,6 +293,7 @@ class TestCheckAvailabilityBatch:
             compound_name="Ethanol",
             smiles=smiles,
             inchikey=inchikey,
+            inchikey_structure_key=_inchikey_structure_key(inchikey),
             similarity_threshold=90,
             activity_types="IC50",
             processed_at=datetime.now(timezone.utc),

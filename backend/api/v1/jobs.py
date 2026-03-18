@@ -54,22 +54,13 @@ from backend.services.job_service import (
     job_service,
     _job_to_response,
     _check_single_availability,
-    generate_inchikey,
-    _normalize_activity_types,
-    _normalize_activity_types_str,
-    _inchikey_structure_key,
-    _compute_config_match,
-    get_next_version_name,
-    get_next_version_names_bulk,
     MAX_BATCH_SIZE,
 )
 from backend.core.rate_limiter import (
-    RateLimiter,
     rate_limit,
     get_rate_limiter,
     RATE_LIMIT_MAX_JOBS,
     RATE_LIMIT_MAX_BATCH,
-    RATE_LIMIT_WINDOW_SECONDS,
 )
 from backend.repositories import job_repo
 

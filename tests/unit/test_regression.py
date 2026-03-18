@@ -197,7 +197,8 @@ class TestBatchSizeConsistency:
 
     def test_runtime_and_schema_batch_limit_match(self):
         """Verify runtime MAX_BATCH_SIZE matches schema max_length."""
-        source = (BACKEND_DIR / "api" / "v1" / "jobs.py").read_text()
+        # MAX_BATCH_SIZE was moved from jobs.py to job_service.py during Phase 4 extraction
+        source = (BACKEND_DIR / "services" / "job_service.py").read_text()
         assert 'MAX_BATCH_SIZE = 1000' in source
 
         schema_source = (BACKEND_DIR / "models" / "schemas.py").read_text()

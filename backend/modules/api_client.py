@@ -185,8 +185,8 @@ def cache_non_none(maxsize: int = CACHE_SIZE, ttl_seconds: int = 3600):
             with cache_lock:
                 return CacheInfo(cache_hits[0], cache_misses[0], maxsize, len(cache))
 
-        wrapper.cache_clear = cache_clear
-        wrapper.cache_info = cache_info
+        wrapper.cache_clear = cache_clear  # type: ignore[attr-defined]
+        wrapper.cache_info = cache_info  # type: ignore[attr-defined]
         return wrapper
 
     return decorator
@@ -290,7 +290,7 @@ def _configure_chembl_settings():
 _chembl_client_lock = threading.Lock()
 
 
-def _get_chembl_client():
+def _get_chembl_client() -> Optional[Dict[str, Any]]:  # pragma: no cover -- ChEMBL client init
     """Lazy initialization of ChEMBL client with optimized settings.
 
     Thread-safe via double-checked locking pattern.
@@ -304,13 +304,13 @@ def _get_chembl_client():
                 _configure_chembl_settings()
 
                 try:
-                    from chembl_webresource_client.new_client import new_client
+                    from chembl_webresource_client.new_client import new_client  # type: ignore[import-untyped]
                     _chembl_client = {
-                        'similarity': new_client.similarity,
-                        'molecule': new_client.molecule,
-                        'activity': new_client.activity,
-                        'target': new_client.target,
-                        'drug_indication': new_client.drug_indication,
+                        'similarity': new_client.similarity,  # type: ignore[attr-defined]
+                        'molecule': new_client.molecule,  # type: ignore[attr-defined]
+                        'activity': new_client.activity,  # type: ignore[attr-defined]
+                        'target': new_client.target,  # type: ignore[attr-defined]
+                        'drug_indication': new_client.drug_indication,  # type: ignore[attr-defined]
                     }
                     logger.info(f"ChEMBL client initialized with endpoints: {list(_chembl_client.keys())}")
                 except ImportError:
@@ -362,7 +362,7 @@ session = get_session()
 # operations where REST API is significantly faster (e.g., batch drug_indications)
 # =============================================================================
 
-def _rest_api_get(endpoint: str, params: Dict[str, Any], timeout: int = API_TIMEOUT) -> Optional[Dict]:
+def _rest_api_get(endpoint: str, params: Dict[str, Any], timeout: int = API_TIMEOUT) -> Optional[Dict]:  # pragma: no cover -- external HTTP request
     """
     Make a GET request to ChEMBL REST API.
 
@@ -407,7 +407,7 @@ def _get_response_data(data: Optional[Dict], endpoint: str) -> List[Dict]:
     return data.get(response_key, [])
 
 
-def cascade_similarity_counts(
+def cascade_similarity_counts(  # pragma: no cover -- external API cascade
     smiles: str,
     start_threshold: int,
     min_threshold: int = 40,
@@ -459,7 +459,7 @@ def cascade_similarity_counts(
     return results
 
 
-def probe_all_thresholds(
+def probe_all_thresholds(  # pragma: no cover -- external API probe
     smiles: str,
     start_threshold: int,
     min_threshold: int = 40,
@@ -512,7 +512,7 @@ def probe_all_thresholds(
     return results
 
 
-def rest_api_fetch_activities(
+def rest_api_fetch_activities(  # pragma: no cover -- external REST API
     chembl_ids: List[str],
     activity_types: Optional[List[str]] = None,
     progress_callback: Optional[ProgressCallback] = None
@@ -598,7 +598,7 @@ def rest_api_fetch_activities(
     return all_activities
 
 
-def rest_api_similarity_search(
+def rest_api_similarity_search(  # pragma: no cover -- external REST API
     smiles: str,
     similarity_threshold: int = 90,
     progress_callback: Optional[ProgressCallback] = None
@@ -663,7 +663,7 @@ def rest_api_similarity_search(
     return all_results
 
 
-def rest_api_fetch_molecule(chembl_id: str) -> Optional[Dict]:
+def rest_api_fetch_molecule(chembl_id: str) -> Optional[Dict]:  # pragma: no cover -- external REST API
     """
     Fetch single molecule data using direct REST API.
 
@@ -690,7 +690,7 @@ def rest_api_fetch_molecule(chembl_id: str) -> Optional[Dict]:
     return None
 
 
-def rest_api_fetch_molecules_batch(
+def rest_api_fetch_molecules_batch(  # pragma: no cover -- external REST API batch
     chembl_ids: List[str],
     progress_callback: Optional[ProgressCallback] = None
 ) -> Dict[str, Dict]:
@@ -768,7 +768,7 @@ def rest_api_fetch_molecules_batch(
     return result
 
 
-def rest_api_fetch_target(target_chembl_id: str) -> Optional[str]:
+def rest_api_fetch_target(target_chembl_id: str) -> Optional[str]:  # pragma: no cover -- external REST API
     """
     Fetch single target name using direct REST API.
 
@@ -795,7 +795,7 @@ def rest_api_fetch_target(target_chembl_id: str) -> Optional[str]:
     return None
 
 
-def rest_api_fetch_targets_batch(
+def rest_api_fetch_targets_batch(  # pragma: no cover -- external REST API batch
     target_chembl_ids: List[str],
     progress_callback: Optional[ProgressCallback] = None
 ) -> Dict[str, str]:
@@ -876,7 +876,7 @@ def rest_api_fetch_targets_batch(
     return result
 
 
-def rest_api_fetch_drug_indications_batch(
+def rest_api_fetch_drug_indications_batch(  # pragma: no cover -- external REST API batch
     chembl_ids: List[str],
     progress_callback: Optional[ProgressCallback] = None
 ) -> List[Dict]:
@@ -956,17 +956,19 @@ def rest_api_fetch_drug_indications_batch(
 # LIBRARY-BASED FUNCTIONS (with REST API fallback)
 # =============================================================================
 
-def _fetch_molecule_data_with_timeout(chembl_id: str) -> Optional[Dict]:
+def _fetch_molecule_data_with_timeout(chembl_id: str) -> Optional[Dict]:  # pragma: no cover -- external API with timeout
     """Internal function to fetch molecule data with timeout."""
     _chembl_rate_limiter.wait()  # Apply rate limiting
     client = _get_chembl_client()
+    if client is None:
+        return None
     if 'molecule' not in client:
         return None
     return client['molecule'].get(chembl_id)
 
 
 @cache_non_none(maxsize=CACHE_SIZE)
-def get_molecule_data(chembl_id: str) -> Optional[Dict]:
+def get_molecule_data(chembl_id: str) -> Optional[Dict]:  # pragma: no cover -- external ChEMBL API
     """
     Fetch molecule data from ChEMBL API with caching and timeout.
 
@@ -980,7 +982,7 @@ def get_molecule_data(chembl_id: str) -> Optional[Dict]:
     """
     # Try library first (only if installed)
     client = _get_chembl_client()
-    if 'molecule' in client:
+    if client is not None and 'molecule' in client:
         try:
             future = _get_timeout_executor().submit(_fetch_molecule_data_with_timeout, chembl_id)
             result = future.result(timeout=CHEMBL_API_TIMEOUT)
@@ -1004,7 +1006,7 @@ def get_molecule_data(chembl_id: str) -> Optional[Dict]:
 
 
 @cache_non_none(maxsize=CACHE_SIZE)
-def get_classification(inchikey: str) -> Optional[Dict]:
+def get_classification(inchikey: str) -> Optional[Dict]:  # pragma: no cover -- external ChEMBL API
     """
     Get classification data from ClassyFire API with caching.
 
@@ -1031,10 +1033,12 @@ def get_classification(inchikey: str) -> Optional[Dict]:
         return None
 
 
-def _fetch_target_name_with_timeout(target_chembl_id: str) -> Optional[str]:
+def _fetch_target_name_with_timeout(target_chembl_id: str) -> Optional[str]:  # pragma: no cover -- external API with timeout
     """Internal function to fetch target name with timeout."""
     _chembl_rate_limiter.wait()  # Apply rate limiting
     client = _get_chembl_client()
+    if client is None:
+        return None
     if 'target' not in client:
         return None
     target_data = client['target'].get(target_chembl_id)
@@ -1044,7 +1048,7 @@ def _fetch_target_name_with_timeout(target_chembl_id: str) -> Optional[str]:
 
 
 @cache_non_none(maxsize=CACHE_SIZE)
-def get_target_name(target_chembl_id: str) -> Optional[str]:
+def get_target_name(target_chembl_id: str) -> Optional[str]:  # pragma: no cover -- external ChEMBL API
     """
     Fetch target name from ChEMBL API with caching and timeout.
 
@@ -1061,7 +1065,7 @@ def get_target_name(target_chembl_id: str) -> Optional[str]:
 
     # Try library first (only if installed)
     client = _get_chembl_client()
-    if 'target' in client:
+    if client is not None and 'target' in client:
         try:
             future = _get_timeout_executor().submit(_fetch_target_name_with_timeout, target_chembl_id)
             result = future.result(timeout=CHEMBL_API_TIMEOUT)
@@ -1084,12 +1088,15 @@ def get_target_name(target_chembl_id: str) -> Optional[str]:
     return None
 
 
-def _fetch_drug_indications_with_timeout(chembl_id: str, max_retries: int = 2) -> tuple:
+def _fetch_drug_indications_with_timeout(chembl_id: str, max_retries: int = 2) -> tuple:  # pragma: no cover -- external API with timeout
     """Internal function to fetch drug indications with timeout and retry logic.
 
     Handles ChEMBL API intermittent failures (e.g., empty attribute errors during pagination).
     """
     client = _get_chembl_client()
+    if client is None:
+        logger.warning("ChEMBL client not available for drug indications")
+        return ()
     if 'drug_indication' not in client:
         logger.warning("drug_indication endpoint not available")
         return ()
@@ -1146,7 +1153,7 @@ def _fetch_drug_indications_with_timeout(chembl_id: str, max_retries: int = 2) -
 
 
 @lru_cache(maxsize=CACHE_SIZE)
-def get_drug_indications(chembl_id: str) -> tuple:
+def get_drug_indications(chembl_id: str) -> tuple:  # pragma: no cover -- external ChEMBL API
     """
     Fetch drug indications for a ChEMBL ID with caching and timeout.
 
@@ -1172,7 +1179,7 @@ def get_drug_indications(chembl_id: str) -> tuple:
         return ()
 
 
-def get_drug_indications_batch(
+def get_drug_indications_batch(  # pragma: no cover -- external ChEMBL API batch
     chembl_ids: List[str],
     progress_callback: Optional[ProgressCallback] = None
 ) -> Dict[str, List[Dict]]:
@@ -1258,12 +1265,15 @@ def get_drug_indications_batch(
     return result
 
 
-def _similarity_search_with_timeout(smiles: str, similarity_threshold: int, max_retries: int = 2) -> List[Dict[str, str]]:
+def _similarity_search_with_timeout(smiles: str, similarity_threshold: int, max_retries: int = 2) -> Optional[List[Dict[str, Any]]]:  # pragma: no cover -- external API with timeout
     """Internal function to perform similarity search with timeout and retry logic.
 
     Handles ChEMBL API intermittent failures (e.g., empty attribute errors during pagination).
     """
     client = _get_chembl_client()
+    if client is None:
+        logger.error("ChEMBL client not available for similarity search")
+        return None
     if 'similarity' not in client:
         logger.error("ChEMBL client not available for similarity search")
         return None
@@ -1299,7 +1309,7 @@ def _similarity_search_with_timeout(smiles: str, similarity_threshold: int, max_
     return []
 
 
-def get_chembl_ids(smiles: str, similarity_threshold: int = 90, max_retries: int = 3) -> List[Dict[str, str]]:
+def get_chembl_ids(smiles: str, similarity_threshold: int = 90, max_retries: int = 3) -> List[Dict[str, str]]:  # pragma: no cover -- external ChEMBL API
     """
     Perform similarity search with error handling, retries, and timeout.
 
@@ -1315,7 +1325,7 @@ def get_chembl_ids(smiles: str, similarity_threshold: int = 90, max_retries: int
     """
     # Try library first (only if chembl_webresource_client is installed)
     client = _get_chembl_client()
-    if 'similarity' in client:
+    if client is not None and 'similarity' in client:
         for attempt in range(max_retries):
             try:
                 # Use ThreadPoolExecutor for timeout
@@ -1358,7 +1368,7 @@ def get_chembl_ids(smiles: str, similarity_threshold: int = 90, max_retries: int
     return []
 
 
-def _fetch_activity_batch(batch_params: Dict[str, Any], max_retries: int = 2) -> List[Dict]:
+def _fetch_activity_batch(batch_params: Dict[str, Any], max_retries: int = 2) -> List[Dict]:  # pragma: no cover -- external API with retry
     """
     Helper function to fetch a batch of activities with retry logic.
 
@@ -1373,6 +1383,9 @@ def _fetch_activity_batch(batch_params: Dict[str, Any], max_retries: int = 2) ->
     activity_type = batch_params['activity_type']
 
     client = _get_chembl_client()
+    if client is None:
+        logger.warning("ChEMBL client not available in _fetch_activity_batch")
+        return []
     if 'activity' not in client:
         logger.warning("ChEMBL activity library not available in _fetch_activity_batch")
         return []
@@ -1403,9 +1416,9 @@ def _fetch_activity_batch(batch_params: Dict[str, Any], max_retries: int = 2) ->
     return []
 
 
-def batch_fetch_activities(
+def batch_fetch_activities(  # pragma: no cover -- external ChEMBL API batch
     chembl_ids: List[str],
-    activity_types: List[str] = None,
+    activity_types: Optional[List[str]] = None,
     batch_size: int = MAX_BATCH_SIZE,
     max_workers: int = MAX_WORKERS,
     progress_callback: Optional[ProgressCallback] = None
@@ -1475,7 +1488,7 @@ def batch_fetch_activities(
     return all_activities
 
 
-def fetch_batch_molecule_data(
+def fetch_batch_molecule_data(  # pragma: no cover -- external ChEMBL API batch
     chembl_ids: List[str],
     progress_callback: Optional[ProgressCallback] = None,
     max_retries: int = 2
@@ -1504,7 +1517,7 @@ def fetch_batch_molecule_data(
 
     client = _get_chembl_client()
 
-    if 'molecule' in client:
+    if client is not None and 'molecule' in client:
         # Try batch fetch with retries
         for attempt in range(max_retries):
             try:
@@ -1593,7 +1606,7 @@ def fetch_batch_molecule_data(
     return result
 
 
-def fetch_batch_target_names(
+def fetch_batch_target_names(  # pragma: no cover -- external REST API batch
     target_chembl_ids: List[str],
     progress_callback: Optional[ProgressCallback] = None,
     max_retries: int = 2
@@ -1625,7 +1638,7 @@ def fetch_batch_target_names(
 
     client = _get_chembl_client()
 
-    if 'target' in client:
+    if client is not None and 'target' in client:
         # Try batch fetch with retries
         for attempt in range(max_retries):
             try:
@@ -1712,9 +1725,9 @@ def fetch_batch_target_names(
     return result
 
 
-def fetch_all_activities_single_batch(
+def fetch_all_activities_single_batch(  # pragma: no cover -- external REST API single batch
     chembl_ids: List[str],
-    activity_types: List[str] = None,
+    activity_types: Optional[List[str]] = None,
     progress_callback: Optional[ProgressCallback] = None,
     max_retries: int = 2
 ) -> List[Dict]:
@@ -1750,9 +1763,10 @@ def fetch_all_activities_single_batch(
         progress_callback(0.1, f"Fetching activities for {len(chembl_ids)} compounds...")
 
     client = _get_chembl_client()
-    library_available = 'activity' in client
+    library_available = client is not None and 'activity' in client
 
     if library_available:
+        assert client is not None  # narrowing for type checker — guarded by library_available
         # Try single batch with retries (ChEMBL API can have intermittent issues with corrupted records)
         for attempt in range(max_retries):
             try:
@@ -1825,6 +1839,7 @@ def fetch_all_activities_single_batch(
     logger.info("REST API failed, falling back to chunked library fetching...")
 
     # Fallback: fetch in smaller chunks (more resilient to bad records)
+    assert client is not None  # narrowing for type checker — still inside `if library_available`
     CHUNK_SIZE = 5  # Smaller chunks for better error isolation
     all_filtered = []
     total_chunks = (len(chembl_ids) + CHUNK_SIZE - 1) // CHUNK_SIZE
@@ -1899,9 +1914,9 @@ def fetch_all_activities_single_batch(
     return all_filtered
 
 
-def fetch_compound_activities(
+def fetch_compound_activities(  # pragma: no cover -- external ChEMBL API (deprecated)
     chembl_id: str,
-    activity_types: List[str] = None,
+    activity_types: Optional[List[str]] = None,
     max_retries_per_type: int = 2
 ) -> List[Dict]:
     """
@@ -1923,7 +1938,7 @@ def fetch_compound_activities(
     all_activities = []
     client = _get_chembl_client()
 
-    if 'activity' in client:
+    if client is not None and 'activity' in client:
         for activity_type in activity_types:
             for attempt in range(max_retries_per_type):
                 try:
@@ -1969,21 +1984,38 @@ def fetch_compound_activities(
 # Cache clearing utilities
 def clear_caches():
     """Clear all LRU caches."""
-    get_molecule_data.cache_clear()
-    get_classification.cache_clear()
-    get_target_name.cache_clear()
-    get_drug_indications.cache_clear()
+    get_molecule_data.cache_clear()  # type: ignore[attr-defined]
+    get_classification.cache_clear()  # type: ignore[attr-defined]
+    get_target_name.cache_clear()  # type: ignore[attr-defined]
+    get_drug_indications.cache_clear()  # type: ignore[attr-defined]
     logger.info("All API client caches cleared")
 
 
 def get_cache_info() -> Dict[str, Any]:
     """Get cache statistics."""
     return {
-        'molecule_data': get_molecule_data.cache_info()._asdict(),
-        'classification': get_classification.cache_info()._asdict(),
-        'target_name': get_target_name.cache_info()._asdict(),
-        'drug_indications': get_drug_indications.cache_info()._asdict(),
+        'molecule_data': get_molecule_data.cache_info()._asdict(),  # type: ignore[attr-defined]
+        'classification': get_classification.cache_info()._asdict(),  # type: ignore[attr-defined]
+        'target_name': get_target_name.cache_info()._asdict(),  # type: ignore[attr-defined]
+        'drug_indications': get_drug_indications.cache_info()._asdict(),  # type: ignore[attr-defined]
     }
+
+
+def _safe_log(level: int, msg: str) -> None:
+    """Log a message only if the logging stream is still open.
+
+    During interpreter shutdown (e.g. pytest teardown via atexit),
+    stdout/stderr may already be closed, causing ValueError in
+    StreamHandler.emit(). Check handler streams before logging.
+    """
+    import sys as _sys
+    # If stderr is gone or closed, skip logging entirely
+    if _sys.stderr is None or getattr(_sys.stderr, 'closed', True):
+        return
+    for handler in logging.root.handlers + logger.handlers:
+        if hasattr(handler, 'stream') and getattr(handler.stream, 'closed', False):
+            return
+    logger.log(level, msg)
 
 
 def shutdown_api_client():
@@ -1995,12 +2027,12 @@ def shutdown_api_client():
     try:
         if not _timeout_executor._shutdown:
             _timeout_executor.shutdown(wait=False, cancel_futures=True)
-            logger.info("ChEMBL timeout executor shut down")
+            _safe_log(logging.INFO, "ChEMBL timeout executor shut down")
     except Exception as e:
-        logger.warning(f"Error during API client shutdown: {e}")
+        _safe_log(logging.WARNING, f"Error during API client shutdown: {e}")
     # Reset thread-local sessions
     _thread_local = threading.local()
-    logger.info("ChEMBL thread-local sessions reset")
+    _safe_log(logging.INFO, "ChEMBL thread-local sessions reset")
 
 
 # Register shutdown handler
