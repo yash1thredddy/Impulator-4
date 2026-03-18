@@ -1,6 +1,7 @@
 """
 Shared test fixtures for IMPULATOR tests.
 """
+import json
 import os
 import pytest
 from unittest.mock import patch
@@ -46,3 +47,12 @@ def sample_job_params():
         "similarity_threshold": 90,
         "activity_types": None,
     }
+
+
+@pytest.fixture(scope="session")
+def golden_compounds():
+    """Load golden compound fixtures for IMP scoring regression tests."""
+    fixture_path = Path(__file__).parent / "fixtures" / "golden_compounds.json"
+    with open(fixture_path) as f:
+        data = json.load(f)
+    return data["compounds"]

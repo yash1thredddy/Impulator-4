@@ -20,7 +20,7 @@ import pytest
 
 pytestmark = pytest.mark.network
 
-from backend.modules.api_client import (
+from backend.modules.api_client import (  # noqa: E402 -- pytestmark must precede imports
     # Main functions (library with REST fallback)
     get_chembl_ids,
     get_molecule_data,

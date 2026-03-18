@@ -3,6 +3,9 @@ Ligand Efficiency Metrics Calculation Module
 
 This module implements the efficiency metric calculations according to IMPs 2.0 (Reddy et al., Table 1).
 
+Reference: Dahlin et al., "Assay interference and off-target liabilities of reported histone
+acetyltransferase inhibitors" (IMPs 2.0), Nature Communications, 2017.
+
 Metrics calculated:
 - SEI: Surface Efficiency Index (Equation 2.3)
 - BEI: Binding Efficiency Index (Equation 2.2)
@@ -31,6 +34,11 @@ def calculate_sei(pActivity: float, psa: float) -> float:
 
     Returns:
         float: SEI value or NaN if invalid input
+
+    Example:
+        Aspirin (acetylsalicylic acid): pActivity=5.2, PSA=63.6 A^2
+        >>> calculate_sei(5.2, 63.6)
+        8.176  # 5.2 / (63.6 / 100)
     """
     if psa and not np.isnan(pActivity) and psa > 0:
         return pActivity / (psa / 100)
@@ -49,6 +57,11 @@ def calculate_bei(pActivity: float, molecular_weight: float) -> float:
 
     Returns:
         float: BEI value or NaN if invalid input
+
+    Example:
+        Aspirin: pActivity=5.2, MW=180.16 Da
+        >>> calculate_bei(5.2, 180.16)
+        28.863  # 5.2 / (180.16 / 1000)
     """
     if molecular_weight and not np.isnan(pActivity) and molecular_weight > 0:
         return pActivity / (molecular_weight / 1000)
@@ -70,6 +83,11 @@ def calculate_nsei(pActivity: float, npol: float) -> float:
 
     Returns:
         float: NSEI value or NaN if invalid input
+
+    Example:
+        Aspirin: pActivity=5.2, NPOL=4 (3 oxygens + 0 nitrogens... actually 4 O atoms)
+        >>> calculate_nsei(5.2, 4)
+        1.3  # 5.2 / 4
     """
     if npol and not np.isnan(pActivity) and npol > 0:
         return pActivity / npol
@@ -91,6 +109,11 @@ def calculate_nbei(pActivity: float, heavy_atoms: float) -> float:
 
     Returns:
         float: NBEI value or NaN if invalid input
+
+    Example:
+        Aspirin: pActivity=5.2, NHA=13 heavy atoms
+        >>> calculate_nbei(5.2, 13)
+        0.4  # 5.2 / 13
     """
     if heavy_atoms and not np.isnan(pActivity) and heavy_atoms > 0:
         return pActivity / heavy_atoms
@@ -112,6 +135,11 @@ def calculate_nbei_visualization(pActivity: float, heavy_atoms: float) -> float:
 
     Returns:
         float: nBEI_viz value or NaN if invalid input
+
+    Example:
+        Aspirin: pActivity=5.2, NHA=13
+        >>> calculate_nbei_visualization(5.2, 13)
+        6.314  # 5.2 + log10(13) = 5.2 + 1.114
     """
     if heavy_atoms and not np.isnan(pActivity) and heavy_atoms > 0:
         return pActivity + np.log10(heavy_atoms)

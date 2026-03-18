@@ -360,19 +360,20 @@ def generate_imp_report(df: pd.DataFrame, compound_name: str = "Query Compound")
             report_lines.append("TOP 5 IMP CANDIDATES (by IMP score)")
             report_lines.append("-" * 70)
 
-            for idx, row in top_imps.iterrows():
-                chembl_id = row.get('ChEMBL_ID', 'Unknown')
-                molecule_name = row.get('Molecule_Name', 'Unknown')
-                score = row['IMP_Final_Score']
-                confidence = row.get('IMP_Confidence', 'Unknown')
-                outlier_count = row.get('Outlier_Count', 0)
+            # Vectorized report line construction
+            chembl_ids = top_imps.get('ChEMBL_ID', pd.Series('Unknown', index=top_imps.index)).fillna('Unknown')
+            mol_names = top_imps.get('Molecule_Name', pd.Series('Unknown', index=top_imps.index)).fillna('Unknown')
+            scores = top_imps['IMP_Final_Score'].map(lambda s: f"{s:.3f}")
+            confidences = top_imps.get('IMP_Confidence', pd.Series('Unknown', index=top_imps.index)).fillna('Unknown').astype(str)
+            outlier_counts = top_imps.get('Outlier_Count', pd.Series(0, index=top_imps.index)).fillna(0).astype(int).astype(str)
 
-                report_lines.append(
-                    f"{chembl_id} ({molecule_name}): "
-                    f"IMP Score = {score:.3f}, "
-                    f"Confidence = {confidence}, "
-                    f"Outliers = {outlier_count}"
-                )
+            lines = (
+                chembl_ids + " (" + mol_names + "): "
+                + "IMP Score = " + scores + ", "
+                + "Confidence = " + confidences + ", "
+                + "Outliers = " + outlier_counts
+            )
+            report_lines.extend(lines.tolist())
 
             report_lines.append("")
 

@@ -212,14 +212,13 @@ class TestCompoundNameValidation:
             assert job.compound_name == name
 
     def test_compound_name_too_long_rejected(self):
-        """Test compound names longer than 100 characters are rejected."""
+        """Test compound names longer than 255 characters are rejected."""
         from backend.models.schemas import JobCreate
 
-        long_name = "A" * 101
+        long_name = "A" * 256
         with pytest.raises(ValidationError) as exc_info:
             JobCreate(compound_name=long_name, author_name="Test Author", smiles="CCO")
-        # Pydantic error message says "should have at most 100 characters"
-        assert "100 characters" in str(exc_info.value).lower()
+        assert "255 characters" in str(exc_info.value).lower()
 
     def test_compound_name_path_traversal_rejected(self):
         """Test path traversal attempts are rejected."""
@@ -461,12 +460,12 @@ class TestResolveDuplicateRequestSchema:
         assert "invalid" in errors_str
 
     def test_new_compound_name_too_long_rejected(self):
-        """Test that new_compound_name exceeding 100 chars is rejected."""
+        """Test that new_compound_name exceeding 255 chars is rejected."""
         from backend.models.schemas import ResolveDuplicateRequest
 
         with pytest.raises(ValidationError) as exc_info:
-            ResolveDuplicateRequest(**self._make_resolve(new_compound_name="A" * 101))
-        assert "100 characters" in str(exc_info.value).lower()
+            ResolveDuplicateRequest(**self._make_resolve(new_compound_name="A" * 256))
+        assert "255 characters" in str(exc_info.value).lower()
 
     def test_new_compound_name_null_byte_rejected(self):
         """Test that null byte in new_compound_name is rejected."""

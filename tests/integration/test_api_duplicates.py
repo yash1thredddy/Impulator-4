@@ -35,7 +35,7 @@ class TestDuplicateDetection:
     def test_submit_job_duplicate_exact_match(self, test_engine, client_with_db):
         """Test duplicate detection when exact match exists."""
         from backend.models.database import Compound
-        from backend.services.job_service import generate_inchikey
+        from backend.services.job_service import generate_inchikey, _inchikey_structure_key
 
         Session = sessionmaker(bind=test_engine)
 
@@ -48,7 +48,10 @@ class TestDuplicateDetection:
             entry_id="test-entry-id-12345",
             compound_name="Aspirin",
             smiles=smiles,
-            inchikey=inchikey
+            inchikey=inchikey,
+            inchikey_structure_key=_inchikey_structure_key(inchikey),
+            similarity_threshold=90,
+            activity_types="EC50,IC50,Kd,Ki",
         )
         session.add(existing_compound)
         session.commit()
@@ -64,8 +67,8 @@ class TestDuplicateDetection:
             }
         )
 
-        # Should return duplicate_found
-        assert response.status_code == 201
+        # Duplicate detection returns 200 (not 201) with duplicate_found status
+        assert response.status_code == 200
         data = response.json()
         assert data.get("status") == "duplicate_found"
         assert data.get("duplicate_type") == "exact"
@@ -75,7 +78,7 @@ class TestDuplicateDetection:
     def test_submit_job_duplicate_structure_only(self, test_engine, client_with_db):
         """Test duplicate detection when only structure matches (different name)."""
         from backend.models.database import Compound
-        from backend.services.job_service import generate_inchikey
+        from backend.services.job_service import generate_inchikey, _inchikey_structure_key
 
         Session = sessionmaker(bind=test_engine)
 
@@ -87,7 +90,10 @@ class TestDuplicateDetection:
             entry_id="test-entry-id-12345",
             compound_name="Aspirin",
             smiles=smiles,
-            inchikey=inchikey
+            inchikey=inchikey,
+            inchikey_structure_key=_inchikey_structure_key(inchikey),
+            similarity_threshold=90,
+            activity_types="EC50,IC50,Kd,Ki",
         )
         session.add(existing_compound)
         session.commit()
@@ -104,7 +110,8 @@ class TestDuplicateDetection:
             }
         )
 
-        assert response.status_code == 201
+        # Duplicate detection returns 200 (not 201)
+        assert response.status_code == 200
         data = response.json()
         assert data.get("status") == "duplicate_found"
         assert data.get("duplicate_type") == "structure_only"
@@ -133,7 +140,7 @@ class TestResolveDuplicate:
     def test_resolve_duplicate_replace(self, test_engine, client_with_db):
         """Test replacing an existing compound."""
         from backend.models.database import Compound
-        from backend.services.job_service import generate_inchikey
+        from backend.services.job_service import generate_inchikey, _inchikey_structure_key
 
         Session = sessionmaker(bind=test_engine)
 
@@ -145,7 +152,10 @@ class TestResolveDuplicate:
             entry_id="existing-entry-id-12345",
             compound_name="Ethanol",
             smiles=smiles,
-            inchikey=inchikey
+            inchikey=inchikey,
+            inchikey_structure_key=_inchikey_structure_key(inchikey),
+            similarity_threshold=90,
+            activity_types="EC50,IC50,Kd,Ki",
         )
         session.add(existing_compound)
         session.commit()
@@ -186,7 +196,7 @@ class TestResolveDuplicate:
     def test_resolve_duplicate_as_duplicate(self, test_engine, client_with_db):
         """Test saving as a duplicate (keeping both) with different config."""
         from backend.models.database import Compound
-        from backend.services.job_service import generate_inchikey
+        from backend.services.job_service import generate_inchikey, _inchikey_structure_key
 
         Session = sessionmaker(bind=test_engine)
 
@@ -199,6 +209,7 @@ class TestResolveDuplicate:
             compound_name="Ethanol",
             smiles=smiles,
             inchikey=inchikey,
+            inchikey_structure_key=_inchikey_structure_key(inchikey),
             similarity_threshold=90,
             activity_types="IC50,Ki",  # Different from default so config isn't "identical"
         )
@@ -234,7 +245,7 @@ class TestResolveDuplicate:
     def test_resolve_duplicate_identical_config_blocked(self, test_engine, client_with_db):
         """Test that DUPLICATE action is blocked when config is identical."""
         from backend.models.database import Compound
-        from backend.services.job_service import generate_inchikey
+        from backend.services.job_service import generate_inchikey, _inchikey_structure_key
 
         Session = sessionmaker(bind=test_engine)
 
@@ -247,6 +258,7 @@ class TestResolveDuplicate:
             compound_name="Ethanol",
             smiles=smiles,
             inchikey=inchikey,
+            inchikey_structure_key=_inchikey_structure_key(inchikey),
             similarity_threshold=90,
             activity_types="EC50,IC50,Kd,Ki",
         )

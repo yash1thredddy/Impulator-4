@@ -1519,7 +1519,6 @@ def render_csv_upload_form() -> Optional[str]:
         # --- Availability Results Section ---
         batch_avail = st.session_state.get('batch_availability_results')
         batch_avail_decisions = st.session_state.get('batch_availability_decisions', {})
-        batch_auto_skipped = st.session_state.get('batch_auto_skipped_no_data', [])
 
         if batch_avail and batch_avail.get("results"):
             avail_results = batch_avail["results"]

@@ -7,8 +7,6 @@ for per-session, per-route rate limiting.
 import time
 import threading
 from collections import defaultdict
-from typing import Tuple
-
 from fastapi import Depends, HTTPException
 
 from backend.core.auth import validate_session_id
@@ -116,6 +114,11 @@ def rate_limit(limit: int = RATE_LIMIT_MAX_JOBS, key_suffix: str = ""):
         session_id: str = Depends(validate_session_id),
         limiter: RateLimiter = Depends(get_rate_limiter),
     ):
+        """FastAPI dependency that enforces rate limiting per session per route.
+
+        Raises:
+            HTTPException: 429 if the session exceeds the configured rate limit.
+        """
         effective_key = f"{session_id}{key_suffix}" if key_suffix else session_id
         allowed, remaining = limiter.check_rate_limit(effective_key, limit)
         if not allowed:

@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any, Callable, Union
 
 from sqlalchemy.orm import Session
-from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
 from backend.models.database import Compound, Job, JobStatus, JobType
@@ -37,7 +36,6 @@ from backend.models.schemas import (
     CheckDuplicatesRequest,
     CheckAvailabilityBatchRequest,
     DeleteResponse,
-    CancelResponse,
 )
 from backend.core.azure_sync import sync_db_to_azure, delete_result_from_azure_by_entry_id
 from backend.config import settings
@@ -171,8 +169,6 @@ def get_next_version_names_bulk(db: Session, compound_names: List[str]) -> Dict[
     Returns:
         Dict mapping original compound name to its next version name
     """
-    from sqlalchemy import or_
-
     if not compound_names:
         return {}
 

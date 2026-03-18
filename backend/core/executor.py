@@ -88,6 +88,7 @@ class JobExecutor:
 
         # Auto-cleanup on completion (callback runs in worker thread)
         def cleanup(f: Future):
+            """Remove completed job from tracking dict and log any exceptions."""
             with self._lock:
                 self._futures.pop(job_id, None)
             if f.exception():

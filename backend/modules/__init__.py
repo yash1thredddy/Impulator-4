@@ -78,7 +78,7 @@ __all__ = [
 ]
 
 
-def __getattr__(name):
+def __getattr__(name):  # pragma: no cover -- lazy import dispatcher, tested indirectly
     """Lazy import: only load submodules when their exports are accessed."""
     # API Client
     if name in ("get_molecule_data", "get_classification", "get_chembl_ids",

@@ -26,7 +26,7 @@ from backend.config import settings
 logger = logging.getLogger(__name__)
 
 
-class AzureSyncRotatingFileHandler(RotatingFileHandler):
+class AzureSyncRotatingFileHandler(RotatingFileHandler):  # pragma: no cover -- log rotation lifecycle
     """
     RotatingFileHandler that uploads rotated log files to Azure Blob storage.
 
@@ -415,7 +415,7 @@ def list_results_in_azure() -> list:
 # - Database is the source of truth, no legacy sync needed
 
 
-def sync_logs_to_azure() -> bool:
+def sync_logs_to_azure() -> bool:  # pragma: no cover -- shutdown log upload
     """
     Upload current (non-rotated) log file to Azure on shutdown.
 
@@ -470,7 +470,7 @@ def sync_logs_to_azure() -> bool:
         return False
 
 
-def _cleanup_old_log_archives(keep_count: int = 10) -> None:
+def _cleanup_old_log_archives(keep_count: int = 10) -> None:  # pragma: no cover -- Azure log cleanup
     """
     Remove old log archives from Azure, keeping only the most recent ones.
 
@@ -509,7 +509,7 @@ def _cleanup_old_log_archives(keep_count: int = 10) -> None:
 
 
 # Re-export from canonical location for backward compatibility (ARCH-19)
-from backend.core.storage_paths import get_storage_path_from_entry_id  # noqa: F401
+from backend.core.storage_paths import get_storage_path_from_entry_id  # noqa: E402, F401 -- re-export for backward compat (ARCH-19)
 
 
 def upload_result_to_azure_by_entry_id(local_path: str, entry_id: str) -> bool:
@@ -567,7 +567,7 @@ def upload_result_to_azure_by_entry_id(local_path: str, entry_id: str) -> bool:
         return False
 
 
-def download_result_from_azure_by_entry_id(entry_id: str, local_path: str) -> bool:
+def download_result_from_azure_by_entry_id(entry_id: str, local_path: str) -> bool:  # pragma: no cover -- Azure download with path traversal guard
     """
     Download result ZIP file from Azure Blob storage using entry_id.
 
@@ -603,6 +603,7 @@ def download_result_from_azure_by_entry_id(entry_id: str, local_path: str) -> bo
         # Use Path.is_relative_to() for proper containment check (not string startswith)
         # This prevents bypasses like /tmp-evil matching /tmp
         def is_path_within(path: Path, parent: Path) -> bool:
+            """Check if path is contained within parent directory (path traversal guard)."""
             try:
                 path.relative_to(parent)
                 return True

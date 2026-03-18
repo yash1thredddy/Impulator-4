@@ -199,6 +199,7 @@ class TestGetActiveJobsDetailed:
         session = Session()
         yield session
         session.close()
+        engine.dispose()
 
     @pytest.fixture
     def service(self):
@@ -252,7 +253,7 @@ class TestGetActiveJobsDetailed:
         from datetime import datetime, timezone
 
         # Create a pending job
-        pending_job = service.create_job(
+        _ = service.create_job(
             db_session, JobType.SINGLE,
             {"compound_name": "Pending", "smiles": "CCO"},
             session_id="test-session",
@@ -316,6 +317,7 @@ class TestCancelJobTerminalStates:
         session = Session()
         yield session
         session.close()
+        engine.dispose()
 
     @pytest.fixture
     def service(self):
@@ -394,6 +396,7 @@ class TestFailJobEdgeCases:
         session = Session()
         yield session
         session.close()
+        engine.dispose()
 
     @pytest.fixture
     def service(self):
@@ -451,6 +454,7 @@ class TestCheckPendingCompounds:
         session = Session()
         yield session
         session.close()
+        engine.dispose()
 
     @pytest.fixture
     def service(self):
@@ -518,3 +522,327 @@ class TestCheckPendingCompounds:
 
         result = service.check_pending_compounds(db_session, ["Aspirin"])
         assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# Duplicate detection pure logic tests (TEST-02)
+# ---------------------------------------------------------------------------
+
+
+class TestComputeConfigMatch:
+    """Tests for _compute_config_match() -- pure config comparison logic."""
+
+    def _make_compound(self, threshold=90, activity_types="EC50,IC50,Kd,Ki"):
+        """Build a minimal Compound-like object for testing."""
+        from backend.models.database import Compound
+        return Compound(
+            entry_id="test-entry",
+            compound_name="Test",
+            similarity_threshold=threshold,
+            activity_types=activity_types,
+        )
+
+    def test_identical_config(self):
+        from backend.services.job_service import _compute_config_match, _normalize_activity_types
+        comp = self._make_compound(threshold=90, activity_types="EC50,IC50,Kd,Ki")
+        submitted_at = _normalize_activity_types(["EC50", "IC50", "Kd", "Ki"])
+        assert _compute_config_match(comp, 90, submitted_at) == "identical"
+
+    def test_different_threshold(self):
+        from backend.services.job_service import _compute_config_match, _normalize_activity_types
+        comp = self._make_compound(threshold=90, activity_types="EC50,IC50,Kd,Ki")
+        submitted_at = _normalize_activity_types(["EC50", "IC50", "Kd", "Ki"])
+        assert _compute_config_match(comp, 70, submitted_at) == "different_threshold"
+
+    def test_different_activities(self):
+        from backend.services.job_service import _compute_config_match, _normalize_activity_types
+        comp = self._make_compound(threshold=90, activity_types="EC50,IC50,Kd,Ki")
+        submitted_at = _normalize_activity_types(["IC50", "Ki"])
+        assert _compute_config_match(comp, 90, submitted_at) == "different_activities"
+
+    def test_different_both(self):
+        from backend.services.job_service import _compute_config_match, _normalize_activity_types
+        comp = self._make_compound(threshold=90, activity_types="EC50,IC50,Kd,Ki")
+        submitted_at = _normalize_activity_types(["IC50"])
+        assert _compute_config_match(comp, 70, submitted_at) == "different_both"
+
+    def test_none_activity_types(self):
+        """None stored activity_types should use default and still compare."""
+        from backend.services.job_service import _compute_config_match, _DEFAULT_ACTIVITY_TYPES
+        comp = self._make_compound(threshold=90, activity_types=None)
+        assert _compute_config_match(comp, 90, _DEFAULT_ACTIVITY_TYPES) == "identical"
+
+    def test_empty_activity_types(self):
+        """Empty string activity_types should use default."""
+        from backend.services.job_service import _compute_config_match, _DEFAULT_ACTIVITY_TYPES
+        comp = self._make_compound(threshold=90, activity_types="")
+        assert _compute_config_match(comp, 90, _DEFAULT_ACTIVITY_TYPES) == "identical"
+
+
+class TestNormalizeActivityTypes:
+    """Tests for _normalize_activity_types() -- list to sorted string."""
+
+    def test_normal_list(self):
+        from backend.services.job_service import _normalize_activity_types
+        assert _normalize_activity_types(["EC50", "IC50"]) == "EC50,IC50"
+
+    def test_sorts_alphabetically(self):
+        from backend.services.job_service import _normalize_activity_types
+        assert _normalize_activity_types(["Ki", "EC50", "IC50"]) == "EC50,IC50,Ki"
+
+    def test_none_returns_default(self):
+        from backend.services.job_service import _normalize_activity_types, _DEFAULT_ACTIVITY_TYPES
+        assert _normalize_activity_types(None) == _DEFAULT_ACTIVITY_TYPES
+
+    def test_empty_list_returns_default(self):
+        from backend.services.job_service import _normalize_activity_types, _DEFAULT_ACTIVITY_TYPES
+        assert _normalize_activity_types([]) == _DEFAULT_ACTIVITY_TYPES
+
+    def test_duplicates_preserved(self):
+        """List dedup is caller's responsibility; normalize just sorts and joins."""
+        from backend.services.job_service import _normalize_activity_types
+        result = _normalize_activity_types(["EC50", "EC50"])
+        assert result == "EC50,EC50"
+
+    def test_case_preservation(self):
+        from backend.services.job_service import _normalize_activity_types
+        result = _normalize_activity_types(["ec50", "IC50"])
+        assert "ec50" in result
+        assert "IC50" in result
+
+
+class TestNormalizeActivityTypesStr:
+    """Tests for _normalize_activity_types_str() -- stored string normalization."""
+
+    def test_normal_string(self):
+        from backend.services.job_service import _normalize_activity_types_str
+        assert _normalize_activity_types_str("IC50,EC50") == "EC50,IC50"
+
+    def test_none_returns_default(self):
+        from backend.services.job_service import _normalize_activity_types_str, _DEFAULT_ACTIVITY_TYPES
+        assert _normalize_activity_types_str(None) == _DEFAULT_ACTIVITY_TYPES
+
+    def test_empty_string_returns_default(self):
+        from backend.services.job_service import _normalize_activity_types_str, _DEFAULT_ACTIVITY_TYPES
+        assert _normalize_activity_types_str("") == _DEFAULT_ACTIVITY_TYPES
+
+    def test_extra_spaces(self):
+        from backend.services.job_service import _normalize_activity_types_str
+        assert _normalize_activity_types_str(" EC50 , IC50 ") == "EC50,IC50"
+
+
+class TestInchikeyStructureKey:
+    """Tests for _inchikey_structure_key() -- protonation-insensitive key."""
+
+    def test_full_inchikey(self):
+        from backend.services.job_service import _inchikey_structure_key
+        result = _inchikey_structure_key("BSYNRYMUTXBXSQ-UHFFFAOYSA-N")
+        assert result == "BSYNRYMUTXBXSQ-UHFFFAOYSA"
+
+    def test_none_returns_none(self):
+        from backend.services.job_service import _inchikey_structure_key
+        assert _inchikey_structure_key(None) is None
+
+    def test_empty_string_returns_none(self):
+        from backend.services.job_service import _inchikey_structure_key
+        assert _inchikey_structure_key("") is None
+
+    def test_short_inchikey_single_block(self):
+        """Malformed InChIKey with no hyphens returns the original string."""
+        from backend.services.job_service import _inchikey_structure_key
+        result = _inchikey_structure_key("NOHYPHENS")
+        assert result == "NOHYPHENS"
+
+    def test_case_insensitive(self):
+        from backend.services.job_service import _inchikey_structure_key
+        result = _inchikey_structure_key("bsynrymutxbxsq-uhfffaoysa-n")
+        assert result == "BSYNRYMUTXBXSQ-UHFFFAOYSA"
+
+
+class TestGetNextVersionName:
+    """Tests for get_next_version_name() -- needs real DB for compound queries."""
+
+    @pytest.fixture
+    def db_session(self):
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import StaticPool
+        from backend.core.database import Base
+        from backend.models.database import Compound  # noqa: F401
+
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+        session = Session()
+        yield session
+        session.close()
+        engine.dispose()
+
+    def _seed(self, db, name):
+        from backend.models.database import Compound
+        import uuid
+        comp = Compound(entry_id=str(uuid.uuid4()), compound_name=name)
+        db.add(comp)
+        db.commit()
+
+    def test_first_version(self, db_session):
+        from backend.services.job_service import get_next_version_name
+        result = get_next_version_name(db_session, "Aspirin")
+        assert result == "Aspirin_v2"
+
+    def test_second_version(self, db_session):
+        from backend.services.job_service import get_next_version_name
+        self._seed(db_session, "Aspirin")
+        result = get_next_version_name(db_session, "Aspirin")
+        assert result == "Aspirin_v2"
+
+    def test_third_version(self, db_session):
+        from backend.services.job_service import get_next_version_name
+        self._seed(db_session, "Aspirin")
+        self._seed(db_session, "Aspirin_v2")
+        result = get_next_version_name(db_session, "Aspirin")
+        assert result == "Aspirin_v3"
+
+    def test_skip_version(self, db_session):
+        from backend.services.job_service import get_next_version_name
+        self._seed(db_session, "Aspirin")
+        self._seed(db_session, "Aspirin_v3")
+        result = get_next_version_name(db_session, "Aspirin")
+        assert result == "Aspirin_v4"
+
+
+class TestBuildConfigDiff:
+    """Tests for _build_config_diff() -- produces diff dict or None."""
+
+    def _make_compound(self, threshold=90, activity_types="EC50,IC50,Kd,Ki"):
+        from backend.models.database import Compound
+        return Compound(
+            entry_id="test",
+            compound_name="Test",
+            similarity_threshold=threshold,
+            activity_types=activity_types,
+        )
+
+    def test_identical_returns_none(self):
+        from backend.services.job_service import _build_config_diff, _normalize_activity_types
+        comp = self._make_compound()
+        submitted_at = _normalize_activity_types(["EC50", "IC50", "Kd", "Ki"])
+        assert _build_config_diff(comp, 90, submitted_at) is None
+
+    def test_different_threshold(self):
+        from backend.services.job_service import _build_config_diff, _normalize_activity_types
+        comp = self._make_compound(threshold=90)
+        submitted_at = _normalize_activity_types(["EC50", "IC50", "Kd", "Ki"])
+        diff = _build_config_diff(comp, 70, submitted_at)
+        assert diff is not None
+        assert diff["similarity_threshold"]["existing"] == 90
+        assert diff["similarity_threshold"]["submitted"] == 70
+
+    def test_different_activities(self):
+        from backend.services.job_service import _build_config_diff, _normalize_activity_types
+        comp = self._make_compound(activity_types="EC50,IC50,Kd,Ki")
+        submitted_at = _normalize_activity_types(["IC50", "Ki"])
+        diff = _build_config_diff(comp, 90, submitted_at)
+        assert diff is not None
+        assert "IC50" in diff["activity_types"]["submitted"]
+
+    def test_different_both(self):
+        from backend.services.job_service import _build_config_diff, _normalize_activity_types
+        comp = self._make_compound(threshold=90, activity_types="EC50,IC50,Kd,Ki")
+        submitted_at = _normalize_activity_types(["IC50"])
+        diff = _build_config_diff(comp, 70, submitted_at)
+        assert diff is not None
+        assert diff["similarity_threshold"]["submitted"] == 70
+
+
+class TestBuildExistingAtThreshold:
+    """Tests for _build_existing_at_threshold() -- builds ExistingCompoundAtThreshold from ORM object."""
+
+    def _make_compound(self, **overrides):
+        from backend.models.database import Compound
+        defaults = {
+            "entry_id": "test-entry-001",
+            "compound_name": "TestCompound",
+            "similarity_threshold": 90,
+            "activity_types": "EC50,IC50,Kd,Ki",
+            "imp_score": None,
+            "processed_at": None,
+            "author_name": None,
+        }
+        defaults.update(overrides)
+        return Compound(**defaults)
+
+    def test_identical_config_returns_identical_match(self):
+        from backend.services.job_service import _build_existing_at_threshold
+        from backend.models.schemas import ExistingCompoundAtThreshold
+
+        comp = self._make_compound(
+            entry_id="entry-abc",
+            compound_name="Aspirin",
+            similarity_threshold=90,
+            activity_types="EC50,IC50,Kd,Ki",
+        )
+        result = _build_existing_at_threshold(comp, 90, "EC50,IC50,Kd,Ki")
+
+        assert isinstance(result, ExistingCompoundAtThreshold)
+        assert result.config_match == "identical"
+        assert result.config_diff is None
+        assert result.entry_id == "entry-abc"
+        assert result.compound_name == "Aspirin"
+        assert result.similarity_threshold == 90
+        # Activity types are normalized (sorted CSV)
+        assert result.activity_types == "EC50,IC50,Kd,Ki"
+
+    def test_different_threshold_returns_diff(self):
+        from backend.services.job_service import _build_existing_at_threshold
+
+        comp = self._make_compound(similarity_threshold=90)
+        result = _build_existing_at_threshold(comp, 70, "EC50,IC50,Kd,Ki")
+
+        assert result.config_match == "different_threshold"
+        assert result.config_diff is not None
+        assert result.config_diff["similarity_threshold"]["existing"] == 90
+        assert result.config_diff["similarity_threshold"]["submitted"] == 70
+
+    def test_different_activities_returns_diff(self):
+        from backend.services.job_service import _build_existing_at_threshold
+
+        comp = self._make_compound(activity_types="EC50,IC50,Kd,Ki")
+        result = _build_existing_at_threshold(comp, 90, "IC50,Ki")
+
+        assert result.config_match == "different_activities"
+        assert result.config_diff is not None
+        assert "activity_types" in result.config_diff
+
+    def test_processed_at_iso_format(self):
+        from datetime import datetime, timezone
+        from backend.services.job_service import _build_existing_at_threshold
+
+        comp = self._make_compound(
+            processed_at=datetime(2026, 1, 15, 12, 0, 0, tzinfo=timezone.utc),
+        )
+        result = _build_existing_at_threshold(comp, 90, "EC50,IC50,Kd,Ki")
+
+        assert isinstance(result.processed_at, str)
+        assert "2026-01-15" in result.processed_at
+
+    def test_none_processed_at(self):
+        from backend.services.job_service import _build_existing_at_threshold
+
+        comp = self._make_compound(processed_at=None)
+        result = _build_existing_at_threshold(comp, 90, "EC50,IC50,Kd,Ki")
+
+        assert result.processed_at is None
+
+    def test_imp_score_and_author_passed_through(self):
+        from backend.services.job_service import _build_existing_at_threshold
+
+        comp = self._make_compound(imp_score=0.85, author_name="Dr. Test")
+        result = _build_existing_at_threshold(comp, 90, "EC50,IC50,Kd,Ki")
+
+        assert result.imp_score == 0.85
+        assert result.author_name == "Dr. Test"

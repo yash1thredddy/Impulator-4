@@ -65,13 +65,13 @@ class TestFlagOutliersSingleMetric:
 
     def test_upper_direction(self, data_with_outlier):
         flags = flag_outliers_single_metric(data_with_outlier, direction='upper')
-        assert flags.iloc[-1] is True or flags.iloc[-1] == True  # 100 is outlier
+        assert bool(flags.iloc[-1])  # 100 is outlier
 
     def test_lower_direction(self):
         # Value must be below Q1 - 1.5*IQR to be a lower outlier
         data = pd.Series([500, 500, 500, 500, 500, 500, 500, 500, 500, -1000])
         flags = flag_outliers_single_metric(data, direction='lower')
-        assert flags.iloc[-1] == True  # -1000 is clearly a lower outlier
+        assert bool(flags.iloc[-1])  # -1000 is clearly a lower outlier
 
     def test_both_direction(self, data_with_outlier):
         flags = flag_outliers_single_metric(data_with_outlier, direction='both')
@@ -137,7 +137,7 @@ class TestDetectEfficiencyOutliers:
 
     def test_detects_clear_outlier(self, metrics_df):
         result = detect_efficiency_outliers(metrics_df)
-        assert result.loc[0, 'Is_Efficiency_Outlier'] == True
+        assert bool(result.loc[0, 'Is_Efficiency_Outlier'])
 
     def test_missing_metric_raises(self):
         df = pd.DataFrame({'SEI': [1, 2, 3]})

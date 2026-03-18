@@ -10,6 +10,8 @@ import pytest
 import numpy as np
 import pandas as pd
 
+from unittest.mock import patch, MagicMock
+
 from backend.modules.imp_scoring import (
     calculate_efficiency_outlier_score,
     calculate_angle_score,
@@ -18,6 +20,12 @@ from backend.modules.imp_scoring import (
     interpret_imp_score,
     calculate_imp_score,
     calculate_imp_score_phase1,
+    add_imp_score_interpretation,
+    calculate_pdb_evidence_score,
+    create_detailed_pdb_summary,
+    get_imp_score_breakdown,
+    _build_component_scores,
+    IMP_SCORE_OUTPUT_COLUMNS,
     WEIGHT_EFFICIENCY,
     WEIGHT_DISTANCE,
     WEIGHT_ANGLE,
@@ -817,6 +825,385 @@ class TestCreatePdbSummary:
         df = pd.DataFrame({'x': [1]})
         result = create_pdb_summary(df)
         assert result.empty
+
+
+class TestGoldenFixtures:
+    """Regression tests using golden compound fixtures to detect scoring drift."""
+
+    def _build_golden_df(self, golden_compounds):
+        """Build a DataFrame from golden compound inputs."""
+        rows = [c["input"] for c in golden_compounds]
+        return pd.DataFrame(rows)
+
+    def test_golden_scores_match(self, golden_compounds):
+        """All 10 golden compounds produce expected scores to 4dp when run as full cohort."""
+        df = self._build_golden_df(golden_compounds)
+        result = calculate_imp_score(df, use_pdb=False)
+        result = add_imp_score_interpretation(result)
+
+        numeric_keys = [
+            "Efficiency_Score", "Angle_Score", "Distance_Score",
+            "Interference_Score", "PDB_Score", "IMP_Base_Score",
+            "QED_Multiplier", "IMP_Final_Score",
+        ]
+
+        for i, compound in enumerate(golden_compounds):
+            expected = compound["expected"]
+            for key in numeric_keys:
+                exp_val = expected[key]
+                act_val = result[key].iloc[i]
+                assert act_val == pytest.approx(exp_val, abs=0.0001), (
+                    f"Compound {i} ({compound['name']}): {key} expected {exp_val}, got {act_val}"
+                )
+
+    def test_golden_classifications_match(self, golden_compounds):
+        """IMP_Classification strings match expected for all 10 compounds."""
+        df = self._build_golden_df(golden_compounds)
+        result = calculate_imp_score(df, use_pdb=False)
+        result = add_imp_score_interpretation(result)
+
+        valid_tiers = {"Exceptional IMP", "Strong IMP", "Moderate IMP", "Weak IMP", "Not IMP"}
+        for i, compound in enumerate(golden_compounds):
+            actual = result["IMP_Classification"].iloc[i]
+            expected = compound["expected"]["IMP_Classification"]
+            assert actual == expected, (
+                f"Compound {i} ({compound['name']}): classification expected '{expected}', got '{actual}'"
+            )
+            assert actual in valid_tiers
+
+    def test_qed_zero_multiplier_floor(self, golden_compounds):
+        """Compound with QED=0 has QED_Multiplier == 0.75."""
+        df = self._build_golden_df(golden_compounds)
+        result = calculate_imp_score(df, use_pdb=False)
+        # Index 5 is QED=0 edge
+        assert result["QED_Multiplier"].iloc[5] == pytest.approx(0.75, abs=0.0001)
+
+    def test_qed_one_multiplier_ceiling(self, golden_compounds):
+        """Compound with QED=1 has QED_Multiplier == 1.0."""
+        df = self._build_golden_df(golden_compounds)
+        result = calculate_imp_score(df, use_pdb=False)
+        # Index 6 is QED=1 edge
+        assert result["QED_Multiplier"].iloc[6] == pytest.approx(1.0, abs=0.0001)
+
+
+class TestPDBEvidenceScore:
+    """Tests for calculate_pdb_evidence_score paths."""
+
+    def _make_pdb_df(self, n=2):
+        """Create minimal DataFrame for PDB tests."""
+        return pd.DataFrame({
+            "SMILES": ["CCO", "CCCO"][:n],
+            "SEI": [10.0, 15.0][:n],
+            "BEI": [25.0, 30.0][:n],
+        })
+
+    def test_pdb_disabled_returns_zeros(self):
+        """With use_pdb=False, PDB_Score is 0.0 for all rows."""
+        df = self._make_pdb_df()
+        result = calculate_pdb_evidence_score(df, use_pdb=False)
+        assert all(result["PDB_Score"] == 0.0)
+        assert all(result["PDB_Num_Structures"] == 0)
+        assert all(result["PDB_IDs"] == "")
+
+    @patch("backend.modules.pdb_client.get_pdb_evidence_score")
+    def test_pdb_enabled_with_mock(self, mock_pdb):
+        """Mocked PDB returns valid scores."""
+        mock_pdb.return_value = {
+            "pdb_score": 0.8,
+            "num_structures": 2,
+            "num_high_quality": 1,
+            "num_medium_quality": 1,
+            "num_poor_quality": 0,
+            "pdb_ids": ["1ABC", "2DEF"],
+            "resolutions": [1.5, 2.5],
+        }
+        df = self._make_pdb_df()
+        result = calculate_pdb_evidence_score(df, use_pdb=True)
+        for val in result["PDB_Score"]:
+            assert val == pytest.approx(0.8, abs=0.001)
+        assert all(result["PDB_Num_Structures"] == 2)
+
+    @patch("backend.modules.imp_scoring.logger")
+    def test_pdb_import_failure(self, mock_logger):
+        """When pdb_client import fails, returns zero PDB scores."""
+        df = self._make_pdb_df()
+        with patch.dict("sys.modules", {"backend.modules.pdb_client": None}):
+            # Force the import to fail by making the module None
+            result = calculate_pdb_evidence_score(df, use_pdb=True)
+        assert all(result["PDB_Score"] == 0.0)
+
+    @patch("backend.modules.pdb_client.get_pdb_evidence_score")
+    def test_pdb_progress_callback(self, mock_pdb):
+        """Progress callback is called during PDB scoring."""
+        mock_pdb.return_value = {
+            "pdb_score": 0.5,
+            "num_structures": 1,
+            "num_high_quality": 1,
+            "num_medium_quality": 0,
+            "num_poor_quality": 0,
+            "pdb_ids": ["1ABC"],
+            "resolutions": [1.8],
+        }
+        callback = MagicMock()
+        df = self._make_pdb_df()
+        calculate_pdb_evidence_score(df, use_pdb=True, progress_callback=callback)
+        assert callback.call_count >= 1
+
+    @patch("backend.modules.pdb_client.get_pdb_evidence_score")
+    def test_pdb_transient_retry(self, mock_pdb):
+        """Retries on transient errors and returns fallback on failure."""
+        mock_pdb.side_effect = ConnectionError("connection timeout")
+        df = self._make_pdb_df(n=1)
+        result = calculate_pdb_evidence_score(df, use_pdb=True)
+        # After retries exhausted, falls back to zero
+        assert result["PDB_Score"].iloc[0] == pytest.approx(0.0, abs=0.001)
+
+
+class TestCreateDetailedPdbSummary:
+    """Tests for create_detailed_pdb_summary."""
+
+    @patch("backend.modules.pdb_client.classify_resolution_quality")
+    @patch("backend.modules.pdb_client.get_structure_details")
+    def test_basic_detail_fetch(self, mock_details, mock_quality):
+        """Mocked get_structure_details returns valid DataFrame."""
+        mock_details.return_value = {
+            "title": "Test Structure",
+            "resolution": 1.8,
+            "experimental_method": "X-RAY DIFFRACTION",
+            "uniprot_ids": ["P12345"],
+        }
+        mock_quality.return_value = ("***", "High")
+        df = pd.DataFrame({
+            "PDB_IDs": ["1ABC,2DEF"],
+            "ChEMBL_ID": ["CHEMBL25"],
+            "Molecule_Name": ["Aspirin"],
+        })
+        result = create_detailed_pdb_summary(df)
+        assert len(result) == 2
+        assert "PDB_ID" in result.columns
+        assert "Title" in result.columns
+        assert "Resolution" in result.columns
+        assert "Quality" in result.columns
+        assert result["Title"].iloc[0] == "Test Structure"
+
+    def test_no_pdb_ids_column(self):
+        """Returns empty DataFrame when PDB_IDs column is missing."""
+        df = pd.DataFrame({"x": [1, 2]})
+        result = create_detailed_pdb_summary(df)
+        assert result.empty
+
+    def test_empty_pdb_ids(self):
+        """Returns empty DataFrame when all PDB_IDs are empty."""
+        df = pd.DataFrame({
+            "PDB_IDs": ["", np.nan],
+            "ChEMBL_ID": ["C1", "C2"],
+            "Molecule_Name": ["A", "B"],
+        })
+        result = create_detailed_pdb_summary(df)
+        assert result.empty
+
+    @patch("backend.modules.pdb_client.classify_resolution_quality")
+    @patch("backend.modules.pdb_client.get_structure_details")
+    def test_api_error_produces_na_fallback(self, mock_details, mock_quality):
+        """Errors produce N/A fallback entries."""
+        mock_details.side_effect = Exception("API error")
+        df = pd.DataFrame({
+            "PDB_IDs": ["1ABC"],
+            "ChEMBL_ID": ["CHEMBL25"],
+            "Molecule_Name": ["Aspirin"],
+        })
+        result = create_detailed_pdb_summary(df)
+        assert len(result) == 1
+        assert result["Title"].iloc[0] == "N/A"
+        assert result["Resolution"].iloc[0] == "N/A"
+        assert result["Quality"].iloc[0] == "N/A"
+
+
+class TestBuildComponentScores:
+    """Tests for _build_component_scores helper."""
+
+    def _make_scored_row(self):
+        """Create a Series with all score columns."""
+        return pd.Series({
+            "Efficiency_Score": 0.85,
+            "Distance_Score": 0.72,
+            "Angle_Score": 0.95,
+            "Interference_Score": 0.4,
+            "PDB_Score": 0.6,
+            "Efficiency_Contribution": 0.3825,
+            "Distance_Contribution": 0.144,
+            "Angle_Contribution": 0.1425,
+            "Interference_Contribution": 0.06,
+            "PDB_Contribution": 0.03,
+        })
+
+    def test_all_components_present(self):
+        """Result has efficiency, distance, angle, interference, pdb keys."""
+        row = self._make_scored_row()
+        result = _build_component_scores(row)
+        assert set(result.keys()) == {"efficiency", "distance", "angle", "interference", "pdb"}
+
+    def test_weight_labels_correct(self):
+        """Verify weight percentage strings are correct."""
+        row = self._make_scored_row()
+        result = _build_component_scores(row)
+        assert result["efficiency"]["weight"] == "45%"
+        assert result["distance"]["weight"] == "20%"
+        assert result["angle"]["weight"] == "15%"
+        assert result["interference"]["weight"] == "15%"
+        assert result["pdb"]["weight"] == "5%"
+
+    def test_values_populated(self):
+        """Each component has value, weight, contribution, description keys."""
+        row = self._make_scored_row()
+        result = _build_component_scores(row)
+        for component_name, component in result.items():
+            assert "value" in component, f"{component_name} missing 'value'"
+            assert "weight" in component, f"{component_name} missing 'weight'"
+            assert "contribution" in component, f"{component_name} missing 'contribution'"
+            assert "description" in component, f"{component_name} missing 'description'"
+
+
+class TestGetImpScoreBreakdown:
+    """Tests for get_imp_score_breakdown."""
+
+    def _make_full_row(self):
+        """Create a Series with all IMP score columns."""
+        return pd.Series({
+            "SEI": 15.0, "BEI": 25.0, "NSEI": 2.5, "NBEI": 0.4,
+            "Modulus_SEI_BEI": 30.0, "Angle_SEI_BEI": 45.0,
+            "Efficiency_Score": 0.7, "Angle_Score": 1.0, "Distance_Score": 0.8,
+            "Interference_Score": 0.4, "PDB_Score": 0.5,
+            "Efficiency_Contribution": 0.315, "Angle_Contribution": 0.15,
+            "Distance_Contribution": 0.16, "Interference_Contribution": 0.06,
+            "PDB_Contribution": 0.025,
+            "IMP_Base_Score": 0.71, "QED": 0.8, "QED_Multiplier": 0.95,
+            "QED_Impact": -0.0355, "IMP_Final_Score": 0.6745,
+            "IMP_Classification": "Moderate IMP", "IMP_Priority": 3,
+            "PDB_Num_Structures": 3, "PDB_High_Quality": 2,
+            "PDB_Medium_Quality": 1, "PDB_Poor_Quality": 0,
+            "PDB_IDs": "1ABC,2DEF,3GHI", "PDB_Best_Resolution": 1.5,
+        })
+
+    def test_breakdown_has_all_sections(self):
+        """Returns dict with all required sections."""
+        row = self._make_full_row()
+        result = get_imp_score_breakdown(row)
+        assert "efficiency_metrics" in result
+        assert "plane_geometry" in result
+        assert "component_scores" in result
+        assert "final_calculation" in result
+        assert "pdb_details" in result
+
+    def test_efficiency_metrics_contain_sei_bei(self):
+        """SEI and BEI have used_in_score: True, NSEI has used_in_score: False."""
+        row = self._make_full_row()
+        result = get_imp_score_breakdown(row)
+        eff = result["efficiency_metrics"]
+        assert eff["SEI"]["used_in_score"] is True
+        assert eff["BEI"]["used_in_score"] is True
+        assert eff["NSEI"]["used_in_score"] is False
+        assert eff["NBEI"]["used_in_score"] is False
+
+
+class TestEdgeCases:
+    """Edge case tests for IMP scoring robustness."""
+
+    def _make_5row_df(self, **overrides):
+        """Create a 5-row DataFrame with one row overridden for edge case testing."""
+        data = {
+            "SEI": [10.0, 15.0, 20.0, 25.0, 30.0],
+            "BEI": [20.0, 25.0, 30.0, 35.0, 40.0],
+            "NSEI": [1.5, 2.0, 2.5, 3.0, 3.5],
+            "NBEI": [0.3, 0.35, 0.4, 0.45, 0.5],
+            "Angle_SEI_BEI": [45.0, 45.0, 45.0, 45.0, 45.0],
+            "Modulus_SEI_BEI": [20.0, 25.0, 30.0, 35.0, 40.0],
+            "QED": [0.5, 0.6, 0.7, 0.8, 0.9],
+            "SMILES": ["CCO", "CCCO", "CCCCO", "c1ccccc1", "CC=O"],
+            "PAINS_Violation": [0, 0, 0, 0, 0],
+            "Aggregator_Risk": [0, 0, 0, 0, 0],
+            "Redox_Reactive": [0, 0, 0, 0, 0],
+            "Fluorescence_Interference": [0, 0, 0, 0, 0],
+            "Thiol_Reactive": [0, 0, 0, 0, 0],
+        }
+        for key, val in overrides.items():
+            if isinstance(val, list):
+                data[key] = val
+            else:
+                # Override first row only
+                data[key][0] = val
+        return pd.DataFrame(data)
+
+    def test_single_row_dataframe(self):
+        """Single compound does not crash, scores are valid 0-1 or NaN."""
+        df = pd.DataFrame({
+            "SEI": [15.0], "BEI": [25.0], "NSEI": [2.0], "NBEI": [0.35],
+            "Angle_SEI_BEI": [45.0], "Modulus_SEI_BEI": [30.0],
+            "QED": [0.7], "SMILES": ["CCO"],
+            "PAINS_Violation": [0], "Aggregator_Risk": [0],
+            "Redox_Reactive": [0], "Fluorescence_Interference": [0],
+            "Thiol_Reactive": [0],
+        })
+        result = calculate_imp_score(df, use_pdb=False)
+        score = result["IMP_Final_Score"].iloc[0]
+        assert np.isnan(score) or (0.0 <= score <= 1.0)
+
+    def test_all_nan_metrics(self):
+        """All NaN SEI/BEI/NSEI/NBEI handles gracefully."""
+        df = self._make_5row_df()
+        df.loc[0, "SEI"] = np.nan
+        df.loc[0, "BEI"] = np.nan
+        df.loc[0, "NSEI"] = np.nan
+        df.loc[0, "NBEI"] = np.nan
+        # Should not crash
+        result = calculate_imp_score(df, use_pdb=False)
+        assert len(result) == 5
+
+    def test_boundary_score_0_3(self):
+        """Score 0.3 -> Weak IMP, 0.2999 -> Not IMP."""
+        assert interpret_imp_score(0.3)["classification"] == "Weak IMP"
+        assert interpret_imp_score(0.2999)["classification"] == "Not IMP"
+
+    def test_boundary_score_0_5(self):
+        """Score 0.5 -> Moderate IMP, 0.4999 -> Weak IMP."""
+        assert interpret_imp_score(0.5)["classification"] == "Moderate IMP"
+        assert interpret_imp_score(0.4999)["classification"] == "Weak IMP"
+
+    def test_boundary_score_0_7(self):
+        """Score 0.7 -> Strong IMP, 0.6999 -> Moderate IMP."""
+        assert interpret_imp_score(0.7)["classification"] == "Strong IMP"
+        assert interpret_imp_score(0.6999)["classification"] == "Moderate IMP"
+
+    def test_boundary_score_0_9(self):
+        """Score 0.9 -> Exceptional IMP, 0.8999 -> Strong IMP."""
+        assert interpret_imp_score(0.9)["classification"] == "Exceptional IMP"
+        assert interpret_imp_score(0.8999)["classification"] == "Strong IMP"
+
+    def test_nan_score_interpretation(self):
+        """NaN score -> Invalid classification."""
+        result = interpret_imp_score(float("nan"))
+        assert result["classification"] == "Invalid"
+
+    def test_negative_modulus(self):
+        """Negative Modulus_SEI_BEI does not crash."""
+        df = self._make_5row_df()
+        df.loc[0, "Modulus_SEI_BEI"] = -5.0
+        result = calculate_imp_score(df, use_pdb=False)
+        assert len(result) == 5
+
+    def test_angle_greater_than_90(self):
+        """Angle > 90 does not crash."""
+        df = self._make_5row_df()
+        df.loc[0, "Angle_SEI_BEI"] = 120.0
+        result = calculate_imp_score(df, use_pdb=False)
+        assert len(result) == 5
+
+    def test_angle_negative(self):
+        """Angle < 0 does not crash."""
+        df = self._make_5row_df()
+        df.loc[0, "Angle_SEI_BEI"] = -10.0
+        result = calculate_imp_score(df, use_pdb=False)
+        assert len(result) == 5
 
 
 if __name__ == "__main__":

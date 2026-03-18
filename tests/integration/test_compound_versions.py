@@ -190,7 +190,7 @@ class TestCompoundVersionsEndpoint:
             inchikey="LFQSCWFLJHTTHZ-UHFFFAOYSA-N",
             processed_at=datetime.now(timezone.utc) - timedelta(hours=1),
         )
-        comp2 = _make_compound(
+        _make_compound(
             session,
             compound_name="Compound_base",
             inchikey="LFQSCWFLJHTTHZ-UHFFFAOYSA-M",  # Different protonation

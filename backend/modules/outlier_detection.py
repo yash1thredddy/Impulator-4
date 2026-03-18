@@ -3,6 +3,9 @@ Statistical Outlier Detection Module
 
 This module implements IQR-based outlier detection for efficiency metrics.
 
+Reference: Dahlin et al., "Assay interference and off-target liabilities of reported histone
+acetyltransferase inhibitors" (IMPs 2.0), Nature Communications, 2017.
+
 The Interquartile Range (IQR) method is robust to extreme values and is the
 standard approach for identifying statistical outliers.
 

@@ -28,6 +28,7 @@ def test_engine():
     Base.metadata.create_all(bind=engine)
     yield engine
     Base.metadata.drop_all(bind=engine)
+    engine.dispose()
 
 
 @pytest.fixture(autouse=True)
@@ -109,3 +110,31 @@ def client(test_engine, mock_azure):
     app.dependency_overrides.clear()
     db_module.engine = original_engine
     db_module.SessionLocal = original_session_local
+
+
+@pytest.fixture
+def seed_compound(db_session):
+    """Factory fixture for creating test compounds with sensible defaults."""
+    from backend.models.database import Compound
+    from backend.services.job_service import _inchikey_structure_key
+    import uuid
+    from datetime import datetime, timezone
+
+    def _create(name="TestCompound", smiles="CCO", inchikey="LFQSCWFLJHTTHZ-UHFFFAOYSA-N", **overrides):
+        defaults = {
+            "entry_id": str(uuid.uuid4()),
+            "compound_name": name,
+            "smiles": smiles,
+            "inchikey": inchikey,
+            "inchikey_structure_key": _inchikey_structure_key(inchikey),
+            "similarity_threshold": 90,
+            "activity_types": "EC50,IC50,Kd,Ki",
+            "processed_at": datetime.now(timezone.utc),
+        }
+        defaults.update(overrides)
+        comp = Compound(**defaults)
+        db_session.add(comp)
+        db_session.commit()
+        db_session.refresh(comp)
+        return comp
+    return _create
