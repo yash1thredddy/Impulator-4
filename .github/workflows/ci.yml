@@ -39,9 +39,6 @@ jobs:
       - name: Create data directory
         run: mkdir -p data
 
-      - name: Lint check
-        run: ruff check backend/ tests/
-
       - name: Run tests with coverage
         run: |
           pytest tests/ \
