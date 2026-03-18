@@ -2,10 +2,8 @@
 Unit tests for CompoundService.
 """
 import os
-import json
 import pytest
-import shutil
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone
 import pandas as pd
 import numpy as np
@@ -473,7 +471,7 @@ class TestFetchActivities:
         with patch('backend.services.compound_service.CompoundService._fetch_activities') as mock:
             mock.return_value = []
             # Call directly to check the logic
-            result = service._fetch_activities(chembl_ids, None, lambda p, m: None)
+            service._fetch_activities(chembl_ids, None, lambda p, m: None)  # verifies no crash
             # The method handles None internally
 
 

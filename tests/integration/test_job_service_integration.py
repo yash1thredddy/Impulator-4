@@ -13,7 +13,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.core.database import Base
-from backend.models.database import Compound, Job, JobStatus, JobType
+from backend.models.database import Compound, Job
 from backend.services.job_service import (
     JobService,
     _inchikey_structure_key,
@@ -209,7 +209,7 @@ class TestResolveDuplicateAction:
         """Resolve with action=skip returns skip response, no job created."""
         from backend.models.schemas import ResolveDuplicateRequest, SkipResponse
 
-        comp = seed(name="Ethanol", smiles="CCO")
+        seed(name="Ethanol", smiles="CCO")  # side effect: creates DB row for duplicate detection
 
         request = ResolveDuplicateRequest(
             action="skip",

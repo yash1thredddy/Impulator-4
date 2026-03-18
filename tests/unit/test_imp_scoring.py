@@ -25,7 +25,6 @@ from backend.modules.imp_scoring import (
     create_detailed_pdb_summary,
     get_imp_score_breakdown,
     _build_component_scores,
-    IMP_SCORE_OUTPUT_COLUMNS,
     WEIGHT_EFFICIENCY,
     WEIGHT_DISTANCE,
     WEIGHT_ANGLE,

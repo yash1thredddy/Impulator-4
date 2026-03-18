@@ -12,7 +12,7 @@ All external APIs are mocked -- no network calls.
 Responses validated through Pydantic models (TEST-04).
 """
 import uuid as _uuid
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from backend.models.schemas import (
     BatchResponse,
