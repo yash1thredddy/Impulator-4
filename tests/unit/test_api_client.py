@@ -4,7 +4,7 @@ All external API calls mocked -- no real network requests.
 """
 import time
 import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 
 class TestCacheNonNone:

@@ -15,10 +15,7 @@ from backend.models.schemas import (
     JobResponse,
     JobListResponse,
     ActiveJobResponse,
-    BatchSummary,
-    BatchResponse,
     DeleteResponse,
-    CancelResponse,
 )
 
 

@@ -3,9 +3,7 @@ Integration tests for repository layer coverage.
 Tests repositories with real SQLite (in-memory) via existing fixtures.
 """
 import uuid
-import pytest
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
 
 
 class TestJobRepository:
@@ -68,7 +66,6 @@ class TestJobRepository:
     def test_get_jobs_paginated(self, db_session):
         """Test paginated job listing."""
         from backend.repositories.job_repository import job_repo
-        from backend.models.database import JobStatus
 
         sid = str(uuid.uuid4())
         for _ in range(5):
@@ -348,7 +345,7 @@ class TestCompoundRepository:
 
         inchikey = "BSYNRYMUTXBXSQ-UHFFFAOYSA-N"
         c1 = seed_compound(name="Aspirin", inchikey=inchikey)
-        c2 = seed_compound(name="Aspirin (v2)", inchikey=inchikey, entry_id=str(uuid.uuid4()))
+        seed_compound(name="Aspirin (v2)", inchikey=inchikey, entry_id=str(uuid.uuid4()))  # sibling row
 
         versions = compound_repo.get_versions(db_session, c1.entry_id)
         assert len(versions) == 2
@@ -379,8 +376,8 @@ class TestCompoundRepository:
         from backend.repositories.compound_repository import compound_repo
 
         c1 = seed_compound(name="Main")
-        c2 = seed_compound(name="Dup", is_duplicate=True, duplicate_of=c1.entry_id,
-                           entry_id=str(uuid.uuid4()))
+        seed_compound(name="Dup", is_duplicate=True, duplicate_of=c1.entry_id,
+                     entry_id=str(uuid.uuid4()))  # duplicate row
 
         dups = compound_repo.find_duplicates_by_structure_key(db_session, c1.inchikey_structure_key)
         assert len(dups) == 2
@@ -419,7 +416,6 @@ class TestCompoundRepository:
     def test_archive_compound(self, db_session, seed_compound):
         """Test archiving a compound to DeletedCompound table."""
         from backend.repositories.compound_repository import compound_repo
-        from backend.models.database import DeletedCompound
 
         comp = seed_compound(name="ToArchive")
         deleted_record = compound_repo.archive_compound(
