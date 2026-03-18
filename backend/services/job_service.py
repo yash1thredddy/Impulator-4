@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any, Callable, Union
 
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError, InvalidRequestError
+from sqlalchemy.exc import IntegrityError
 
 from backend.models.database import Compound, Job, JobStatus, JobType
 from backend.models.schemas import (
