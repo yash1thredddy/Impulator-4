@@ -38,7 +38,7 @@ tenacity>=9.0.0
 
 # Utils
 python-dotenv>=1.0.0
-
+ruff
 # Testing
 pytest>=7.0.0
 pytest-cov>=4.0.0
