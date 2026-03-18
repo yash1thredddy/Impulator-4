@@ -199,17 +199,12 @@ class TestCheckAvailability:
         assert result.result.available is False
         assert result.result.count_at_threshold == 0
 
-    @patch("backend.services.job_service._check_single_availability")
-    def test_check_availability_batch(self, mock_check, client):
+    @patch("backend.modules.api_client.probe_all_thresholds")
+    def test_check_availability_batch(self, mock_probe, client):
         """POST /api/v1/jobs/check-availability/batch returns batch results."""
-        from backend.models.schemas import CompoundAvailability
-
-        mock_check.return_value = CompoundAvailability(
-            compound_name="test",
-            smiles="CCO",
-            available=True,
-            count_at_threshold=5,
-        )
+        mock_probe.return_value = [
+            {"threshold": 90, "count": 5},
+        ]
 
         resp = client.post(
             "/api/v1/jobs/check-availability/batch",

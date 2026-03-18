@@ -154,11 +154,19 @@ class CompoundRepository(BaseRepository[Compound]):
     def find_names_by_prefix(self, db: Session, prefix: str) -> List[str]:
         """Find all compound names starting with the given prefix (case-insensitive)."""
         from sqlalchemy import func as sqla_func
+        # Escape LIKE metacharacters so prefix values containing '%' or '_'
+        # are treated as literals rather than wildcards.
+        safe_prefix = (
+            prefix.strip().lower()
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
         rows = (
             db.query(Compound.compound_name)
             .filter(
                 sqla_func.lower(sqla_func.trim(Compound.compound_name))
-                .like(f"{prefix.strip().lower()}%")
+                .like(f"{safe_prefix}%", escape="\\")
             )
             .all()
         )

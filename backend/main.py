@@ -195,7 +195,11 @@ MAX_CONTENT_SIZE = 10 * 1024 * 1024  # 10MB
 async def limit_request_size(request: Request, call_next):
     """Reject requests with Content-Length exceeding 10MB (QUAL-02)."""
     content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > MAX_CONTENT_SIZE:
+    try:
+        content_length_int = int(content_length) if content_length else 0
+    except ValueError:
+        content_length_int = 0
+    if content_length_int > MAX_CONTENT_SIZE:
         return JSONResponse(
             status_code=413,
             content={

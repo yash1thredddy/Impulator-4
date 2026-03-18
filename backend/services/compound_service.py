@@ -297,8 +297,7 @@ class CompoundService:
                 self._complete_job(db, job_id, result_path, result_summary)
                 logger.info(f"Job {job_id} DB committed as COMPLETED")
 
-                # Step 9: Upload to Azure with retry (95%)
-                self._update_progress(db, job_id, 95, "Uploading to Azure...")
+                # Step 9: Upload to Azure with retry
                 if is_azure_configured():
                     from backend.core.azure_sync import (
                         write_pending_marker, delete_pending_marker,
@@ -311,7 +310,6 @@ class CompoundService:
                         write_pending_marker(entry_id)
                         _upload_with_retry(result_path, entry_id)
                         delete_pending_marker(entry_id)
-                        self._update_progress(db, job_id, 100, "Complete")
                     except Exception as azure_error:
                         logger.error(f"Azure upload failed permanently for job {job_id}: {azure_error}")
                         _metrics.increment('azure_upload_failed_permanently')
@@ -325,8 +323,6 @@ class CompoundService:
                                 job.error_code = str(ErrorCode.SYNC_FAILED)
                                 db.commit()
                                 logger.warning(f"Job {job_id} moved to SYNC_PENDING")
-                else:
-                    self._update_progress(db, job_id, 100, "Complete")
                 logger.info(f"Job {job_id} completed successfully")
 
             except (ConnectionError, TimeoutError) as e:
@@ -1663,14 +1659,17 @@ def batch_delete_with_cleanup(
             )
             db.delete(compound)
 
-            # Audit log
-            log_job_deleted(truncate_session_id(session_id), eid, compound_name)
+            # Collect for audit logging (emitted outside lock -- no DB mutation)
             deleted.append({"entry_id": eid, "compound_name": compound_name})
 
             logger.info(f"Batch delete - archived: {compound_name} ({eid})")
 
         # Commit DB first -- only delete storage after successful commit
         db.commit()
+
+    # Audit log outside lock (structlog I/O should not block the write lock)
+    for item in deleted:
+        log_job_deleted(truncate_session_id(session_id), item["entry_id"], item["compound_name"])
 
     # Now safe to delete storage (DB is committed, no data loss risk)
     for item in deleted:

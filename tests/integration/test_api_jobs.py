@@ -139,9 +139,9 @@ class TestJobRetrieval:
     def test_list_jobs_paginated(self, client):
         """GET /api/v1/jobs with pagination validates through JobListResponse."""
         sid = _sid()
-        # Submit 3 jobs with same session
-        for name in ["Job1", "Job2", "Job3"]:
-            _submit_job(client, name=name, session_id=sid)
+        # Submit 3 jobs with same session — use distinct SMILES to avoid duplicate detection
+        for name, smiles in [("Job1", "CCO"), ("Job2", "CCCO"), ("Job3", "CCCCO")]:
+            _submit_job(client, name=name, smiles=smiles, session_id=sid)
 
         resp = client.get(
             "/api/v1/jobs?page=1&page_size=2", headers={"X-Session-ID": sid}
@@ -374,7 +374,6 @@ class TestJobSubmissionWithScheduler:
         # Verify scheduler was triggered
         mock_scheduler.trigger.assert_called()
 
-    @pytest.mark.xfail(reason="Phase 4 moved scheduler.trigger() into job_service.submit_batch — mock at jobs.job_scheduler no longer intercepts the call")
     def test_submit_batch_job_triggers_scheduler_once(self, client_with_mock_scheduler):
         """Test that batch submission triggers scheduler only once."""
         client, mock_scheduler = client_with_mock_scheduler

@@ -281,17 +281,21 @@ class JobRepository(BaseRepository[Job]):
         return job
 
     def cancel_batch_jobs(self, db: Session, batch_id: str, session_id: Optional[str] = None) -> int:
-        """Cancel all pending/processing jobs in a batch. Returns count cancelled."""
-        jobs = (
-            db.query(Job)
-            .filter(
-                Job.batch_id == batch_id,
-                Job.status.in_([JobStatus.PENDING, JobStatus.PROCESSING]),
-            )
-            .all()
-        )
+        """Cancel all pending/processing jobs in a batch. Returns count cancelled.
+
+        Query and mutation both happen inside the write lock to prevent
+        TOCTOU: a job could complete between query and lock acquisition.
+        """
         cancelled = 0
         with _db_write_lock:
+            jobs = (
+                db.query(Job)
+                .filter(
+                    Job.batch_id == batch_id,
+                    Job.status.in_([JobStatus.PENDING, JobStatus.PROCESSING]),
+                )
+                .all()
+            )
             for job in jobs:
                 job.status = JobStatus.CANCELLED
                 job.current_step = "Cancelled"
@@ -303,10 +307,10 @@ class JobRepository(BaseRepository[Job]):
 
     def delete_job(self, db: Session, job_id: str) -> bool:
         """Write-locked job deletion. Returns True if deleted."""
-        job = db.query(Job).filter(Job.id == job_id).first()
-        if not job:
-            return False
         with _db_write_lock:
+            job = db.query(Job).filter(Job.id == job_id).first()
+            if not job:
+                return False
             db.delete(job)
             db.flush()
         return True

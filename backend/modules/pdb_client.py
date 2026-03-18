@@ -373,16 +373,18 @@ def get_batch_structure_resolutions_graphql(pdb_ids: List[str]) -> Dict[str, Opt
         )
 
         resolutions = {}
+        metrics.increment('api_calls_total')
+        metrics.record_latency('pdb', (time.time() - _gql_start) * 1000)
         if response.status_code == 200:
             data = response.json()
             for entry in data.get("data", {}).get("entries", []) or []:
                 pdb_id = entry.get("rcsb_id")
                 res_list = entry.get("rcsb_entry_info", {}).get("resolution_combined", [])
                 resolutions[pdb_id] = res_list[0] if res_list else None
-
-        metrics.increment('api_calls_total')
-        metrics.record_latency('pdb', (time.time() - _gql_start) * 1000)
-        logger.info(f"GraphQL fetched {len(resolutions)}/{len(pdb_ids)} resolutions")
+            logger.info(f"GraphQL fetched {len(resolutions)}/{len(pdb_ids)} resolutions")
+        else:
+            metrics.increment('api_calls_failed')
+            logger.warning(f"GraphQL resolution fetch returned HTTP {response.status_code}")
         return resolutions
 
     except Exception as e:

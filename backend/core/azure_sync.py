@@ -714,11 +714,19 @@ def check_result_exists_in_azure_by_entry_id(entry_id: str) -> bool:
 _upload_log = structlog.get_logger("azure_sync")
 
 
+def _on_upload_retry(retry_state):
+    """Tenacity before_sleep callback — only fires on actual retries, not the first attempt."""
+    from backend.core.metrics import metrics
+    metrics.increment('azure_upload_retried')
+    _upload_log.warning("azure_upload_retrying", attempt=retry_state.attempt_number)
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=10),
     retry=retry_if_exception_type(Exception),
     reraise=True,
+    before_sleep=_on_upload_retry,
 )
 def _upload_with_retry(local_path: str, entry_id: str) -> bool:
     """Upload result ZIP to Azure with tenacity retry (3 attempts, exponential backoff).
@@ -736,8 +744,6 @@ def _upload_with_retry(local_path: str, entry_id: str) -> bool:
     Raises:
         Exception: After 3 failed attempts (reraised from last attempt).
     """
-    from backend.core.metrics import metrics
-    metrics.increment('azure_upload_retried')
     _upload_log.info("azure_upload_attempt", entry_id=entry_id)
 
     success = upload_result_to_azure_by_entry_id(local_path, entry_id)
