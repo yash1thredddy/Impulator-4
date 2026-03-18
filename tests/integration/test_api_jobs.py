@@ -371,7 +371,6 @@ class TestJobSubmissionWithScheduler:
         # Verify scheduler was triggered
         mock_scheduler.trigger.assert_called()
 
-    @pytest.mark.xfail(reason="Phase 4 moved scheduler.trigger() into job_service.submit_batch — mock at jobs.job_scheduler no longer intercepts the call")
     def test_submit_batch_job_triggers_scheduler_once(self, client_with_mock_scheduler):
         """Test that batch submission triggers scheduler only once."""
         client, mock_scheduler = client_with_mock_scheduler
