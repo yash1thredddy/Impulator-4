@@ -99,7 +99,7 @@ class TestExecutorContextPropagation:
             executor.submit("test-iso-1", worker_1)
 
             # Submit job 2 with rid-2
-            request_id_var.set("rid-2")
+            token2 = request_id_var.set("rid-2")
             executor.submit("test-iso-2", worker_2)
 
             # Wait for both workers to capture their values
@@ -118,4 +118,5 @@ class TestExecutorContextPropagation:
         finally:
             gate.set()  # Ensure workers unblock on failure path
             executor.shutdown(wait=True)
+            request_id_var.reset(token2)
             request_id_var.reset(token1)

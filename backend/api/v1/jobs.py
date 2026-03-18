@@ -174,7 +174,7 @@ async def create_job(
         logger.exception(f"Failed to create job for {request.compound_name}")
         raise HTTPException(
             status_code=500,
-            detail="Failed to create job due to concurrent access. Please try again."
+            detail="Failed to create job. Please try again."
         )
 
     if isinstance(result, DuplicateFoundResponse):
@@ -210,7 +210,7 @@ async def resolve_duplicate(
         raise HTTPException(status_code=422, detail=str(e))
 
     if isinstance(result, SkipResponse):
-        return JSONResponse(content=result.model_dump(mode="json"), status_code=201)
+        return JSONResponse(content=result.model_dump(mode="json"), status_code=200)
     return result
 
 

@@ -20,10 +20,13 @@ Usage:
     # Get all metrics
     data = metrics.to_dict()
 """
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from threading import RLock
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -78,6 +81,7 @@ class Metrics:
             value: Amount to increment by (default 1)
         """
         if metric not in self._ALLOWED_METRICS:
+            _logger.debug("Attempted to increment unknown metric %r — ignored", metric)
             return
         with self._lock:
             current = getattr(self, metric, 0)

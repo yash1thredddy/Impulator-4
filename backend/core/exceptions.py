@@ -33,6 +33,7 @@ class ErrorCode(StrEnum):
     RATE_LIMITED = "RATE_LIMITED"
     DOWNSTREAM_FAILURE = "DOWNSTREAM_FAILURE"
     UNAUTHORIZED = "UNAUTHORIZED"
+    FORBIDDEN = "FORBIDDEN"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
     # Validation subtypes
@@ -55,7 +56,7 @@ class ErrorCode(StrEnum):
 STATUS_TO_ERROR_CODE: dict[int, ErrorCode] = {
     400: ErrorCode.VALIDATION_ERROR,
     401: ErrorCode.UNAUTHORIZED,
-    403: ErrorCode.UNAUTHORIZED,
+    403: ErrorCode.FORBIDDEN,
     404: ErrorCode.NOT_FOUND,
     409: ErrorCode.CONFLICT,
     422: ErrorCode.VALIDATION_ERROR,
@@ -96,13 +97,16 @@ async def http_exception_handler(
     error_code = STATUS_TO_ERROR_CODE.get(exc.status_code, ErrorCode.INTERNAL_ERROR)
 
     # Allow explicit error_code passed via detail dict
+    # Copy before mutating — exc.detail is the caller's original dict
     detail = exc.detail
     if isinstance(detail, dict) and "error_code" in detail:
+        detail = dict(detail)  # shallow copy to avoid mutating the exception
         error_code = detail.pop("error_code")
         detail = detail.get("detail", str(detail))
 
     return JSONResponse(
         status_code=exc.status_code,
+        headers=getattr(exc, "headers", None),
         content={
             "detail": detail if isinstance(detail, str) else str(detail),
             "error_code": str(error_code),

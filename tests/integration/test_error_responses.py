@@ -66,6 +66,8 @@ class TestErrorResponseShape:
 
         # Need a TestClient with raise_server_exceptions=False to inspect 500 body
         TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+        original_engine = db_module.engine
+        original_session_local = db_module.SessionLocal
         db_module.engine = test_engine
         db_module.SessionLocal = TestSessionLocal
 
@@ -101,6 +103,9 @@ class TestErrorResponseShape:
                 if getattr(r, "path", "") != "/api/v1/_test_500"
             ]
             app.dependency_overrides.pop(get_db, None)
+            # Restore the original db_module state so other tests are not affected
+            db_module.engine = original_engine
+            db_module.SessionLocal = original_session_local
 
     def test_error_response_always_has_request_id(self, client):
         """Multiple different error types all include unique request_ids."""

@@ -730,9 +730,11 @@ def download_result_by_storage_path(storage_path: str, entry_id: str = None, for
 
 
 def _validate_zip_entry(zf: zipfile.ZipFile, filename: str) -> bool:
-    """Validate a ZIP entry against zip bomb attacks."""
+    """Validate a ZIP entry against zip bomb and path traversal attacks."""
     info = zf.getinfo(filename)
-    if '..' in filename or filename.startswith('/'):
+    # Normalize backslashes to forward slashes before checking
+    normalized = filename.replace('\\', '/')
+    if '..' in normalized or normalized.startswith('/') or ':' in normalized:
         logger.warning(f"Path traversal attempt in ZIP: {filename}")
         return False
     if info.file_size > MAX_EXTRACTED_FILE_SIZE:

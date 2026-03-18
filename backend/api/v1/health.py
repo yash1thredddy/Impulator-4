@@ -108,9 +108,10 @@ async def readiness_check(db: Session = Depends(get_db)):
     else:
         checks["azure"] = "not_configured"
 
-    # Disk space check
+    # Disk space check (check the data directory's filesystem, not just root)
     try:
-        usage = shutil.disk_usage("/")
+        data_dir = str(settings.DATA_DIR) if settings.DATA_DIR.exists() else "/"
+        usage = shutil.disk_usage(data_dir)
         free_gb = usage.free / (1024 ** 3)
         checks["disk"] = {"status": "healthy" if free_gb > 1.0 else "degraded", "free_gb": round(free_gb, 2)}
         if free_gb <= 1.0:
@@ -205,7 +206,11 @@ async def detailed_health_check(db: Session = Depends(get_db)) -> Dict[str, Any]
             else:
                 checks["azure"] = {"status": "degraded", "configured": True}
         except Exception as e:
-            checks["azure"] = {"status": "degraded", "configured": True, "error": str(e)}
+            # Log the full exception for debugging but keep the public response
+            # sanitized — Azure SDK errors can contain connection strings or
+            # account names that must not appear in API responses.
+            logger.warning("Azure connectivity check failed", exc_info=True)
+            checks["azure"] = {"status": "degraded", "configured": True, "error": type(e).__name__}
     else:
         checks["azure"] = {"status": "not_configured", "configured": False}
 

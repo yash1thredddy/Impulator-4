@@ -263,8 +263,9 @@ class JobScheduler:
                                 dump["sync_retry_count"] = retry_count + 1
                                 job.result_summary = ResultSummary(**dump).model_dump_json()
                                 db.commit()
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                db.rollback()
+                                logger.warning("sync_pending_summary_update_failed", extra={"job_id": job.id, "error": str(exc)})
                             logger.warning("sync_pending_retry_failed", extra={"job_id": job.id, "retry": retry_count + 1})
 
         except Exception as e:
@@ -334,9 +335,11 @@ class JobScheduler:
                 try:
                     # Generate synthetic correlation ID for scheduler-initiated jobs
                     # (no originating HTTP request, so we create one for log traceability)
+                    # clear_contextvars() must come first — calling it after set() would wipe
+                    # the values just stored in the ContextVars before bind_contextvars() runs.
+                    structlog.contextvars.clear_contextvars()
                     request_id_var.set(f"scheduler-{uuid.uuid4()}")
                     session_id_var.set("scheduler")
-                    structlog.contextvars.clear_contextvars()
                     structlog.contextvars.bind_contextvars(
                         request_id=request_id_var.get(),
                         session_id="scheduler",
@@ -347,7 +350,7 @@ class JobScheduler:
                         process_compound_job,
                         compound_name=compound_name,
                         smiles=smiles,
-                        similarity_threshold=params.threshold or 90,
+                        similarity_threshold=params.threshold if params.threshold is not None else 90,
                         activity_types=params.activity_types or [],
                         author_name=getattr(params, 'author_name', None),
                     )

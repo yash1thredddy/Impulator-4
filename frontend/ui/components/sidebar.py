@@ -256,7 +256,8 @@ def render_job_card(job: Dict[str, Any]) -> None:
     with st.container(border=True):
         # Compound name with status emoji
         status_emoji = get_status_emoji(status)
-        st.markdown(f"{status_emoji} **{html_mod.escape(_truncate(compound_name, 20))}**")
+        safe_name = _escape_md(html_mod.escape(_truncate(compound_name, 20)))
+        st.markdown(f"{status_emoji} **{safe_name}**")
 
         # Progress display based on status
         if status == 'processing':
@@ -328,6 +329,14 @@ def _truncate(text: str, max_len: int = 25) -> str:
         return ""
     if len(text) > max_len:
         return text[:max_len-3] + "..."
+    return text
+
+
+def _escape_md(text: str) -> str:
+    """Escape markdown special characters so text renders literally in st.markdown."""
+    # Escape characters that have special meaning inside markdown inline markup
+    for ch in ("\\", "`", "*", "_", "[", "]", "(", ")", "#", "+", "-", ".", "!"):
+        text = text.replace(ch, "\\" + ch)
     return text
 
 

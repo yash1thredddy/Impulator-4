@@ -775,11 +775,12 @@ class JobService:
         Returns:
             Number of jobs cancelled
         """
-        cancelled_count = job_repo.cancel_batch_jobs(db, batch_id)
-        if cancelled_count > 0:
-            db.commit()
-            logger.info(f"Cancelled {cancelled_count} jobs in batch {batch_id}")
-        return cancelled_count
+        with _db_write_lock:
+            cancelled_count = job_repo.cancel_batch_jobs(db, batch_id)
+            if cancelled_count > 0:
+                db.commit()
+                logger.info(f"Cancelled {cancelled_count} jobs in batch {batch_id}")
+            return cancelled_count
 
     def check_existing_compounds(
         self,
@@ -987,7 +988,14 @@ class JobService:
                 metrics.increment('jobs_failed')
                 return job
 
-            # Compound entry succeeded -- now safe to mark COMPLETED
+            # Re-apply result metadata in case _update_compound_entry rolled back
+            # the session (e.g. IntegrityError on duplicate structure key).
+            # db.rollback() reverts ALL dirty ORM state, including result_path
+            # and result_summary set above.
+            job.result_path = result_path
+            job.result_summary = json.dumps(result_summary)
+
+            # Compound entry succeeded (or was silently skipped) -- mark COMPLETED
             job.status = JobStatus.COMPLETED
             job.progress = 100.0
             job.current_step = "Completed"
@@ -1258,6 +1266,9 @@ class JobService:
         except IntegrityError as e:
             # Unique constraint on inchikey_structure_key -- concurrent duplicate submission
             # lost the race. Roll back and log; the other submission's compound will be kept.
+            # NOTE: db.rollback() reverts ALL pending ORM changes in this session,
+            # including job.result_path and job.result_summary set by complete_job.
+            # We must signal the caller to re-apply them after rollback.
             db.rollback()
             logger.warning(
                 f"Duplicate structure key race for {compound_name} "
@@ -1411,20 +1422,22 @@ class JobService:
                 except Exception as e:
                     logger.warning(f"Failed to delete local result {local_zip}: {e}")
 
-            compound_entry = compound_repo.get_by_entry_id(db, entry_id)
-            if compound_entry:
-                compound_repo.archive_compound(
-                    db, compound_entry,
-                    session_id=session_id,
-                    deletion_reason="user_request",
-                    job_id=job_id,
-                )
-                compound_repo.delete_compound(db, compound_entry)
-                db.commit()
+            with _db_write_lock:
+                compound_entry = compound_repo.get_by_entry_id(db, entry_id)
+                if compound_entry:
+                    compound_repo.archive_compound(
+                        db, compound_entry,
+                        session_id=session_id,
+                        deletion_reason="user_request",
+                        job_id=job_id,
+                    )
+                    compound_repo.delete_compound(db, compound_entry)
+                    db.commit()
 
         # Delete the job record
-        job_repo.delete_job(db, job_id)
-        db.commit()
+        with _db_write_lock:
+            job_repo.delete_job(db, job_id)
+            db.commit()
 
         return DeleteResponse(
             message="Job and results deleted",

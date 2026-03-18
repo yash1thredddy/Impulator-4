@@ -985,9 +985,9 @@ class ResultSummary(BaseModel, extra="allow"):
         """Map legacy field names to canonical names."""
         if isinstance(data, dict):
             if "similar_count" not in data:
+                ts = data.get("total_similar")
+                tc = data.get("total_compounds")
                 data["similar_count"] = (
-                    data.get("total_similar")
-                    or data.get("total_compounds")
-                    or 0
+                    ts if ts is not None else (tc if tc is not None else 0)
                 )
         return data

@@ -429,8 +429,18 @@ def get_classification_summary(classification: Dict) -> str:
 
 
 def shutdown_classifier():
-    """Reset thread-local sessions on shutdown (STAB-16)."""
+    """Close and reset thread-local sessions on shutdown (STAB-16)."""
     global _thread_local
+    # Close the existing session for this thread (if any) before discarding
+    # the thread-local object.  Worker threads may have their own sessions but
+    # they are daemon threads and will be stopped by the executor shutdown that
+    # precedes this call, so we only need to handle the current thread here.
+    existing_session = getattr(_thread_local, 'session', None)
+    if existing_session is not None:
+        try:
+            existing_session.close()
+        except Exception:
+            pass
     _thread_local = threading.local()
     logger.info("Chemical classifier sessions reset")
 

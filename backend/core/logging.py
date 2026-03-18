@@ -40,21 +40,22 @@ class PollingNoiseFilter(logging.Filter):
     filter they flood the console and obscure meaningful log entries.
     """
 
-    POLL_PATHS = {
+    POLL_PATHS: frozenset = frozenset({
         "/api/v1/health/live",
         "/api/v1/health/ready",
         "/api/v1/health",
         "/api/v1/jobs/active",
         "/api/v1/compounds",
-    }
+    })
 
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
         for path in self.POLL_PATHS:
             if path in msg:
-                record.levelno = logging.DEBUG
-                record.levelname = "DEBUG"
-                break
+                # Suppress the record entirely rather than downgrading the level.
+                # Mutating record.levelno does NOT prevent emission because the
+                # logger already passed its threshold check before filter() runs.
+                return False
         return True
 
 
@@ -169,6 +170,7 @@ def configure_logging() -> None:
                     "filters": ["polling_noise"],
                 },
                 "azure": {
+                    "handlers": ["console", "file"],
                     "level": "WARNING",
                     "propagate": False,
                 },

@@ -361,8 +361,8 @@ def generate_imp_report(df: pd.DataFrame, compound_name: str = "Query Compound")
             report_lines.append("-" * 70)
 
             # Vectorized report line construction
-            chembl_ids = top_imps.get('ChEMBL_ID', pd.Series('Unknown', index=top_imps.index)).fillna('Unknown')
-            mol_names = top_imps.get('Molecule_Name', pd.Series('Unknown', index=top_imps.index)).fillna('Unknown')
+            chembl_ids = top_imps.get('ChEMBL_ID', pd.Series('Unknown', index=top_imps.index)).fillna('Unknown').astype(str)
+            mol_names = top_imps.get('Molecule_Name', pd.Series('Unknown', index=top_imps.index)).fillna('Unknown').astype(str)
             scores = top_imps['IMP_Final_Score'].map(lambda s: f"{s:.3f}")
             confidences = top_imps.get('IMP_Confidence', pd.Series('Unknown', index=top_imps.index)).fillna('Unknown').astype(str)
             outlier_counts = top_imps.get('Outlier_Count', pd.Series(0, index=top_imps.index)).fillna(0).astype(int).astype(str)
