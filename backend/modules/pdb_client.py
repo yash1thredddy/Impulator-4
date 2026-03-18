@@ -388,7 +388,6 @@ def get_batch_structure_resolutions_graphql(pdb_ids: List[str]) -> Dict[str, Opt
         return resolutions
 
     except Exception as e:
-        metrics.increment('api_calls_total')
         metrics.increment('api_calls_failed')
         logger.error(f"GraphQL resolution fetch failed: {e}")
         # Return empty - caller can use REST as fallback

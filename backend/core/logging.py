@@ -45,16 +45,23 @@ class PollingNoiseFilter(logging.Filter):
         "/api/v1/health/ready",
         "/api/v1/health",
         "/api/v1/jobs/active",
+    })
+    # Exact-match paths that should be suppressed only when they appear
+    # as the full endpoint (not as a prefix of longer paths like /compounds/{id})
+    POLL_EXACT_PATHS: frozenset = frozenset({
         "/api/v1/compounds",
     })
 
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
+        # Substring match for paths that are unambiguous prefixes
         for path in self.POLL_PATHS:
             if path in msg:
-                # Suppress the record entirely rather than downgrading the level.
-                # Mutating record.levelno does NOT prevent emission because the
-                # logger already passed its threshold check before filter() runs.
+                return False
+        # Exact-match for paths that are prefixes of other valid endpoints
+        # e.g. suppress "GET /api/v1/compounds " but not "GET /api/v1/compounds/abc123"
+        for path in self.POLL_EXACT_PATHS:
+            if path in msg and f"{path}/" not in msg:
                 return False
         return True
 

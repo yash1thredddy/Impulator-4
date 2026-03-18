@@ -82,6 +82,7 @@ class TestExecutorContextPropagation:
         # Gate so both workers run and capture before either finishes cleanup
         gate = threading.Event()
 
+        token2 = None  # Initialize before try so finally can safely check
         executor = JobExecutor(max_workers=2)
         try:
             def worker_1(job_id):
@@ -118,5 +119,6 @@ class TestExecutorContextPropagation:
         finally:
             gate.set()  # Ensure workers unblock on failure path
             executor.shutdown(wait=True)
-            request_id_var.reset(token2)
+            if token2 is not None:
+                request_id_var.reset(token2)
             request_id_var.reset(token1)
