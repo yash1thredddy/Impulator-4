@@ -22,8 +22,43 @@ logger = logging.getLogger(__name__)
 
 def render_home_page() -> None:
     """Render the home page with compound browser."""
-    st.title(" IMPULATOR")
-    st.caption("IMP Navigator - Identify Invalid Metabolic Panaceas")
+    # Gradient style for the New Analysis button only.
+    # Uses an invisible marker span + CSS adjacent sibling selector to scope
+    # the gradient to only the button that immediately follows the marker.
+    st.markdown("""
+    <style>
+    #new-analysis-marker {
+        display: none;
+    }
+    .stElementContainer:has(#new-analysis-marker) + .stElementContainer button[kind="primary"] {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+        border: none !important;
+        font-size: 1.1rem !important;
+        font-weight: 600 !important;
+        padding: 0.65rem 1.5rem !important;
+        border-radius: 0.5rem !important;
+        color: white !important;
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    .stElementContainer:has(#new-analysis-marker) + .stElementContainer button[kind="primary"]:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    title_col, btn_col = st.columns([4, 1], vertical_alignment="center")
+    with title_col:
+        st.title(" IMPULATOR")
+        st.caption("IMP Navigator - Identify Invalid Metabolic Panaceas")
+    with btn_col:
+        # Hidden marker so CSS can target only this button
+        st.markdown('<span id="new-analysis-marker"></span>', unsafe_allow_html=True)
+        if st.button("+ New Analysis", type="primary", use_container_width=True):
+            SessionState.navigate_to_analyze()
+            st.rerun()
+
+    st.subheader("Available Analyses")
 
     # Search and filter section
     render_search_section()
@@ -36,7 +71,7 @@ def render_home_page() -> None:
 
 def render_search_section() -> None:
     """Render the search and filter controls."""
-    col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
+    col1, col2, col3 = st.columns([4, 1, 1])
 
     with col1:
         search_query = st.text_input(
@@ -67,11 +102,6 @@ def render_search_section() -> None:
             label_visibility="collapsed"
         )
         SessionState.set('compound_view_mode', view_mode)
-
-    with col4:
-        if st.button("+ New Analysis", type="primary", use_container_width=True):
-            SessionState.navigate_to_analyze()
-            st.rerun()
 
 
 def render_compound_browser() -> None:
