@@ -1,0 +1,25 @@
+name: Supabase Keep-Alive
+
+on:
+  schedule:
+    # Every 3 days at 08:00 UTC -- prevents Supabase free tier 7-day inactivity pause
+    - cron: '0 8 */3 * *'
+  workflow_dispatch:
+    # Allow manual triggering for testing
+
+jobs:
+  ping:
+    name: Ping Supabase Database
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Ping database with SELECT 1
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL secret is not set"
+            exit 1
+          fi
+          psql "$DATABASE_URL" -c "SELECT 1 AS keepalive;" && echo "::notice::Ping OK - database is active" || { echo "::error::Ping FAILED"; exit 1; }

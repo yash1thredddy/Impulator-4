@@ -46,6 +46,43 @@ from backend.models.database import Job, JobStatus  # noqa: E402 -- after loggin
 logger = logging.getLogger(__name__)
 
 
+def _wait_for_database(max_retries: int = 10, base_delay: float = 1.0, max_delay: float = 30.0):
+    """Wait for database to become available with exponential backoff + jitter.
+
+    Args:
+        max_retries: Maximum connection attempts (default 10).
+        base_delay: Initial delay in seconds (default 1.0).
+        max_delay: Maximum delay cap in seconds (default 30.0).
+    """
+    import time
+    import random
+    from sqlalchemy import text as _text
+    from backend.core.database import engine, _is_postgres
+
+    # Skip retry logic for SQLite (always local, always available)
+    if not _is_postgres:
+        return
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            with engine.connect() as conn:
+                conn.execute(_text("SELECT 1"))
+                conn.commit()
+            logger.info(f"Database connected (attempt {attempt})")
+            return
+        except Exception as e:
+            if attempt == max_retries:
+                logger.critical(f"Database unreachable after {max_retries} attempts: {e}")
+                raise SystemExit(1)
+            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+            jitter = random.uniform(0, delay * 0.1)
+            logger.warning(
+                f"Database connection failed (attempt {attempt}/{max_retries}), "
+                f"retrying in {delay:.1f}s: {e}"
+            )
+            time.sleep(delay + jitter)
+
+
 # Global exception handler for uncaught thread exceptions
 def _handle_thread_exception(args):
     """Handle uncaught exceptions in threads - logs to file for debugging."""
@@ -78,6 +115,9 @@ async def lifespan(app: FastAPI):  # pragma: no cover -- startup/shutdown lifecy
         download_db_from_azure()
     else:
         logger.info("Azure Blob not configured, using local database only")
+
+    # Wait for database connectivity (retries with backoff for Postgres)
+    _wait_for_database()
 
     # Initialize database tables
     init_db()

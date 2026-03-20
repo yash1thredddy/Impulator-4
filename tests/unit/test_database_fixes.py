@@ -581,16 +581,18 @@ class TestNullPoolConfiguration:
         assert pool_type in ("NullPool", "StaticPool"), \
             f"Expected NullPool or StaticPool (test override), got {pool_type}"
 
-    def test_production_config_specifies_nullpool(self):
-        """Test that the database module source specifies NullPool."""
+    def test_production_config_specifies_pool_classes(self):
+        """Test that the database module source specifies QueuePool and NullPool."""
         import inspect
         from backend.core import database as db_module
 
         # Get source code of the module
         source = inspect.getsource(db_module)
 
-        # Verify NullPool is imported and used
-        assert "from sqlalchemy.pool import NullPool" in source, \
-            "NullPool should be imported from sqlalchemy.pool"
+        # Verify both pool classes are imported (QueuePool for Postgres, NullPool for SQLite)
+        assert "from sqlalchemy.pool import QueuePool, NullPool" in source, \
+            "QueuePool and NullPool should be imported from sqlalchemy.pool"
+        assert "poolclass=QueuePool" in source, \
+            "Postgres engine should be configured with poolclass=QueuePool"
         assert "poolclass=NullPool" in source, \
-            "Engine should be configured with poolclass=NullPool"
+            "SQLite engine should be configured with poolclass=NullPool"

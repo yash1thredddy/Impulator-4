@@ -733,6 +733,7 @@ class HealthResponse(BaseModel):
     status: str = "healthy"
     version: str
     database: bool
+    db_latency_ms: Optional[float] = None  # Database round-trip time in ms
     azure_configured: bool
     executor_active_jobs: int
     timestamp: datetime

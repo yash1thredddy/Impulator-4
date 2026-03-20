@@ -38,15 +38,16 @@ class TestNullPoolConfiguration:
         assert pool_class_name in ("NullPool", "StaticPool"), \
             f"Expected NullPool or StaticPool, got {pool_class_name}"
 
-    def test_production_config_uses_nullpool(self):
-        """Test that the production database configuration specifies NullPool."""
+    def test_production_config_uses_pool_classes(self):
+        """Test that the production database configuration specifies QueuePool and NullPool."""
         import inspect
         from backend.core import database as db_module
 
-        # Get source code of the module to verify NullPool is configured
+        # Get source code of the module to verify dual pool configuration
         source = inspect.getsource(db_module)
-        assert "from sqlalchemy.pool import NullPool" in source
-        assert "poolclass=NullPool" in source
+        assert "from sqlalchemy.pool import QueuePool, NullPool" in source
+        assert "poolclass=QueuePool" in source, "Postgres path should use QueuePool"
+        assert "poolclass=NullPool" in source, "SQLite path should use NullPool"
 
     def test_nullpool_no_connection_persistence(self):
         """Test that NullPool doesn't persist connections."""

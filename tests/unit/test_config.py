@@ -19,7 +19,7 @@ class TestSettingsDefaults:
         from backend.config import Settings
 
         # Create fresh settings without env file
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.APP_NAME == "Impulator"
@@ -28,7 +28,7 @@ class TestSettingsDefaults:
         """Test default application version."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.APP_VERSION == "2.1.3"
@@ -37,7 +37,7 @@ class TestSettingsDefaults:
         """Test debug is False by default."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert not settings.DEBUG
@@ -46,7 +46,7 @@ class TestSettingsDefaults:
         """Test default API port."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.API_PORT == 8000
@@ -55,7 +55,7 @@ class TestSettingsDefaults:
         """Test default frontend port."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.FRONTEND_PORT == 7860
@@ -64,7 +64,7 @@ class TestSettingsDefaults:
         """Test default max workers."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.MAX_WORKERS == 2
@@ -73,7 +73,7 @@ class TestSettingsDefaults:
         """Test default job timeout."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.JOB_TIMEOUT == 3600  # 1 hour
@@ -82,7 +82,7 @@ class TestSettingsDefaults:
         """Test default cache size."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.CACHE_SIZE == 500
@@ -95,7 +95,7 @@ class TestSettingsOverrides:
         """Test DEBUG can be overridden."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {'DEBUG': 'true'}, clear=True):
+        with patch.dict(os.environ, {'DEBUG': 'true', 'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.DEBUG
@@ -104,7 +104,7 @@ class TestSettingsOverrides:
         """Test API_PORT can be overridden."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {'API_PORT': '9000'}, clear=True):
+        with patch.dict(os.environ, {'API_PORT': '9000', 'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.API_PORT == 9000
@@ -113,7 +113,7 @@ class TestSettingsOverrides:
         """Test MAX_WORKERS can be overridden."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {'MAX_WORKERS': '4'}, clear=True):
+        with patch.dict(os.environ, {'MAX_WORKERS': '4', 'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.MAX_WORKERS == 4
@@ -122,7 +122,7 @@ class TestSettingsOverrides:
         """Test DATABASE_URL can be overridden."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {'DATABASE_URL': 'sqlite:///./test.db'}, clear=True):
+        with patch.dict(os.environ, {'DATABASE_URL': 'sqlite:///./test.db', 'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.DATABASE_URL == 'sqlite:///./test.db'
@@ -131,7 +131,7 @@ class TestSettingsOverrides:
         """Test AZURE_CONNECTION_STRING can be overridden."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {'AZURE_CONNECTION_STRING': 'DefaultEndpoint=...'}, clear=True):
+        with patch.dict(os.environ, {'AZURE_CONNECTION_STRING': 'DefaultEndpoint=...', 'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.AZURE_CONNECTION_STRING == 'DefaultEndpoint=...'
@@ -144,7 +144,7 @@ class TestCORSOriginsParsing:
         """Test CORS origins string is parsed to list."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {'CORS_ORIGINS': 'http://localhost:3000,http://localhost:8000'}, clear=True):
+        with patch.dict(os.environ, {'CORS_ORIGINS': 'http://localhost:3000,http://localhost:8000', 'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.cors_origins_list == ['http://localhost:3000', 'http://localhost:8000']
@@ -153,7 +153,7 @@ class TestCORSOriginsParsing:
         """Test CORS origins handles spaces correctly."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {'CORS_ORIGINS': 'http://localhost:3000, http://localhost:8000'}, clear=True):
+        with patch.dict(os.environ, {'CORS_ORIGINS': 'http://localhost:3000, http://localhost:8000', 'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.cors_origins_list == ['http://localhost:3000', 'http://localhost:8000']
@@ -162,7 +162,7 @@ class TestCORSOriginsParsing:
         """Test CORS origins handles empty string."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {'CORS_ORIGINS': ''}, clear=True):
+        with patch.dict(os.environ, {'CORS_ORIGINS': '', 'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.cors_origins_list == []
@@ -171,7 +171,7 @@ class TestCORSOriginsParsing:
         """Test CORS origins handles single origin."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {'CORS_ORIGINS': 'http://localhost:3000'}, clear=True):
+        with patch.dict(os.environ, {'CORS_ORIGINS': 'http://localhost:3000', 'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.cors_origins_list == ['http://localhost:3000']
@@ -185,7 +185,7 @@ class TestPathSettings:
         from backend.config import Settings
         from pathlib import Path
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert isinstance(settings.DATA_DIR, Path)
@@ -195,7 +195,7 @@ class TestPathSettings:
         from backend.config import Settings
         from pathlib import Path
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert isinstance(settings.RESULTS_DIR, Path)
@@ -204,7 +204,7 @@ class TestPathSettings:
         """Test default data directory."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert str(settings.DATA_DIR) == 'data'
@@ -213,7 +213,7 @@ class TestPathSettings:
         """Test default results directory."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert 'results' in str(settings.RESULTS_DIR)
@@ -248,7 +248,7 @@ class TestExternalAPISettings:
         """Test ChEMBL API URL default."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert 'chembl' in settings.CHEMBL_API_URL.lower()
@@ -258,7 +258,7 @@ class TestExternalAPISettings:
         """Test PDB API URL default."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert 'rcsb' in settings.PDB_API_URL.lower()
@@ -272,7 +272,7 @@ class TestRateLimitSettings:
         """Test default rate limit max jobs."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.RATE_LIMIT_MAX_JOBS == 10
@@ -281,7 +281,7 @@ class TestRateLimitSettings:
         """Test rate limit max jobs can be overridden."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {'RATE_LIMIT_MAX_JOBS': '20'}, clear=True):
+        with patch.dict(os.environ, {'RATE_LIMIT_MAX_JOBS': '20', 'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.RATE_LIMIT_MAX_JOBS == 20
@@ -290,7 +290,7 @@ class TestRateLimitSettings:
         """Test default rate limit window."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.RATE_LIMIT_WINDOW == 60
@@ -299,7 +299,7 @@ class TestRateLimitSettings:
         """Test rate limit is enabled by default."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.RATE_LIMIT_ENABLED
@@ -312,7 +312,7 @@ class TestAzureSettings:
         """Test default Azure container name."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.AZURE_CONTAINER == "impulator"
@@ -321,7 +321,7 @@ class TestAzureSettings:
         """Test Azure connection string is empty by default."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
         assert settings.AZURE_CONNECTION_STRING == ""

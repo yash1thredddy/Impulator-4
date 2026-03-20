@@ -1,6 +1,4 @@
-"""
-SQLite database setup with SQLAlchemy.
-"""
+"""Database setup with SQLAlchemy. Supports Postgres (primary) and SQLite (testing)."""
 import logging
 import os
 import time
@@ -10,37 +8,49 @@ from typing import Generator
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, Session, declarative_base
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import QueuePool, NullPool
 
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Create engine with SQLite-specific settings
-# NullPool creates a new connection per request and auto-closes it
-# This prevents WAL corruption with ThreadPoolExecutor (2 workers)
-engine = create_engine(
-    settings.DATABASE_URL,
-    connect_args={
-        "check_same_thread": False,  # Allow multi-threaded access
-        "timeout": 30,  # 30 second timeout for locks
-    },
-    poolclass=NullPool,  # New connection per request, auto-closed (safe for multi-threaded SQLite)
-    echo=settings.DEBUG,
-)
+# Detect database backend from config
+_is_postgres = settings.DATABASE_URL.startswith(("postgresql://", "postgres://"))
 
+if _is_postgres:
+    # Postgres via Supabase PgBouncer -- small QueuePool as local connection cache
+    engine = create_engine(
+        settings.DATABASE_URL,
+        poolclass=QueuePool,
+        pool_size=2,
+        max_overflow=3,
+        pool_timeout=30,
+        pool_recycle=1800,
+        pool_pre_ping=True,
+        echo=settings.DB_ECHO,
+        connect_args={
+            "application_name": "impulator",
+        },
+    )
+else:
+    # Legacy SQLite path -- used in TESTING mode only, removed in Phase 17
+    engine = create_engine(
+        settings.DATABASE_URL,
+        connect_args={"check_same_thread": False, "timeout": 30},
+        poolclass=NullPool,
+        echo=settings.DB_ECHO,
+    )
 
-# Enable WAL mode and busy timeout for better concurrency
-@event.listens_for(engine, "connect")
-def set_sqlite_pragma(dbapi_connection, connection_record):
-    """Configure SQLite for better concurrency and data safety."""
-    cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout=60000")  # 60s busy timeout (STAB-05)
-    # FULL sync ensures data integrity - important for scientific data
-    cursor.execute("PRAGMA synchronous=FULL")
-    cursor.execute("PRAGMA foreign_keys=ON")
-    cursor.close()
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        """Configure SQLite for better concurrency and data safety."""
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=60000")  # 60s busy timeout (STAB-05)
+        # FULL sync ensures data integrity - important for scientific data
+        cursor.execute("PRAGMA synchronous=FULL")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 
 def execute_with_retry(db: Session, operation, max_retries: int = 1):
@@ -109,16 +119,14 @@ def get_db_session() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    """
-    Initialize database tables with migration locking.
-    Call this on application startup.
-    """
+    """Initialize database tables. Call on application startup."""
     from backend.models.database import Job, Compound, DeletedCompound  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
 
-    # Apply schema migrations with lock to prevent race conditions
-    _apply_migrations_with_lock()
+    # SQLite-only migrations (Alembic replaces this in Phase 13)
+    if not _is_postgres:
+        _apply_migrations_with_lock()
 
 
 def _apply_migrations_with_lock() -> None:  # pragma: no cover -- migration lock, tested manually

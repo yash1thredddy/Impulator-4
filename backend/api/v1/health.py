@@ -10,6 +10,7 @@ Provides multiple levels of health checks:
 - /health/metrics: Application metrics
 """
 import logging
+import time as _time
 from datetime import datetime, timezone
 from typing import Dict, Any
 
@@ -18,7 +19,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from backend.config import settings
-from backend.core.database import get_db
+from backend.core.database import get_db, _is_postgres
 from backend.core.executor import job_executor
 from backend.core.azure_sync import is_azure_configured
 from backend.core.metrics import metrics
@@ -38,10 +39,13 @@ async def health_check(db: Session = Depends(get_db)) -> HealthResponse:
     Returns:
         HealthResponse with status of database and executor
     """
-    # Check database
+    # Check database with latency measurement
     db_healthy = False
+    db_latency_ms = None
     try:
+        start = _time.monotonic()
         db.execute(text("SELECT 1"))
+        db_latency_ms = round((_time.monotonic() - start) * 1000, 1)
         db_healthy = True
     except Exception:
         pass
@@ -50,6 +54,7 @@ async def health_check(db: Session = Depends(get_db)) -> HealthResponse:
         status="healthy" if db_healthy else "degraded",
         version=settings.APP_VERSION,
         database=db_healthy,
+        db_latency_ms=db_latency_ms,
         azure_configured=is_azure_configured(),
         executor_active_jobs=job_executor.get_active_count(),
         timestamp=datetime.now(timezone.utc),
@@ -161,19 +166,32 @@ async def detailed_health_check(db: Session = Depends(get_db)) -> Dict[str, Any]
 
     # Database connectivity
     try:
+        start = _time.monotonic()
         db.execute(text("SELECT 1"))
+        db_latency_ms = round((_time.monotonic() - start) * 1000, 1)
         # Get table counts for debugging
         jobs_count = db.execute(text("SELECT COUNT(*) FROM jobs")).scalar()
         compounds_count = db.execute(text("SELECT COUNT(*) FROM compounds")).scalar()
-        checks["database"] = {
+
+        db_check: Dict[str, Any] = {
             "status": "healthy",
+            "backend": "postgres" if _is_postgres else "sqlite",
+            "latency_ms": db_latency_ms,
             "jobs_count": jobs_count,
             "compounds_count": compounds_count,
         }
+
+        # Add Postgres version if connected to Postgres
+        if _is_postgres:
+            pg_version = db.execute(text("SELECT version()")).scalar()
+            db_check["version"] = pg_version
+
+        checks["database"] = db_check
     except Exception as e:
         logger.error(f"Database health check failed: {e}")
         checks["database"] = {
             "status": "unhealthy",
+            "backend": "postgres" if _is_postgres else "sqlite",
             "error": "Connection failed",
         }
 

@@ -5,6 +5,7 @@ Simplified for single-container deployment (local, HF Spaces, Streamlit Cloud, e
 from pathlib import Path
 from functools import lru_cache
 from typing import List
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,10 +28,17 @@ class Settings(BaseSettings):
     FRONTEND_PORT: int = 7860
 
     # Database
-    DATABASE_URL: str = "sqlite:///./data/impulator.db"
+    DATABASE_URL: str = ""  # Must be set via env var (postgresql://...)
     DB_POOL_TIMEOUT: int = 30  # Connection timeout in seconds
     DB_ECHO: bool = False  # SQL logging (disabled in production)
     DIRECT_DATABASE_URL: str = ""  # Direct Supabase connection (port 5432) for DDL/migrations. Falls back to DATABASE_URL if empty.
+
+    # Supabase (for future auth provider integration)
+    SUPABASE_URL: str = ""  # https://<project-ref>.supabase.co
+    SUPABASE_SECRET_KEY: str = ""  # Secret key for backend use (Dashboard > API Keys > Secret keys)
+
+    # Testing mode (CI compatibility -- allows SQLite)
+    TESTING: bool = False
 
     # Executor (ThreadPoolExecutor for background jobs)
     MAX_WORKERS: int = 2  # Concurrent job limit
@@ -84,6 +92,36 @@ class Settings(BaseSettings):
         if not self.CORS_ORIGINS:
             return []
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
+
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def validate_database_url(cls, v: str, info) -> str:
+        """Validate DATABASE_URL is a Postgres connection string.
+
+        In TESTING mode (CI), allow SQLite URLs for backward compatibility
+        until Phase 20 migrates tests to Postgres.
+        """
+        # Check if TESTING mode -- allow SQLite for CI
+        # info.data contains already-validated fields; TESTING may not be there yet
+        # so also check the environment variable directly
+        import os
+        testing = os.environ.get("TESTING", "").lower() in ("true", "1", "yes")
+        if testing:
+            return v if v else "sqlite:///:memory:"
+
+        if not v:
+            raise ValueError(
+                "DATABASE_URL must be set. "
+                "Get your connection string from Supabase Dashboard > Settings > Database."
+            )
+        # Normalize postgres:// to postgresql:// (Supabase provides postgres://)
+        if v.startswith("postgres://"):
+            v = "postgresql://" + v[len("postgres://"):]
+        if not v.startswith("postgresql://"):
+            raise ValueError(
+                "DATABASE_URL must be a PostgreSQL connection string (postgresql://...)"
+            )
+        return v
 
     model_config = SettingsConfigDict(
         env_file=".env",
