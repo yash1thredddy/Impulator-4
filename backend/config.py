@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:///./data/impulator.db"
     DB_POOL_TIMEOUT: int = 30  # Connection timeout in seconds
     DB_ECHO: bool = False  # SQL logging (disabled in production)
+    DIRECT_DATABASE_URL: str = ""  # Direct Supabase connection (port 5432) for DDL/migrations. Falls back to DATABASE_URL if empty.
 
     # Executor (ThreadPoolExecutor for background jobs)
     MAX_WORKERS: int = 2  # Concurrent job limit

@@ -1,0 +1,197 @@
+<h2>Single Compound Form Layout</h2>
+<p class="subtitle">Which form layout feels right for the analyze page?</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding: 20px; background: #1a1a2e;">
+      <!-- Mockup A: Sectioned cards -->
+      <div style="font-family: system-ui; color: #e0e0e0; font-size: 12px;">
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">
+          <div style="background:#444; padding:6px 14px; border-radius:6px; font-size:11px;">← Back</div>
+          <div style="font-size:18px; font-weight:700;">New Analysis</div>
+        </div>
+
+        <div style="display:flex; gap:8px; margin-bottom:16px;">
+          <div style="background:#667eea; padding:6px 16px; border-radius:6px 6px 0 0; font-size:11px; color:white;">Single Compound Analysis</div>
+          <div style="background:#333; padding:6px 16px; border-radius:6px 6px 0 0; font-size:11px; color:#888;">Batch Compound Analysis</div>
+        </div>
+
+        <!-- Card 1: Compound Info -->
+        <div style="background:#252540; border:1px solid #333; border-radius:8px; padding:14px; margin-bottom:12px;">
+          <div style="font-size:13px; font-weight:600; margin-bottom:10px; color:#667eea;">🧪 Compound Information</div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:10px;">
+            <div>
+              <div style="font-size:9px; color:#888; margin-bottom:3px;">Compound Name *</div>
+              <div style="background:#1a1a2e; border:1px solid #444; border-radius:4px; padding:6px 8px; font-size:10px; color:#666;">e.g., Aspirin</div>
+            </div>
+            <div>
+              <div style="font-size:9px; color:#888; margin-bottom:3px;">Author Name *</div>
+              <div style="background:#1a1a2e; border:1px solid #444; border-radius:4px; padding:6px 8px; font-size:10px; color:#666;">e.g., Dr. Jane Smith</div>
+            </div>
+          </div>
+          <div>
+            <div style="font-size:9px; color:#888; margin-bottom:3px;">Input Type</div>
+            <div style="display:flex; gap:6px; margin-bottom:8px;">
+              <div style="background:#667eea; padding:4px 10px; border-radius:12px; font-size:9px; color:white;">SMILES</div>
+              <div style="background:#333; padding:4px 10px; border-radius:12px; font-size:9px;">InChI</div>
+              <div style="background:#333; padding:4px 10px; border-radius:12px; font-size:9px;">InChIKey</div>
+            </div>
+            <div style="background:#1a1a2e; border:1px solid #444; border-radius:4px; padding:8px; font-size:10px; color:#666; min-height:36px;">e.g., CC(=O)OC1=CC=CC=C1C(=O)O</div>
+          </div>
+        </div>
+
+        <!-- Card 2: Config -->
+        <div style="background:#252540; border:1px solid #333; border-radius:8px; padding:14px; margin-bottom:12px;">
+          <div style="font-size:13px; font-weight:600; margin-bottom:10px; color:#667eea;">⚙️ Analysis Configuration</div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+            <div>
+              <div style="font-size:9px; color:#888; margin-bottom:3px;">Similarity Threshold</div>
+              <div style="background:#667eea; height:4px; border-radius:2px; width:70%; margin:8px 0;"></div>
+              <div style="font-size:10px; color:#aaa;">70%</div>
+            </div>
+            <div>
+              <div style="font-size:9px; color:#888; margin-bottom:6px;">Activity Types</div>
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:3px; font-size:9px;">
+                <div>☑ IC50</div><div>☑ EC50</div>
+                <div>☑ Ki</div><div>☑ Kd</div>
+                <div>☑ AC50</div><div>☑ GI50</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Submit -->
+        <div style="background:linear-gradient(135deg, #667eea, #764ba2); padding:10px; border-radius:8px; text-align:center; font-weight:600; font-size:12px; color:white;">
+          Submit Analysis
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A: Sectioned Cards</h3>
+      <p>Form grouped into distinct visual cards with colored headers. Compound Name + Author side-by-side. Clear visual separation between sections. Feels modern and organized.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding: 20px; background: #1a1a2e;">
+      <!-- Mockup B: Stepper / Wizard -->
+      <div style="font-family: system-ui; color: #e0e0e0; font-size: 12px;">
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">
+          <div style="background:#444; padding:6px 14px; border-radius:6px; font-size:11px;">← Back</div>
+          <div style="font-size:18px; font-weight:700;">New Analysis</div>
+        </div>
+
+        <div style="display:flex; gap:8px; margin-bottom:16px;">
+          <div style="background:#667eea; padding:6px 16px; border-radius:6px 6px 0 0; font-size:11px; color:white;">Single Compound Analysis</div>
+          <div style="background:#333; padding:6px 16px; border-radius:6px 6px 0 0; font-size:11px; color:#888;">Batch Compound Analysis</div>
+        </div>
+
+        <!-- Step indicator -->
+        <div style="display:flex; align-items:center; justify-content:center; gap:6px; margin-bottom:16px;">
+          <div style="background:#667eea; width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700; color:white;">1</div>
+          <div style="width:40px; height:2px; background:#667eea;"></div>
+          <div style="background:#333; width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:11px; color:#666;">2</div>
+          <div style="width:40px; height:2px; background:#333;"></div>
+          <div style="background:#333; width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:11px; color:#666;">3</div>
+        </div>
+        <div style="text-align:center; font-size:10px; color:#888; margin-bottom:12px;">Step 1 of 3: Compound Details</div>
+
+        <!-- Step 1 content -->
+        <div style="background:#252540; border:1px solid #333; border-radius:8px; padding:14px; margin-bottom:12px;">
+          <div style="margin-bottom:10px;">
+            <div style="font-size:9px; color:#888; margin-bottom:3px;">Compound Name *</div>
+            <div style="background:#1a1a2e; border:1px solid #444; border-radius:4px; padding:6px 8px; font-size:10px; color:#666;">e.g., Aspirin</div>
+          </div>
+          <div style="margin-bottom:10px;">
+            <div style="font-size:9px; color:#888; margin-bottom:3px;">Author Name *</div>
+            <div style="background:#1a1a2e; border:1px solid #444; border-radius:4px; padding:6px 8px; font-size:10px; color:#666;">e.g., Dr. Jane Smith</div>
+          </div>
+          <div>
+            <div style="font-size:9px; color:#888; margin-bottom:3px;">Input Type</div>
+            <div style="display:flex; gap:6px; margin-bottom:8px;">
+              <div style="background:#667eea; padding:4px 10px; border-radius:12px; font-size:9px; color:white;">SMILES</div>
+              <div style="background:#333; padding:4px 10px; border-radius:12px; font-size:9px;">InChI</div>
+              <div style="background:#333; padding:4px 10px; border-radius:12px; font-size:9px;">InChIKey</div>
+            </div>
+            <div style="background:#1a1a2e; border:1px solid #444; border-radius:4px; padding:8px; font-size:10px; color:#666; min-height:36px;">e.g., CC(=O)OC1=CC=CC=C1C(=O)O</div>
+          </div>
+        </div>
+
+        <div style="display:flex; gap:8px; justify-content:flex-end;">
+          <div style="background:linear-gradient(135deg, #667eea, #764ba2); padding:8px 24px; border-radius:6px; font-size:11px; font-weight:600; color:white;">Next →</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B: Step Wizard</h3>
+      <p>3-step flow: Compound → Config → Review & Submit. Shows one section at a time with progress indicator. Less overwhelming for new users but adds clicks for power users.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding: 20px; background: #1a1a2e;">
+      <!-- Mockup C: Clean single column with visual polish -->
+      <div style="font-family: system-ui; color: #e0e0e0; font-size: 12px;">
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">
+          <div style="background:#444; padding:6px 14px; border-radius:6px; font-size:11px;">← Back</div>
+          <div style="font-size:18px; font-weight:700;">New Analysis</div>
+        </div>
+
+        <div style="display:flex; gap:8px; margin-bottom:16px;">
+          <div style="background:#667eea; padding:6px 16px; border-radius:6px 6px 0 0; font-size:11px; color:white;">Single Compound Analysis</div>
+          <div style="background:#333; padding:6px 16px; border-radius:6px 6px 0 0; font-size:11px; color:#888;">Batch Compound Analysis</div>
+        </div>
+
+        <!-- Compound section with subtle left border -->
+        <div style="border-left:3px solid #667eea; padding-left:12px; margin-bottom:16px;">
+          <div style="font-size:11px; font-weight:600; color:#667eea; margin-bottom:8px;">COMPOUND</div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:8px;">
+            <div>
+              <div style="font-size:9px; color:#888; margin-bottom:3px;">Compound Name *</div>
+              <div style="background:#252540; border:1px solid #444; border-radius:4px; padding:6px 8px; font-size:10px; color:#666;">e.g., Aspirin</div>
+            </div>
+            <div>
+              <div style="font-size:9px; color:#888; margin-bottom:3px;">Author Name *</div>
+              <div style="background:#252540; border:1px solid #444; border-radius:4px; padding:6px 8px; font-size:10px; color:#666;">e.g., Dr. Jane Smith</div>
+            </div>
+          </div>
+          <div style="display:flex; gap:6px; margin-bottom:6px;">
+            <div style="background:#667eea; padding:3px 10px; border-radius:12px; font-size:9px; color:white;">SMILES</div>
+            <div style="background:#333; padding:3px 10px; border-radius:12px; font-size:9px;">InChI</div>
+            <div style="background:#333; padding:3px 10px; border-radius:12px; font-size:9px;">InChIKey</div>
+          </div>
+          <div style="background:#252540; border:1px solid #444; border-radius:4px; padding:8px; font-size:10px; color:#666; min-height:30px;">e.g., CC(=O)OC1=CC=CC=C1C(=O)O</div>
+        </div>
+
+        <!-- Config section with subtle left border -->
+        <div style="border-left:3px solid #764ba2; padding-left:12px; margin-bottom:16px;">
+          <div style="font-size:11px; font-weight:600; color:#764ba2; margin-bottom:8px;">CONFIGURATION</div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+            <div>
+              <div style="font-size:9px; color:#888; margin-bottom:3px;">Similarity Threshold</div>
+              <div style="background:#764ba2; height:4px; border-radius:2px; width:70%; margin:6px 0;"></div>
+              <div style="font-size:10px; color:#aaa;">70%</div>
+            </div>
+            <div>
+              <div style="font-size:9px; color:#888; margin-bottom:4px;">Activity Types</div>
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:2px; font-size:9px;">
+                <div>☑ IC50</div><div>☑ EC50</div>
+                <div>☑ Ki</div><div>☑ Kd</div>
+                <div>☑ AC50</div><div>☑ GI50</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Submit -->
+        <div style="background:linear-gradient(135deg, #667eea, #764ba2); padding:10px; border-radius:8px; text-align:center; font-weight:600; font-size:12px; color:white;">
+          Submit Analysis
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C: Color-Bordered Sections</h3>
+      <p>Single scrollable form with colored left borders marking each section. Compact for power users, visually distinct sections for newcomers. Compound Name + Author side-by-side. Minimal but polished.</p>
+    </div>
+  </div>
+</div>

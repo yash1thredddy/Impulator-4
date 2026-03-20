@@ -6,6 +6,7 @@ pydantic-settings>=2.1.0
 
 # Database
 sqlalchemy>=2.0.0
+alembic>=1.13  # Schema migrations
 
 # HTTP Client
 httpx>=0.25.0
