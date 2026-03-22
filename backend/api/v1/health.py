@@ -1,5 +1,5 @@
 """
-Health check endpoints.
+Health check endpoints (Postgres-only).
 
 Provides multiple levels of health checks:
 - /health: Quick overview of system health
@@ -12,27 +12,40 @@ Provides multiple levels of health checks:
 import logging
 import time as _time
 from datetime import datetime, timezone
-from typing import Dict, Any
+from typing import Any
 
-from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
-from sqlalchemy import text
+from fastapi import APIRouter
+from pydantic import BaseModel
+from sqlalchemy import text, select, func
 
+from backend.api.deps import DbDep
 from backend.config import settings
-from backend.core.database import get_db, _is_postgres
-from backend.core.executor import job_executor
+from backend.core import executor, upload_worker
 from backend.core.azure_sync import is_azure_configured
 from backend.core.metrics import metrics
-from backend.core.auth import verify_admin_api_key
-from backend.models.schemas import HealthResponse, ExecutorStats
+from backend.models.schemas import HealthResponse
+from backend.models.enums import JobStatus
+from backend.models.job import Job
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/health", tags=["Health"])
 
 
+class ExecutorStatsResponse(BaseModel):
+    """Async executor statistics response (per D-61)."""
+
+    max_concurrent_jobs: int
+    active_jobs: int
+    slots_available: int
+    has_capacity: bool
+    jobs: list[dict[str, Any]]
+    pending_uploads: int = 0
+    upload_worker_active: bool = False
+
+
 @router.get("", response_model=HealthResponse)
-async def health_check(db: Session = Depends(get_db)) -> HealthResponse:
+async def health_check(db: DbDep) -> HealthResponse:
     """
     Check health of all services.
 
@@ -56,22 +69,22 @@ async def health_check(db: Session = Depends(get_db)) -> HealthResponse:
         database=db_healthy,
         db_latency_ms=db_latency_ms,
         azure_configured=is_azure_configured(),
-        executor_active_jobs=job_executor.get_active_count(),
+        active_jobs=executor.get_active_count(),
+        max_concurrent_jobs=settings.MAX_CONCURRENT_JOBS,
         timestamp=datetime.now(timezone.utc),
     )
 
 
 @router.get("/ready")
-async def readiness_check(db: Session = Depends(get_db)):
+async def readiness_check(db: DbDep):
     """Readiness probe with real subsystem checks (STAB-08, STAB-12).
 
     Returns 200 for healthy/degraded, 503 for unhealthy.
     Unhealthy = database down OR scheduler dead with PENDING jobs.
     """
     import shutil
-    from fastapi.responses import JSONResponse
-    from backend.core.scheduler import job_scheduler
-    from backend.models.database import Job, JobStatus
+    from fastapi.responses import ORJSONResponse
+    from backend.core import scheduler
 
     status = "healthy"
     checks = {}
@@ -82,34 +95,23 @@ async def readiness_check(db: Session = Depends(get_db)):
         checks["database"] = "healthy"
     except Exception:
         checks["database"] = "unhealthy"
-        return JSONResponse(status_code=503, content={"status": "unhealthy", "checks": checks})
+        return ORJSONResponse(status_code=503, content={"status": "unhealthy", "checks": checks})
 
     # Scheduler liveness (critical if PENDING jobs exist -- STAB-12)
-    pending_count = db.query(Job).filter(Job.status == JobStatus.PENDING).count()
-    scheduler_alive = job_scheduler.is_running()
+    pending_count = db.scalar(select(func.count()).select_from(Job).where(Job.status == JobStatus.PENDING))
+    scheduler_alive = scheduler.is_running()
     if pending_count > 0 and not scheduler_alive:
         checks["scheduler"] = "unhealthy"
-        return JSONResponse(status_code=503, content={
+        return ORJSONResponse(status_code=503, content={
             "status": "unhealthy",
             "checks": checks,
             "detail": f"Scheduler dead with {pending_count} PENDING jobs",
         })
     checks["scheduler"] = "healthy" if scheduler_alive or pending_count == 0 else "degraded"
 
-    # Azure connectivity (degraded, not unhealthy -- STAB-08)
+    # Azure connectivity (informational only -- Postgres is the database)
     if is_azure_configured():
-        try:
-            from backend.core.azure_sync import _get_blob_client
-            blob = _get_blob_client("impulator.db")
-            if blob is not None:
-                blob.exists()  # Actual network call
-                checks["azure"] = "healthy"
-            else:
-                checks["azure"] = "degraded"
-                status = "degraded"
-        except Exception:
-            checks["azure"] = "degraded"
-            status = "degraded"
+        checks["azure"] = "configured"
     else:
         checks["azure"] = "not_configured"
 
@@ -124,7 +126,7 @@ async def readiness_check(db: Session = Depends(get_db)):
     except Exception:
         checks["disk"] = {"status": "unknown"}
 
-    return JSONResponse(status_code=200, content={"status": status, "checks": checks})
+    return ORJSONResponse(status_code=200, content={"status": status, "checks": checks})
 
 
 @router.get("/live")
@@ -136,33 +138,49 @@ async def liveness_check() -> dict:
     return {"status": "alive"}
 
 
-@router.get("/executor", response_model=ExecutorStats)
-async def executor_stats() -> ExecutorStats:
+@router.get("/executor", response_model=ExecutorStatsResponse)
+async def executor_stats_endpoint(db: DbDep) -> ExecutorStatsResponse:
     """
-    Get executor statistics.
+    Get executor statistics (per D-61).
 
     Returns:
-        ExecutorStats with current job queue status
+        ExecutorStatsResponse with async executor stats and upload worker info
     """
-    stats = job_executor.stats()
-    return ExecutorStats(**stats)
+    stats_data = executor.stats()
+
+    # Add upload worker info
+    pending_upload_count = db.scalar(select(func.count()).select_from(Job).where(Job.status == JobStatus.PENDING_UPLOAD))
+
+    return ExecutorStatsResponse(
+        max_concurrent_jobs=stats_data["max_concurrent_jobs"],
+        active_jobs=stats_data["active_jobs"],
+        slots_available=stats_data["slots_available"],
+        has_capacity=stats_data["has_capacity"],
+        jobs=stats_data.get("jobs", []),
+        pending_uploads=pending_upload_count,
+        upload_worker_active=upload_worker.is_active(),
+    )
 
 
 @router.get("/detailed")
-async def detailed_health_check(db: Session = Depends(get_db)) -> Dict[str, Any]:
+async def detailed_health_check(db: DbDep) -> dict[str, Any]:
     """
     Comprehensive health check for monitoring.
 
     Returns detailed status of all system components including:
     - Database connectivity and configuration
     - Executor status
+    - Scheduler status
     - Azure configuration
+    - Upload worker status
     - Rate limiter status
     - Application metrics
 
     Use this endpoint for monitoring dashboards and alerting.
     """
-    checks: Dict[str, Any] = {}
+    from backend.core import scheduler
+
+    checks: dict[str, Any] = {}
 
     # Database connectivity
     try:
@@ -173,62 +191,55 @@ async def detailed_health_check(db: Session = Depends(get_db)) -> Dict[str, Any]
         jobs_count = db.execute(text("SELECT COUNT(*) FROM jobs")).scalar()
         compounds_count = db.execute(text("SELECT COUNT(*) FROM compounds")).scalar()
 
-        db_check: Dict[str, Any] = {
+        pg_version = db.execute(text("SELECT version()")).scalar()
+        db_check: dict[str, Any] = {
             "status": "healthy",
-            "backend": "postgres" if _is_postgres else "sqlite",
+            "backend": "postgres",
             "latency_ms": db_latency_ms,
             "jobs_count": jobs_count,
             "compounds_count": compounds_count,
+            "version": pg_version,
         }
-
-        # Add Postgres version if connected to Postgres
-        if _is_postgres:
-            pg_version = db.execute(text("SELECT version()")).scalar()
-            db_check["version"] = pg_version
 
         checks["database"] = db_check
     except Exception as e:
         logger.error(f"Database health check failed: {e}")
         checks["database"] = {
             "status": "unhealthy",
-            "backend": "postgres" if _is_postgres else "sqlite",
+            "backend": "postgres",
             "error": "Connection failed",
         }
 
-    # Executor status
-    executor_stats = job_executor.stats()
+    # Executor status (per D-61)
+    exec_stats = executor.stats()
+    pending_upload_count = 0
+    try:
+        pending_upload_count = db.scalar(select(func.count()).select_from(Job).where(Job.status == JobStatus.PENDING_UPLOAD))
+    except Exception:
+        pass
     checks["executor"] = {
-        "status": "healthy" if executor_stats.get("max_workers", 0) > 0 else "degraded",
-        "active_jobs": executor_stats.get("active_jobs", 0),
-        "max_workers": executor_stats.get("max_workers", 0),
-        "has_capacity": executor_stats.get("has_capacity", False),
+        "status": "healthy" if exec_stats.get("max_concurrent_jobs", 0) > 0 else "degraded",
+        "max_concurrent_jobs": exec_stats.get("max_concurrent_jobs", 0),
+        "active_jobs": exec_stats.get("active_jobs", 0),
+        "slots_available": exec_stats.get("slots_available", 0),
+        "has_capacity": exec_stats.get("has_capacity", False),
+        "pending_uploads": pending_upload_count,
+        "upload_worker_active": upload_worker.is_active(),
     }
 
-    # Scheduler status (STAB-12)
-    from backend.core.scheduler import job_scheduler
-    sched_stats = job_scheduler.stats()
+    # Scheduler status (per D-62)
+    sched_stats = scheduler.stats()
     checks["scheduler"] = {
-        "status": "healthy" if sched_stats["running"] else "idle",
-        "running": sched_stats["running"],
-        "last_activity": sched_stats["last_activity"],
+        "status": "healthy" if sched_stats["active"] else "idle",
+        "active": sched_stats["active"],
         "poll_interval": sched_stats["poll_interval"],
+        "consecutive_errors": sched_stats.get("consecutive_errors", 0),
+        "crash_reason": sched_stats.get("crash_reason", None),
     }
 
-    # Azure connectivity (STAB-08)
+    # Azure connectivity (informational -- Postgres is the database, Azure is for ZIPs/logs)
     if is_azure_configured():
-        try:
-            from backend.core.azure_sync import _get_blob_client
-            blob = _get_blob_client("impulator.db")
-            if blob is not None and blob.exists():
-                checks["azure"] = {"status": "healthy", "configured": True}
-            else:
-                checks["azure"] = {"status": "degraded", "configured": True}
-        except Exception as e:
-            # Log the full exception for debugging but keep the public response
-            # sanitized — Azure SDK errors can contain connection strings or
-            # account names that must not appear in API responses.
-            logger.warning("Azure connectivity check failed", exc_info=True)
-            checks["azure"] = {"status": "degraded", "configured": True, "error": type(e).__name__}
+        checks["azure"] = {"status": "configured", "configured": True}
     else:
         checks["azure"] = {"status": "not_configured", "configured": False}
 
@@ -274,7 +285,7 @@ async def detailed_health_check(db: Session = Depends(get_db)) -> Dict[str, Any]
 
 
 @router.get("/metrics")
-async def get_metrics() -> Dict[str, Any]:
+async def get_metrics() -> dict[str, Any]:
     """
     Get application metrics.
 
@@ -290,59 +301,3 @@ async def get_metrics() -> Dict[str, Any]:
         "metrics": metrics.to_dict(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-
-
-@router.post("/migrate")
-async def run_migrations(
-    db: Session = Depends(get_db),
-    _admin: bool = Depends(verify_admin_api_key)
-) -> Dict[str, Any]:
-    """
-    Run database migrations and sync to Azure.
-
-    **Requires admin authentication via X-Admin-API-Key header.**
-
-    This endpoint:
-    1. Runs pending database migrations
-    2. Syncs the updated database to Azure (if configured)
-
-    Returns migration status and any errors encountered.
-    """
-    from backend.core.database import _apply_migrations_with_lock
-    from backend.core.azure_sync import sync_db_to_azure, is_azure_configured
-
-    results = {
-        "status": "success",
-        "migrations_applied": True,
-        "azure_synced": False,
-        "errors": [],
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-
-    try:
-        # Run migrations
-        logger.info("Running database migrations via API...")
-        _apply_migrations_with_lock()
-        logger.info("Database migrations completed successfully")
-    except Exception as e:
-        logger.error(f"Migration failed: {e}", exc_info=True)
-        results["status"] = "error"
-        results["migrations_applied"] = False
-        results["errors"].append(f"Migration failed: {str(e)}")
-        return results
-
-    # Sync to Azure if configured
-    if is_azure_configured():
-        try:
-            logger.info("Syncing database to Azure after migration...")
-            sync_db_to_azure()
-            results["azure_synced"] = True
-            logger.info("Azure sync completed successfully")
-        except Exception as e:
-            logger.error(f"Azure sync failed: {e}", exc_info=True)
-            results["status"] = "partial"
-            results["errors"].append(f"Azure sync failed: {str(e)}")
-    else:
-        logger.info("Azure not configured, skipping sync")
-
-    return results

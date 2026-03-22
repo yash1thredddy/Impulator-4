@@ -81,27 +81,6 @@ class TestBasicHealth:
         assert db_check["backend"] in ("postgres", "sqlite")
         assert "latency_ms" in db_check
 
-    def test_health_check_has_latency(self, client):
-        """Health check response includes db_latency_ms field."""
-        response = client.get("/api/v1/health")
-        assert response.status_code == 200
-        data = response.json()
-        assert "db_latency_ms" in data
-        # Should be a number (float or None if DB is down)
-        if data["db_latency_ms"] is not None:
-            assert isinstance(data["db_latency_ms"], (int, float))
-            assert data["db_latency_ms"] >= 0
-
-    def test_detailed_health_has_backend_type(self, client):
-        """Detailed health shows database backend type."""
-        response = client.get("/api/v1/health/detailed")
-        assert response.status_code == 200
-        data = response.json()
-        db_check = data["checks"]["database"]
-        assert "backend" in db_check
-        assert db_check["backend"] in ("postgres", "sqlite")
-        assert "latency_ms" in db_check
-
 
 class TestDetailedHealth:
     """Tests for GET /api/v1/health/detailed."""

@@ -2,6 +2,7 @@
 FastAPI application entry point.
 Single-container deployment optimized for local, HF Spaces, Streamlit Cloud.
 """
+import asyncio
 import logging
 import threading
 from contextlib import asynccontextmanager
@@ -9,7 +10,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import ORJSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.exceptions import RequestValidationError
 
@@ -24,14 +25,12 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 from backend.core.logging import configure_logging, CorrelationIdMiddleware  # noqa: E402 -- logging must init first
 configure_logging()
 
-from backend.core.database import init_db, get_db_session  # noqa: E402 -- after logging init
-from backend.core.executor import job_executor  # noqa: E402 -- after logging init
-from backend.core.scheduler import job_scheduler  # noqa: E402 -- after logging init
+from backend.core.database import get_db_session  # noqa: E402 -- after logging init
+from backend.core import executor, upload_worker  # noqa: E402 -- after logging init
 from backend.core.azure_sync import (  # noqa: E402 -- after logging init
-    download_db_from_azure,
-    sync_db_to_azure,
     sync_logs_to_azure,
     is_azure_configured,
+    close_azure_client,
 )
 from backend.core.exceptions import (  # noqa: E402 -- after logging init
     AppException,
@@ -41,12 +40,13 @@ from backend.core.exceptions import (  # noqa: E402 -- after logging init
     app_exception_handler,
 )
 from backend.api.v1.router import api_router  # noqa: E402 -- after logging init
-from backend.models.database import Job, JobStatus  # noqa: E402 -- after logging init
+from backend.models.job import Job  # noqa: E402 -- after logging init
+from backend.models.enums import JobStatus  # noqa: E402 -- after logging init
 
 logger = logging.getLogger(__name__)
 
 
-def _wait_for_database(max_retries: int = 10, base_delay: float = 1.0, max_delay: float = 30.0):
+async def _wait_for_database(max_retries: int = 10, base_delay: float = 1.0, max_delay: float = 30.0):
     """Wait for database to become available with exponential backoff + jitter.
 
     Args:
@@ -54,14 +54,9 @@ def _wait_for_database(max_retries: int = 10, base_delay: float = 1.0, max_delay
         base_delay: Initial delay in seconds (default 1.0).
         max_delay: Maximum delay cap in seconds (default 30.0).
     """
-    import time
     import random
     from sqlalchemy import text as _text
-    from backend.core.database import engine, _is_postgres
-
-    # Skip retry logic for SQLite (always local, always available)
-    if not _is_postgres:
-        return
+    from backend.core.database import engine
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -80,12 +75,15 @@ def _wait_for_database(max_retries: int = 10, base_delay: float = 1.0, max_delay
                 f"Database connection failed (attempt {attempt}/{max_retries}), "
                 f"retrying in {delay:.1f}s: {e}"
             )
-            time.sleep(delay + jitter)
+            await asyncio.sleep(delay + jitter)
 
 
 # Global exception handler for uncaught thread exceptions
 def _handle_thread_exception(args):
-    """Handle uncaught exceptions in threads - logs to file for debugging."""
+    """Handle uncaught exceptions in threads - logs to file for debugging.
+
+    Still needed for run_in_executor threads (per D-74).
+    """
     logger.critical(
         f"UNCAUGHT EXCEPTION in thread '{args.thread.name}': {args.exc_type.__name__}: {args.exc_value}",
         exc_info=(args.exc_type, args.exc_value, args.exc_traceback)
@@ -99,9 +97,11 @@ threading.excepthook = _handle_thread_exception
 async def lifespan(app: FastAPI):  # pragma: no cover -- startup/shutdown lifecycle
     """
     Application lifespan handler.
-    - Startup: Download DB from Azure, initialize tables
-    - Shutdown: Sync DB to Azure, shutdown executor
+    - Startup: Wait for Postgres, run Alembic migrations, recover jobs, start upload worker
+    - Shutdown: Stop scheduler, cancel tasks, requeue PROCESSING, upload logs, close Azure
     """
+    from backend.core import scheduler  # Import here to avoid circular at module level
+
     # Startup
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
 
@@ -109,121 +109,151 @@ async def lifespan(app: FastAPI):  # pragma: no cover -- startup/shutdown lifecy
     settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
     settings.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Download database from Azure (single source of truth)
-    if is_azure_configured():
-        logger.info("Azure Blob configured, downloading database...")
-        download_db_from_azure()
-    else:
-        logger.info("Azure Blob not configured, using local database only")
+    # Wait for database connectivity (retries with backoff for Postgres) (D-73)
+    await _wait_for_database()
 
-    # Wait for database connectivity (retries with backoff for Postgres)
-    _wait_for_database()
+    # Run Alembic migrations (auto-upgrade to head on every startup)
+    # No-op if already at head (one quick SELECT on alembic_version).
+    # If migration fails, startup aborts -- container orchestrator restarts.
+    try:
+        from pathlib import Path as _Path
+        from alembic.config import Config as AlembicConfig
+        from alembic import command as alembic_command
 
-    # Initialize database tables
-    init_db()
-    logger.info("Database initialized")
+        _alembic_ini = str(_Path(__file__).parent / "alembic.ini")
+        _alembic_cfg = AlembicConfig(_alembic_ini)
+        # Override script_location to absolute path (ini uses relative "alembic"
+        # which resolves against cwd, not ini file location)
+        _alembic_cfg.set_main_option(
+            "script_location",
+            str(_Path(__file__).parent / "alembic"),
+        )
+        alembic_command.upgrade(_alembic_cfg, "head")
+        logger.info("Alembic migrations applied (upgrade head)")
+    except Exception as exc:
+        logger.error("Alembic migration failed: %s", exc, exc_info=True)
+        raise
 
     # Note: Legacy compound table sync removed - database is the source of truth
     # for all compound metadata. UUID-based storage paths are the only supported format.
 
+    # Replay recovery markers from previous DB-down crashes (D-10)
+    try:
+        from backend.services.compound_service import scan_recovery_markers
+        from sqlalchemy.exc import IntegrityError
+        recovery_markers = scan_recovery_markers()
+        if recovery_markers:
+            logger.info(f"Found {len(recovery_markers)} recovery markers to replay")
+            from backend.services.job_service import job_service
+            for marker in recovery_markers:
+                marker_entry_id = marker.get('entry_id')
+                marker_job_id = marker.get('job_id')
+                marker_path = settings.DATA_DIR / f".recovery-{marker_entry_id}.json"
+                try:
+                    with get_db_session() as db:
+                        job = job_service.get_job(db, marker_job_id)
+                        if not job:
+                            # D-22: Job not found -- orphaned marker
+                            logger.warning(f"Recovery marker for {marker_entry_id}: job {marker_job_id} not found, skipping")
+                        elif job.status in (JobStatus.CANCELLED, JobStatus.FAILED):
+                            # D-22: Terminal state -- skip replay, marker will be cleaned up
+                            logger.info(f"Recovery marker for {marker_entry_id}: job {marker_job_id} is {job.status.value}, skipping")
+                        elif job.status == JobStatus.COMPLETED:
+                            # D-23: Already completed -- guard against IntegrityError
+                            # (compound may already have been written via InChIKey uniqueness)
+                            try:
+                                job_service.complete_job(db, marker_job_id, marker.get('result_summary', {}))
+                                logger.info(f"Recovery marker replayed for already-completed entry_id={marker_entry_id}")
+                            except IntegrityError:
+                                db.rollback()
+                                logger.info(f"Recovery marker for {marker_entry_id}: already completed with compound entry, skipping")
+                        else:
+                            # Normal replay: complete the job
+                            job_service.complete_job(db, marker_job_id, marker.get('result_summary', {}))
+                            logger.info(f"Recovery marker replayed for entry_id={marker_entry_id}")
+                except Exception as e:
+                    logger.error(f"Recovery marker replay failed for {marker_entry_id}: {e}")
+                finally:
+                    # D-22: ALWAYS delete marker regardless of outcome
+                    # Prevents orphan accumulation and broken markers blocking startup
+                    if marker_path.exists():
+                        marker_path.unlink()
+    except Exception as e:
+        logger.warning(f"Recovery marker scan failed (non-fatal): {e}")
+
+    # PENDING_UPLOAD recovery on startup (per D-45)
+    try:
+        with get_db_session() as db:
+            from backend.services.job_service import job_service
+            pu_stats = job_service.recover_pending_uploads(db)
+            if any(pu_stats.values()):
+                logger.info(f"PENDING_UPLOAD recovery: {pu_stats}")
+    except Exception as e:
+        logger.warning(f"PENDING_UPLOAD recovery failed (non-fatal): {e}")
+
     # Recover stalled jobs using state machine (ARCH-12)
     with get_db_session() as db:
         from backend.services.job_service import job_service
-        recovery = job_service.recover_on_startup(db, job_scheduler.trigger)
+        recovery = job_service.recover_on_startup(db, scheduler.trigger)
         logger.info(f"Startup recovery: {recovery}")
 
     # Remove orphaned processing folders from crashed runs
-    from backend.services.compound_service import CompoundService
-    CompoundService.cleanup_stale_folders()
+    from backend.services.compound_service import cleanup_stale_folders
+    cleanup_stale_folders()
 
-    # Reconcile orphaned Azure uploads (STAB-18)
+    # Reconcile orphaned Azure uploads (time-based cleanup)
     if is_azure_configured():
         try:
             from backend.core.azure_sync import reconcile_orphaned_uploads
-            with get_db_session() as db:
-                from backend.models.database import Compound
-                db_entry_ids = {row[0] for row in db.query(Compound.entry_id).all() if row[0]}
-                cleaned = reconcile_orphaned_uploads(db_entry_ids)
-                if cleaned:
-                    logger.info(f"Reconciled {cleaned} orphaned Azure uploads")
+            cleaned = reconcile_orphaned_uploads()
+            if cleaned:
+                logger.info(f"Reconciled {cleaned} orphaned Azure uploads")
         except Exception as e:
             logger.warning(f"Orphan reconciliation failed (non-fatal): {e}")
 
-    # Remove orphaned processing folders from crashed runs
-    from backend.services.compound_service import CompoundService
-    CompoundService.cleanup_stale_folders()
+    # Start upload worker for PENDING_UPLOAD retry (D-75)
+    upload_worker.start()
 
-    # Reconcile orphaned Azure uploads (STAB-18)
-    if is_azure_configured():
-        try:
-            from backend.core.azure_sync import reconcile_orphaned_uploads
-            with get_db_session() as db:
-                from backend.models.database import Compound
-                db_entry_ids = {row[0] for row in db.query(Compound.entry_id).all() if row[0]}
-                cleaned = reconcile_orphaned_uploads(db_entry_ids)
-                if cleaned:
-                    logger.info(f"Reconciled {cleaned} orphaned Azure uploads")
-        except Exception as e:
-            logger.warning(f"Orphan reconciliation failed (non-fatal): {e}")
-
-    logger.info(f"Job executor ready (max_workers={settings.MAX_WORKERS})")
+    logger.info(f"Executor ready (max_concurrent_jobs={settings.MAX_CONCURRENT_JOBS})")
 
     yield
 
-    # Shutdown
+    # Shutdown (per D-54: 7-step sequence)
     logger.info("Shutting down...")
 
-    # Step 1: Requeue PROCESSING jobs to PENDING (STAB-03)
-    # Do this BEFORE shutting down executor so scheduler doesn't claim them again
+    # Step 1: Stop scheduler (set flag, cancel task if running)
+    await scheduler.stop()
+
+    # Steps 2-3: Cancel all active job tasks and gather with timeout
+    await executor.shutdown()
+
+    # Step 4: Requeue any still-PROCESSING jobs -> PENDING (safety net, per D-55)
     try:
-        from backend.services.job_service import _db_write_lock
         with get_db_session() as db:
-            processing_jobs = db.query(Job).filter(Job.status == JobStatus.PROCESSING).all()
+            from sqlalchemy import select
+            processing_jobs = db.scalars(select(Job).where(Job.status == JobStatus.PROCESSING)).all()
             if processing_jobs:
-                with _db_write_lock:
-                    for job in processing_jobs:
-                        db.refresh(job)
-                        if job.status == JobStatus.PROCESSING:
-                            job.status = JobStatus.PENDING
-                            job.started_at = None
-                            job.current_step = "Queued (requeued on shutdown)"
-                    db.commit()
+                for job in processing_jobs:
+                    db.refresh(job)
+                    if job.status == JobStatus.PROCESSING:
+                        job.status = JobStatus.PENDING
+                        job.started_at = None
+                        job.current_step = "Queued (requeued on shutdown)"
+                db.commit()
                 logger.info(f"Requeued {len(processing_jobs)} PROCESSING jobs to PENDING on shutdown")
     except Exception as e:
         logger.error(f"Failed to requeue jobs on shutdown: {e}")
 
-    # Step 2: Shutdown API client timeout executor (STAB-14)
-    try:
-        from backend.modules.api_client import shutdown_api_client
-        shutdown_api_client()
-    except Exception as e:
-        logger.warning(f"Error shutting down API client: {e}")
+    # Step 5: No shared httpx clients to close -- per-job clients are created and
+    # closed within process_compound_job (Plan 06 decision).
 
-    # Step 3: Shutdown job executor (wait for threads to finish)
-    logger.info("Waiting for running jobs to complete...")
-    job_executor.shutdown(wait=True, cancel_futures=False)
-
-    # Step 4: Reset module-level sessions (STAB-16)
-    try:
-        from backend.modules.pdb_client import shutdown_pdb_client
-        shutdown_pdb_client()
-    except Exception as e:
-        logger.warning(f"Error shutting down PDB client: {e}")
-    try:
-        from backend.modules.chemical_classifier import shutdown_classifier
-        shutdown_classifier()
-    except Exception as e:
-        logger.warning(f"Error shutting down classifier: {e}")
-
-    # Step 5: Final sync to Azure
+    # Step 6: Upload logs to Azure (sync fire-and-forget)
     if is_azure_configured():
-        logger.info("Final sync to Azure...")
-        sync_db_to_azure()
         logger.info("Uploading current logs to Azure...")
         sync_logs_to_azure()
 
-    # Step 6: Close Azure Blob client
-    from backend.core.azure_sync import close_azure_client
+    # Step 7: Stop upload worker and close Azure blob client
+    await upload_worker.stop()
     close_azure_client()
 
     logger.info("Shutdown complete")
@@ -234,6 +264,7 @@ app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     description="Impurities Modulator - Compound Analysis Backend",
+    default_response_class=ORJSONResponse,
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -257,7 +288,7 @@ async def limit_request_size(request: Request, call_next):
     except ValueError:
         content_length_int = 0
     if content_length_int > MAX_CONTENT_SIZE:
-        return JSONResponse(
+        return ORJSONResponse(
             status_code=413,
             content={
                 "detail": "Request body too large. Maximum size is 10MB.",
@@ -267,9 +298,9 @@ async def limit_request_size(request: Request, call_next):
     return await call_next(request)
 
 
-# Add CorrelationIdMiddleware BEFORE CORSMiddleware
-# Middleware executes in reverse registration order, so CorrelationIdMiddleware
-# runs first (registered before CORS) ensuring request_id is available during processing
+# Middleware registration order matters: Starlette executes middleware LIFO
+# (last-registered wraps outermost). Register CorrelationIdMiddleware first so it
+# runs INSIDE CORSMiddleware -- CORS handles preflight before request_id is needed.
 app.add_middleware(CorrelationIdMiddleware)
 
 # Add CORS middleware with explicit allowed methods and headers
@@ -280,7 +311,13 @@ app.add_middleware(
     allow_origin_regex=r"https://.*\.hf\.space",  # HF Spaces wildcard support
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],  # Only needed methods
-    allow_headers=["Content-Type", "X-Session-ID", "Accept"],  # Explicit headers
+    allow_headers=[  # D-46: include all custom headers used by the frontend
+        "Content-Type",
+        "X-Session-ID",
+        "Accept",
+        "Idempotency-Key",
+        "X-Admin-API-Key",
+    ],
     expose_headers=["X-Request-ID"],
 )
 
@@ -321,7 +358,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     elif isinstance(exc, TimeoutError):
         error_message = "The operation timed out. Please try again."
 
-    return JSONResponse(
+    return ORJSONResponse(
         status_code=500,
         content={
             "detail": error_message,

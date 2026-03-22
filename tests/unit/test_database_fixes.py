@@ -1,8 +1,7 @@
 """
-Unit tests for Task 1 database fixes.
+Unit tests for database fixes.
 
 Tests verify actual functionality:
-- 1.2: Thread-safe database operations (_db_write_lock)
 - 1.6: check_pending_compounds optimization
 - 1.7: Batch summary aggregation
 - 1.9: Status transition validation
@@ -10,7 +9,6 @@ Tests verify actual functionality:
 - 1.11: Compound lookup logic
 """
 import pytest
-import threading
 import sys
 from unittest.mock import patch, MagicMock
 
@@ -40,15 +38,17 @@ def mock_rdkit_modules():
 @pytest.fixture
 def db_engine():
     """Create an in-memory test database engine."""
-    from backend.core.database import Base
-    from backend.models.database import Job, Compound  # noqa: F401
+    from backend.models._pg_base import PGBase
+    from backend.models.job import Job  # noqa: F401
+    from backend.models.compound import Compound  # noqa: F401
+    from backend.models.deleted_compound import DeletedCompound  # noqa: F401
 
     engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    Base.metadata.create_all(bind=engine)
+    PGBase.metadata.create_all(bind=engine)
     yield engine
     engine.dispose()
 
@@ -74,7 +74,7 @@ class TestStatusTransitionValidation:
 
     def test_valid_pending_to_processing(self, job_service, db_session):
         """Test valid transition: PENDING -> PROCESSING."""
-        from backend.models.database import JobType, JobStatus
+        from backend.models.enums import JobType, JobStatus
 
         # Create a pending job
         job = job_service.create_job(
@@ -94,7 +94,7 @@ class TestStatusTransitionValidation:
 
     def test_invalid_pending_to_completed(self, job_service, db_session):
         """Test invalid transition: PENDING -> COMPLETED should be rejected."""
-        from backend.models.database import JobType, JobStatus
+        from backend.models.enums import JobType, JobStatus
 
         job = job_service.create_job(
             db_session,
@@ -116,7 +116,7 @@ class TestStatusTransitionValidation:
 
     def test_invalid_pending_to_failed(self, job_service, db_session):
         """Test invalid transition: PENDING -> FAILED should be rejected."""
-        from backend.models.database import JobType, JobStatus
+        from backend.models.enums import JobType, JobStatus
 
         job = job_service.create_job(
             db_session,
@@ -135,7 +135,7 @@ class TestStatusTransitionValidation:
 
     def test_valid_processing_to_completed(self, job_service, db_session):
         """Test valid transition: PROCESSING -> COMPLETED via complete_job."""
-        from backend.models.database import JobType, JobStatus
+        from backend.models.enums import JobType, JobStatus
 
         job = job_service.create_job(
             db_session,
@@ -149,18 +149,17 @@ class TestStatusTransitionValidation:
         )
 
         # Then complete
-        with patch('backend.services.job_service.sync_db_to_azure', create=True):
-            result = job_service.complete_job(
-                db_session, job.id, "/path/result.zip",
-                {"compound_name": "Test", "total_activities": 5}
-            )
+        result = job_service.complete_job(
+            db_session, job.id, "/path/result.zip",
+            {"compound_name": "Test", "total_activities": 5}
+        )
 
         assert result is not None
         assert result.status == JobStatus.COMPLETED
 
     def test_invalid_completed_to_processing(self, job_service, db_session):
         """Test invalid transition: COMPLETED -> PROCESSING should be rejected."""
-        from backend.models.database import JobType, JobStatus
+        from backend.models.enums import JobType, JobStatus
 
         job = job_service.create_job(
             db_session,
@@ -172,11 +171,10 @@ class TestStatusTransitionValidation:
         job_service.update_progress(
             db_session, job.id, 10.0, "Starting", JobStatus.PROCESSING
         )
-        with patch('backend.services.job_service.sync_db_to_azure', create=True):
-            job_service.complete_job(
-                db_session, job.id, "/path/result.zip",
-                {"compound_name": "Test"}
-            )
+        job_service.complete_job(
+            db_session, job.id, "/path/result.zip",
+            {"compound_name": "Test"}
+        )
 
         # Try to go back to PROCESSING
         result = job_service.update_progress(
@@ -187,7 +185,7 @@ class TestStatusTransitionValidation:
 
     def test_valid_pending_to_cancelled(self, job_service, db_session):
         """Test valid transition: PENDING -> CANCELLED."""
-        from backend.models.database import JobType, JobStatus
+        from backend.models.enums import JobType, JobStatus
 
         job = job_service.create_job(
             db_session,
@@ -202,7 +200,7 @@ class TestStatusTransitionValidation:
 
     def test_invalid_cancel_completed_job(self, job_service, db_session):
         """Test invalid: cannot cancel a completed job - status remains unchanged."""
-        from backend.models.database import JobType, JobStatus
+        from backend.models.enums import JobType, JobStatus
 
         job = job_service.create_job(
             db_session,
@@ -214,10 +212,9 @@ class TestStatusTransitionValidation:
         job_service.update_progress(
             db_session, job.id, 10.0, "Starting", JobStatus.PROCESSING
         )
-        with patch('backend.services.job_service.sync_db_to_azure', create=True):
-            job_service.complete_job(
-                db_session, job.id, "/path/result.zip", {}
-            )
+        job_service.complete_job(
+            db_session, job.id, "/path/result.zip", {}
+        )
 
         # Try to cancel - returns the job but doesn't modify it
         result = job_service.cancel_job(db_session, job.id)
@@ -232,7 +229,7 @@ class TestBatchSummaryAggregation:
 
     def test_batch_summary_returns_correct_counts(self, job_service, db_session):
         """Test that get_batch_summary returns correct status counts."""
-        from backend.models.database import JobType, JobStatus
+        from backend.models.enums import JobType, JobStatus
 
         batch_id = job_service.generate_batch_id()
 
@@ -258,11 +255,10 @@ class TestBatchSummaryAggregation:
         job_service.update_progress(
             db_session, job1.id, 50.0, "Processing", JobStatus.PROCESSING
         )
-        with patch('backend.services.job_service.sync_db_to_azure', create=True):
-            job_service.complete_job(
-                db_session, job3.id, "/path/result.zip",
-                {"compound_name": "Test3"}
-            )
+        job_service.complete_job(
+            db_session, job3.id, "/path/result.zip",
+            {"compound_name": "Test3"}
+        )
 
         summary = job_service.get_batch_summary(db_session, batch_id)
 
@@ -280,7 +276,7 @@ class TestBatchSummaryAggregation:
 
     def test_batch_summary_includes_compound_names(self, job_service, db_session):
         """Test batch summary includes compound names."""
-        from backend.models.database import JobType
+        from backend.models.enums import JobType
 
         batch_id = job_service.generate_batch_id()
 
@@ -302,7 +298,7 @@ class TestCheckPendingCompounds:
 
     def test_finds_pending_compounds(self, job_service, db_session):
         """Test that check_pending_compounds finds pending jobs."""
-        from backend.models.database import JobType
+        from backend.models.enums import JobType
 
         job = job_service.create_job(
             db_session, JobType.SINGLE,
@@ -319,7 +315,7 @@ class TestCheckPendingCompounds:
 
     def test_ignores_completed_compounds(self, job_service, db_session):
         """Test that check_pending_compounds ignores completed jobs."""
-        from backend.models.database import JobType, JobStatus
+        from backend.models.enums import JobType, JobStatus
 
         job = job_service.create_job(
             db_session, JobType.SINGLE,
@@ -330,10 +326,9 @@ class TestCheckPendingCompounds:
         job_service.update_progress(
             db_session, job.id, 10.0, "Starting", JobStatus.PROCESSING
         )
-        with patch('backend.services.job_service.sync_db_to_azure', create=True):
-            job_service.complete_job(
-                db_session, job.id, "/path/result.zip", {}
-            )
+        job_service.complete_job(
+            db_session, job.id, "/path/result.zip", {}
+        )
 
         result = job_service.check_pending_compounds(
             db_session, ["CompletedCompound"]
@@ -349,7 +344,7 @@ class TestCheckPendingCompounds:
 
     def test_handles_special_characters(self, job_service, db_session):
         """Test check_pending_compounds handles special SQL characters."""
-        from backend.models.database import JobType
+        from backend.models.enums import JobType
 
         special_name = "Test%Compound_Name"
         job = job_service.create_job(
@@ -366,7 +361,7 @@ class TestCheckPendingCompounds:
 
     def test_pending_lookup_is_case_insensitive(self, job_service, db_session):
         """Pending lookup should match even if submitted casing differs."""
-        from backend.models.database import JobType
+        from backend.models.enums import JobType
 
         job = job_service.create_job(
             db_session, JobType.SINGLE,
@@ -386,7 +381,7 @@ class TestCheckExistingCompounds:
 
     def test_existing_lookup_is_case_insensitive(self, job_service, db_session):
         """Existing lookup should match even if submitted casing differs."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
 
         db_session.add(Compound(entry_id="entry-quercetin", compound_name="Quercetin"))
         db_session.commit()
@@ -404,7 +399,7 @@ class TestPaginationStability:
 
     def test_pagination_no_duplicates(self, job_service, db_session):
         """Test that paginated results have no duplicates across pages."""
-        from backend.models.database import JobType
+        from backend.models.enums import JobType
 
         # Create 15 jobs
         created_ids = []
@@ -433,7 +428,7 @@ class TestPaginationStability:
 
     def test_pagination_deterministic_order(self, job_service, db_session):
         """Test that pagination returns same order on repeated calls."""
-        from backend.models.database import JobType
+        from backend.models.enums import JobType
 
         for i in range(10):
             job_service.create_job(
@@ -451,76 +446,13 @@ class TestPaginationStability:
         assert ids_first == ids_second
 
 
-class TestDbWriteLock:
-    """Tests for issue 1.2: Thread-safe database writes with _db_write_lock."""
-
-    def test_lock_exists_and_is_lock_type(self, mock_rdkit_modules):
-        """Test that _db_write_lock exists and is a Lock."""
-        from backend.services.job_service import _db_write_lock
-
-        assert _db_write_lock is not None
-        assert hasattr(_db_write_lock, 'acquire')
-        assert hasattr(_db_write_lock, 'release')
-
-    def test_concurrent_progress_updates_serialized(self, job_service, db_engine):
-        """Test that concurrent updates are serialized by the lock."""
-        from backend.models.database import JobType, JobStatus
-
-        Session = sessionmaker(bind=db_engine)
-
-        # Create a job
-        session = Session()
-        job = job_service.create_job(
-            session, JobType.SINGLE,
-            {"compound_name": "ConcurrentTest", "smiles": "CCO"}
-        )
-        job_id = job.id
-
-        # Transition to PROCESSING
-        job_service.update_progress(
-            session, job_id, 5.0, "Starting", JobStatus.PROCESSING
-        )
-        session.close()
-
-        errors = []
-        progress_values = []
-        lock = threading.Lock()
-
-        def update_worker(progress):
-            try:
-                sess = Session()
-                job_service.update_progress(
-                    sess, job_id, progress, f"Step {progress}"
-                )
-                with lock:
-                    progress_values.append(progress)
-                sess.close()
-            except Exception as e:
-                with lock:
-                    errors.append(str(e))
-
-        # Run concurrent updates
-        threads = [
-            threading.Thread(target=update_worker, args=(i * 10,))
-            for i in range(1, 6)
-        ]
-
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        # All updates should complete without errors
-        assert len(errors) == 0, f"Errors: {errors}"
-        assert len(progress_values) == 5
-
 
 class TestValidTransitionsConstant:
     """Tests for VALID_TRANSITIONS constant structure."""
 
     def test_all_statuses_have_transitions(self, mock_rdkit_modules):
         """Test that every JobStatus is in VALID_TRANSITIONS."""
-        from backend.models.database import JobStatus
+        from backend.models.enums import JobStatus
         from backend.services.job_service import VALID_TRANSITIONS
 
         for status in JobStatus:
@@ -528,7 +460,7 @@ class TestValidTransitionsConstant:
 
     def test_terminal_states_have_no_transitions(self, mock_rdkit_modules):
         """Test that terminal states cannot transition."""
-        from backend.models.database import JobStatus
+        from backend.models.enums import JobStatus
         from backend.services.job_service import VALID_TRANSITIONS
 
         assert VALID_TRANSITIONS[JobStatus.COMPLETED] == set()
@@ -537,7 +469,7 @@ class TestValidTransitionsConstant:
 
     def test_pending_can_only_process_or_cancel(self, mock_rdkit_modules):
         """Test PENDING state valid transitions."""
-        from backend.models.database import JobStatus
+        from backend.models.enums import JobStatus
         from backend.services.job_service import VALID_TRANSITIONS
 
         allowed = VALID_TRANSITIONS[JobStatus.PENDING]
@@ -545,7 +477,7 @@ class TestValidTransitionsConstant:
 
     def test_processing_transitions(self, mock_rdkit_modules):
         """Test PROCESSING state valid transitions."""
-        from backend.models.database import JobStatus
+        from backend.models.enums import JobStatus
         from backend.services.job_service import VALID_TRANSITIONS
 
         allowed = VALID_TRANSITIONS[JobStatus.PROCESSING]
@@ -555,44 +487,3 @@ class TestValidTransitionsConstant:
         assert JobStatus.PENDING not in allowed
 
 
-class TestNullPoolConfiguration:
-    """Tests for issue 1.1: NullPool usage."""
-
-    def test_engine_configured_with_nullpool(self):
-        """Test that the production database configuration uses NullPool.
-
-        Note: Tests may modify the engine instance for in-memory testing,
-        so we verify the intended configuration by checking the source code
-        configuration rather than the potentially-modified runtime engine.
-        """
-        from sqlalchemy.pool import NullPool
-
-        # Verify the module imports NullPool
-        from backend.core import database as db_module
-        assert hasattr(db_module, 'NullPool') or 'NullPool' in dir(db_module) or \
-               NullPool is not None  # NullPool is imported in database.py
-
-        # Check if engine is using NullPool (may be overridden in tests)
-        engine = db_module.engine
-        pool_type = type(engine.pool).__name__
-
-        # In test environments, the engine may be swapped to StaticPool
-        # for in-memory testing. We accept both as valid for this test.
-        assert pool_type in ("NullPool", "StaticPool"), \
-            f"Expected NullPool or StaticPool (test override), got {pool_type}"
-
-    def test_production_config_specifies_pool_classes(self):
-        """Test that the database module source specifies QueuePool and NullPool."""
-        import inspect
-        from backend.core import database as db_module
-
-        # Get source code of the module
-        source = inspect.getsource(db_module)
-
-        # Verify both pool classes are imported (QueuePool for Postgres, NullPool for SQLite)
-        assert "from sqlalchemy.pool import QueuePool, NullPool" in source, \
-            "QueuePool and NullPool should be imported from sqlalchemy.pool"
-        assert "poolclass=QueuePool" in source, \
-            "Postgres engine should be configured with poolclass=QueuePool"
-        assert "poolclass=NullPool" in source, \
-            "SQLite engine should be configured with poolclass=NullPool"

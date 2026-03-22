@@ -4,8 +4,7 @@ Simplified for single-container deployment (local, HF Spaces, Streamlit Cloud, e
 """
 from pathlib import Path
 from functools import lru_cache
-from typing import List
-from pydantic import field_validator
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,7 +14,7 @@ class Settings(BaseSettings):
     # Application
     
     APP_NAME: str = "Impulator"
-    APP_VERSION: str = "2.1.3"  # Updated version after fixes
+    APP_VERSION: str = "2.2.0-dev"
     DEBUG: bool = False
 
     # Logging
@@ -29,25 +28,23 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = ""  # Must be set via env var (postgresql://...)
-    DB_POOL_TIMEOUT: int = 30  # Connection timeout in seconds
+    DB_POOL_SIZE: int = 5  # Connection pool size
+    DB_MAX_OVERFLOW: int = 5  # Max overflow connections beyond pool_size
+    DB_POOL_TIMEOUT: int = 10  # Connection pool checkout timeout in seconds
     DB_ECHO: bool = False  # SQL logging (disabled in production)
-
-    # Supabase (for future auth provider integration)
-    SUPABASE_URL: str = ""  # https://<project-ref>.supabase.co
-    SUPABASE_SECRET_KEY: str = ""  # Secret key for backend use (Dashboard > API Keys > Secret keys)
+    DIRECT_DATABASE_URL: str = ""  # Direct Supabase connection (port 5432) for DDL/migrations. Falls back to DATABASE_URL if empty.
 
     # Testing mode (CI compatibility -- allows SQLite)
     TESTING: bool = False
 
-    # Executor (ThreadPoolExecutor for background jobs)
-    MAX_WORKERS: int = 2  # Concurrent job limit
+    # Executor (async job processing)
+    MAX_CONCURRENT_JOBS: int = 10  # Max concurrent async jobs (asyncio.Semaphore)
     JOB_TIMEOUT: int = 3600  # 1 hour max per job
+    SHUTDOWN_TIMEOUT: int = 25  # Seconds to wait for in-flight jobs (HF Spaces has 30s grace)
 
     # Security
     REQUIRE_SESSION_VALIDATION: bool = True  # Validate session IDs
-    SESSION_TOKEN_EXPIRY: int = 86400  # 24 hours
-    MAX_CONCURRENT_SESSIONS: int = 10000  # Rate limiter max sessions
-    ADMIN_API_KEY: str = ""  # Required for admin endpoints (migrate, etc.)
+    ADMIN_API_KEY: SecretStr = SecretStr("")  # Required for admin endpoints (migrate, etc.)
 
     # Rate limiting
     RATE_LIMIT_ENABLED: bool = True
@@ -63,10 +60,11 @@ class Settings(BaseSettings):
     # External APIs
     CHEMBL_API_URL: str = "https://www.ebi.ac.uk/chembl/api/data"
     PDB_API_URL: str = "https://search.rcsb.org/rcsbsearch/v2/query"
-    CHEMBL_RATE_LIMIT: float = 10.0  # Requests per second
-    PDB_RATE_LIMIT: float = 5.0  # Requests per second
     API_TIMEOUT: int = 60  # Timeout for external API calls
-    API_RETRY_COUNT: int = 3  # Retry count for failed requests
+
+    # httpx connection limits (Phase 19.1)
+    CHEMBL_MAX_CONNECTIONS: int = 30   # httpx.Limits max_connections -- global TCP cap to ChEMBL (D-26)
+    CHEMBL_MAX_PER_JOB: int = 10      # asyncio.Semaphore per compound job -- limits concurrent ChEMBL requests (D-25/D-27)
 
     # Storage
     DATA_DIR: Path = Path("./data")
@@ -77,8 +75,9 @@ class Settings(BaseSettings):
     AZURE_CONTAINER: str = "impulator"
 
     # CORS (comma-separated string in .env, parsed to list)
-    # Includes HF Spaces domain pattern and local development
-    CORS_ORIGINS: str = "http://localhost:7860,http://localhost:8501,https://*.hf.space"
+    # HF Spaces origins are handled by allow_origin_regex in CORS middleware,
+    # not this list (Starlette does exact matching on allow_origins)
+    CORS_ORIGINS: str = "http://localhost:7860,http://localhost:8501"
 
     @property
     def is_production(self) -> bool:
@@ -86,7 +85,7 @@ class Settings(BaseSettings):
         return not self.DEBUG
 
     @property
-    def cors_origins_list(self) -> List[str]:
+    def cors_origins_list(self) -> list[str]:
         """Parse CORS_ORIGINS string into list."""
         if not self.CORS_ORIGINS:
             return []
@@ -105,6 +104,7 @@ class Settings(BaseSettings):
         # so also check the environment variable directly
         import os
         testing = os.environ.get("TESTING", "").lower() in ("true", "1", "yes")
+        # TEMPORARY: SQLite test fallback removed in Phase 20 (TST-01)
         if testing:
             return v if v else "sqlite:///:memory:"
 
@@ -126,7 +126,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=True,
-        extra="ignore",
+        extra="ignore",  # Ignore unknown env vars (e.g. SUPABASE_URL still in .env)
     )
 
 
