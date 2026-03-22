@@ -13,7 +13,7 @@ from typing import Optional, List, Dict, Any
 
 import streamlit as st
 
-from frontend.services import get_api_client
+from frontend.services import get_api_client, get_compounds_cached
 from frontend.utils import SessionState
 from frontend.ui.components import render_compound_grid, render_compound_list
 
@@ -78,7 +78,7 @@ def render_search_section() -> None:
             "Search compounds",
             value=SessionState.get('compound_search_query', ''),
             placeholder="Search by name...",
-            label_visibility="collapsed"
+            label_visibility="hidden"
         )
         SessionState.set('compound_search_query', search_query)
 
@@ -90,7 +90,7 @@ def render_search_section() -> None:
             "Sort",
             sort_options,
             index=sort_index,
-            label_visibility="collapsed"
+            label_visibility="hidden"
         )
         SessionState.set('compound_sort', sort_mode)
 
@@ -99,7 +99,7 @@ def render_search_section() -> None:
             "View",
             ["Grid", "List"],
             index=0,
-            label_visibility="collapsed"
+            label_visibility="hidden"
         )
         SessionState.set('compound_view_mode', view_mode)
 
@@ -157,21 +157,18 @@ def render_compound_browser() -> None:
 
     # Handle navigation (only when not in select mode)
     if clicked and not select_mode:
-        # Resolve parent compound name for duplicates
-        duplicate_of_name = None
-        dup_entry_id = clicked.get('duplicate_of')
-        if clicked.get('is_duplicate') and dup_entry_id:
-            parent = next((c for c in compounds if c.get('entry_id') == dup_entry_id), None)
-            if parent:
-                duplicate_of_name = parent.get('compound_name')
-
         SessionState.navigate_to_compound(
             clicked.get('compound_name'),
             entry_id=clicked.get('entry_id'),
             storage_path=clicked.get('storage_path'),
             is_duplicate=clicked.get('is_duplicate', False),
-            duplicate_of_name=duplicate_of_name
+            duplicate_of_name=clicked.get('parent_name'),
         )
+        # Deep linking: update URL on compound selection (D-05, D-06, D-08)
+        entry_id = clicked.get('entry_id')
+        if entry_id:
+            st.query_params["compound_id"] = entry_id
+            st.query_params["tab"] = "overview"
         st.rerun()
 
 
@@ -204,10 +201,10 @@ def _render_selection_action_bar(compounds: List[Dict[str, Any]]) -> None:
 
         confirm_col1, confirm_col2, _ = st.columns([1, 1, 3])
         with confirm_col1:
-            if st.button("Confirm Delete", type="primary", use_container_width=True):
+            if st.button("Confirm Delete", type="primary", width='stretch'):
                 _execute_batch_delete(snapshot_ids)
         with confirm_col2:
-            if st.button("Cancel Delete", use_container_width=True):
+            if st.button("Cancel Delete", width='stretch'):
                 SessionState.set('confirm_batch_delete', False)
                 SessionState.set('batch_delete_ids', [])
                 SessionState.set('batch_delete_names', [])
@@ -217,20 +214,20 @@ def _render_selection_action_bar(compounds: List[Dict[str, Any]]) -> None:
         act_col1, act_col2, act_col3, act_col4 = st.columns([1, 1, 1, 2])
 
         with act_col1:
-            if st.button("Select All", use_container_width=True):
+            if st.button("Select All", width='stretch'):
                 for eid in all_entry_ids:
                     st.session_state[f"select_{eid}"] = True
                 st.rerun()
 
         with act_col2:
-            if st.button("Deselect All", use_container_width=True):
+            if st.button("Deselect All", width='stretch'):
                 for eid in all_entry_ids:
                     st.session_state[f"select_{eid}"] = False
                 st.rerun()
 
         with act_col3:
             delete_label = f"Delete Selected ({selected_count})"
-            if st.button(delete_label, type="primary", disabled=(selected_count == 0), use_container_width=True):
+            if st.button(delete_label, type="primary", disabled=(selected_count == 0), width='stretch'):
                 # Snapshot selected IDs and names before rerun
                 # (checkbox widget state doesn't survive st.rerun reliably)
                 selected_names = []
@@ -264,11 +261,15 @@ def _execute_batch_delete(entry_ids: List[str]) -> None:
     if result.success:
         total_deleted = result.data.get('total_deleted', len(entry_ids)) if result.data else len(entry_ids)
         st.success(f"Successfully deleted {total_deleted} compound(s)")
+        # Show partial failure warning if some deletions failed
+        if result.error:
+            st.warning(result.error)
         _exit_select_mode()
         st.rerun()
     else:
         st.error(f"Failed to delete compounds: {result.error}")
         SessionState.set('confirm_batch_delete', False)
+        st.rerun()
 
 
 def _exit_select_mode() -> None:
@@ -293,10 +294,9 @@ def _fetch_compounds() -> Optional[List[Dict[str, Any]]]:
         List of compound dictionaries, or None on error
     """
     try:
-        # Fetch from database (authoritative source)
+        # Fetch from database (authoritative source) with st.cache_data TTL=60s
         # Include duplicates and tag them in the UI
-        api_client = get_api_client()
-        response = api_client.get_compounds_from_db(per_page=100, include_duplicates=True)
+        response = get_compounds_cached(per_page=100, include_duplicates=True)
 
         if response.success and response.compounds:
             compounds = []
@@ -316,7 +316,8 @@ def _fetch_compounds() -> Optional[List[Dict[str, Any]]]:
                     "qed": compound.get("qed", 0.0) or 0.0,
                     "imp_score": compound.get("imp_score"),
                     "is_duplicate": compound.get("is_duplicate", False),
-                    "duplicate_of": compound.get("duplicate_of"),
+                    "parent_id": compound.get("parent_id"),
+                    "parent_name": compound.get("parent_name"),
                 })
             return compounds
 

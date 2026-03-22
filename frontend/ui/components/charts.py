@@ -38,6 +38,18 @@ def get_plotly_theme() -> dict:
     }
 
 
+def apply_impulator_theme(fig: go.Figure) -> go.Figure:
+    """Apply standard IMPULATOR theme to a Plotly figure.
+
+    Ensures consistent hover behavior and styling across all charts.
+    Call this on every figure before rendering with st.plotly_chart.
+    """
+    fig.update_layout(
+        hoverlabel=dict(namelength=-1),
+    )
+    return fig
+
+
 def _apply_subtitle(fig: go.Figure, subtitle: str) -> None:
     """Apply a subtitle to a Plotly figure (Plotly v6+).
 
@@ -124,7 +136,7 @@ def create_scatter_plot(
     if subtitle:
         _apply_subtitle(fig, subtitle)
 
-    return fig
+    return apply_impulator_theme(fig)
 
 
 def create_histogram(
@@ -166,7 +178,7 @@ def create_histogram(
     if subtitle:
         _apply_subtitle(fig, subtitle)
 
-    return fig
+    return apply_impulator_theme(fig)
 
 
 def create_box_plot(
@@ -203,7 +215,7 @@ def create_box_plot(
     if subtitle:
         _apply_subtitle(fig, subtitle)
 
-    return fig
+    return apply_impulator_theme(fig)
 
 
 def create_violin_plot(
@@ -241,7 +253,7 @@ def create_violin_plot(
     if subtitle:
         _apply_subtitle(fig, subtitle)
 
-    return fig
+    return apply_impulator_theme(fig)
 
 
 def create_bar_chart(
@@ -281,7 +293,7 @@ def create_bar_chart(
     if subtitle:
         _apply_subtitle(fig, subtitle)
 
-    return fig
+    return apply_impulator_theme(fig)
 
 
 def create_3d_scatter(
@@ -353,7 +365,7 @@ def create_3d_scatter(
     if subtitle:
         _apply_subtitle(fig, subtitle)
 
-    return fig
+    return apply_impulator_theme(fig)
 
 
 def create_correlation_heatmap(
@@ -398,7 +410,7 @@ def create_correlation_heatmap(
     if subtitle:
         _apply_subtitle(fig, subtitle)
 
-    return fig
+    return apply_impulator_theme(fig)
 
 
 def create_pair_plot(
@@ -434,7 +446,7 @@ def create_pair_plot(
 
     fig.update_traces(diagonal_visible=False)
 
-    return fig
+    return apply_impulator_theme(fig)
 
 
 def render_chart_with_viewer(

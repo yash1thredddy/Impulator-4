@@ -13,7 +13,6 @@ Classification criteria:
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List
 import logging
 
 logger = logging.getLogger(__name__)
@@ -254,7 +253,7 @@ def rank_imp_candidates(
     return df
 
 
-def compare_imp_vs_non_imp(df: pd.DataFrame, metrics: List[str] = None) -> pd.DataFrame:
+def compare_imp_vs_non_imp(df: pd.DataFrame, metrics: list[str] = None) -> pd.DataFrame:
     """
     Compare efficiency metrics between IMP and Non-IMP groups.
 

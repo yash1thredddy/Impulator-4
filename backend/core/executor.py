@@ -1,195 +1,140 @@
-"""
-ThreadPoolExecutor wrapper for background job execution.
-Manages concurrent job processing with configurable worker limit.
+"""Async task executor for background job processing.
 
-Thread Budget (STAB-20):
-========================
-Job workers:      2  (settings.MAX_WORKERS -- compound processing)
-ChEMBL timeout:   6  (_timeout_executor in api_client.py)
-PDB parallel:     6  (MAX_PDB_WORKERS=3 per job x 2 concurrent jobs)
-Scheduler:        1  (daemon thread in scheduler.py)
------------------------------------------------
-Total max:       15  threads (14 worker + 1 scheduler)
+Manages concurrent job processing via asyncio.Task dict with
+Semaphore-based admission control. Replaces ThreadPoolExecutor.
 
-Bound by: MAX_WORKERS (job), api_client._timeout_executor (ChEMBL),
-          pdb_client.MAX_PDB_WORKERS (PDB), scheduler daemon thread.
+Thread budget: ~2 (only run_in_executor default pool for CPU work).
+
+Note: job_id is uuid.UUID throughout (Postgres migration v2.2). Dict keys
+use str(job_id) for serialization safety.
 """
-import contextvars
-import logging
-import threading
-from concurrent.futures import ThreadPoolExecutor, Future
-from typing import Callable, Dict, Optional
+import asyncio
+from typing import Any, Awaitable, Callable
+
+import structlog
 
 from backend.config import settings
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
+
+_tasks: dict[str, asyncio.Task] = {}
+_semaphore: asyncio.Semaphore | None = None
 
 
-class JobExecutor:
+def _get_semaphore() -> asyncio.Semaphore:
+    """Lazy-init semaphore (must create after event loop starts)."""
+    global _semaphore
+    if _semaphore is None:
+        _semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_JOBS)
+    return _semaphore
+
+
+async def submit(job_id, coro_func: Callable[..., Awaitable], **kwargs) -> Any:
+    """Submit async job for background execution (per D-04).
+
+    Creates an asyncio.Task wrapping the coroutine. Semaphore limits
+    concurrency to MAX_CONCURRENT_JOBS.
+
+    Args:
+        job_id: UUID job identifier
+        coro_func: Async function (must accept job_id as first arg)
+        **kwargs: Keyword arguments for coro_func
+    Returns:
+        job_id
     """
-    Manages background job execution using ThreadPoolExecutor.
-
-    Features:
-    - Configurable max workers (default: 2)
-    - Job tracking by ID (thread-safe)
-    - Graceful cancellation support
-    - Active job count monitoring
-
-    Thread Safety:
-    - All access to _futures is protected by _lock
-    - Done callbacks run in worker threads but use lock
-    """
-
-    def __init__(self, max_workers: int = None):
-        """
-        Initialize executor with worker pool.
-
-        Args:
-            max_workers: Maximum concurrent jobs. Defaults to settings.MAX_WORKERS
-        """
-        self._max_workers = max_workers or settings.MAX_WORKERS
-        self._executor = ThreadPoolExecutor(
-            max_workers=self._max_workers,
-            thread_name_prefix="job_worker"
-        )
-        self._futures: Dict[str, Future] = {}
-        self._lock = threading.Lock()  # Protects _futures access
-        logger.info(f"JobExecutor initialized with {self._max_workers} workers")
-
-    def submit(
-        self,
-        job_id: str,
-        func: Callable,
-        *args,
-        **kwargs
-    ) -> str:
-        """
-        Submit a job for background execution.
-
-        Args:
-            job_id: Unique job identifier
-            func: Function to execute (should accept job_id as first arg)
-            *args: Additional positional arguments for func
-            **kwargs: Keyword arguments for func
-
-        Returns:
-            The job_id for tracking
-        """
-        with self._lock:
-            if job_id in self._futures:
-                logger.warning(f"Job {job_id} already exists, skipping")
-                return job_id
-
-            # Capture current context (includes request_id, session_id from middleware)
-            ctx = contextvars.copy_context()
-            # Submit with context propagation -- worker thread inherits caller's contextvars
-            future = self._executor.submit(ctx.run, func, job_id, *args, **kwargs)
-            self._futures[job_id] = future
-
-        # Auto-cleanup on completion (callback runs in worker thread)
-        def cleanup(f: Future):
-            """Remove completed job from tracking dict and log any exceptions."""
-            with self._lock:
-                self._futures.pop(job_id, None)
-            if f.exception():
-                logger.error(f"Job {job_id} raised exception: {f.exception()}")
-            else:
-                # Note: Job may have failed internally but handled its own exception
-                # The actual job status is in the database, not the Future state
-                logger.info(f"Job {job_id} finished execution")
-
-        future.add_done_callback(cleanup)
-        logger.info(f"Job {job_id} submitted to executor")
+    key = str(job_id)
+    if key in _tasks:
+        logger.warning("job_already_tracked", job_id=key)
         return job_id
-
-    def get_active_count(self) -> int:
-        """Get number of currently running/pending jobs (thread-safe)."""
-        with self._lock:
-            return len(self._futures)
-
-    def get_active_job_ids(self) -> list:
-        """Get list of active job IDs (thread-safe snapshot)."""
-        with self._lock:
-            return list(self._futures.keys())
-
-    def is_active(self, job_id: str) -> bool:
-        """Check if a specific job is still running (thread-safe)."""
-        with self._lock:
-            future = self._futures.get(job_id)
-            return future is not None and not future.done()
-
-    def cancel(self, job_id: str) -> bool:
-        """
-        Attempt to cancel a job (thread-safe).
-
-        Args:
-            job_id: Job to cancel
-
-        Returns:
-            True if cancelled, False if already running/completed
-        """
-        with self._lock:
-            future = self._futures.get(job_id)
-            if future is None:
-                logger.warning(f"Job {job_id} not found")
-                return False
-
-            if future.done():
-                logger.info(f"Job {job_id} already completed")
-                return False
-
-            cancelled = future.cancel()
-            if cancelled:
-                self._futures.pop(job_id, None)
-                logger.info(f"Job {job_id} cancelled")
-            else:
-                logger.warning(f"Job {job_id} could not be cancelled (already running)")
-
-            return cancelled
-
-    def has_capacity(self) -> bool:
-        """Check if executor can accept more jobs (thread-safe).
-
-        Only allows max_workers jobs at a time.
-        SQLite is our queue now - don't queue in executor's internal queue.
-        """
-        with self._lock:
-            return len(self._futures) < self._max_workers
-
-    def get_queue_position(self, job_id: str) -> Optional[int]:
-        """
-        Get queue position for a job (0 = running, >0 = waiting).
-        Returns None if job not found (thread-safe snapshot).
-        """
-        with self._lock:
-            if job_id not in self._futures:
-                return None
-            job_ids = list(self._futures.keys())
-            return job_ids.index(job_id)
-
-    def shutdown(self, wait: bool = True, cancel_futures: bool = False):
-        """
-        Shutdown the executor gracefully.
-
-        Args:
-            wait: Wait for pending jobs to complete
-            cancel_futures: Cancel pending (not running) jobs
-        """
-        logger.info(f"Shutting down executor (wait={wait}, cancel={cancel_futures})")
-        self._executor.shutdown(wait=wait, cancel_futures=cancel_futures)
-        with self._lock:
-            self._futures.clear()
-
-    def stats(self) -> dict:
-        """Get executor statistics (thread-safe snapshot)."""
-        with self._lock:
-            return {
-                "max_workers": self._max_workers,
-                "active_jobs": len(self._futures),
-                "has_capacity": len(self._futures) < self._max_workers,
-                "job_ids": list(self._futures.keys()),
-            }
+    task = asyncio.create_task(
+        _run_with_semaphore(key, coro_func, job_id, **kwargs),
+        name=f"job-{key[:8]}",
+    )
+    _tasks[key] = task
+    logger.info("job_submitted", job_id=key)
+    return job_id
 
 
-# Global executor instance
-job_executor = JobExecutor()
+async def _run_with_semaphore(key: str, coro_func, job_id, **kwargs):
+    """Run job coroutine with semaphore admission control."""
+    try:
+        async with _get_semaphore():
+            await coro_func(job_id, **kwargs)
+    except asyncio.CancelledError:
+        logger.info("job_task_cancelled", job_id=key)
+    except Exception:
+        logger.exception("job_task_error", job_id=key)
+    finally:
+        _tasks.pop(key, None)
+
+
+def cancel(job_id: str) -> bool:
+    """Cancel a running job task (per D-05). Returns True if cancel signal sent."""
+    key = str(job_id)
+    task = _tasks.get(key)
+    if task is None or task.done():
+        return False
+    task.cancel()
+    return True
+
+
+def has_capacity() -> bool:
+    """Check if executor can accept more jobs."""
+    return len(_tasks) < settings.MAX_CONCURRENT_JOBS
+
+
+def get_active_count() -> int:
+    """Get number of active job tasks."""
+    return len(_tasks)
+
+
+def get_active_job_ids() -> list[str]:
+    """Get list of active job ID strings."""
+    return list(_tasks.keys())
+
+
+def is_active(job_id: str) -> bool:
+    """Check if a specific job task is still running."""
+    task = _tasks.get(str(job_id))
+    return task is not None and not task.done()
+
+
+def stats() -> dict:
+    """Get executor statistics (per D-61)."""
+    return {
+        "max_concurrent_jobs": settings.MAX_CONCURRENT_JOBS,
+        "active_jobs": len(_tasks),
+        "slots_available": max(0, settings.MAX_CONCURRENT_JOBS - len(_tasks)),
+        "has_capacity": len(_tasks) < settings.MAX_CONCURRENT_JOBS,
+        "jobs": [
+            {"job_id": k, "state": "running" if not t.done() else "done"}
+            for k, t in _tasks.items()
+        ],
+    }
+
+
+async def shutdown(timeout: float | None = None):
+    """Graceful shutdown: cancel all tasks, gather with timeout (per D-06)."""
+    t = timeout if timeout is not None else settings.SHUTDOWN_TIMEOUT
+    if not _tasks:
+        return
+    logger.info("executor_shutdown_start", active=len(_tasks), timeout=t)
+    tasks = list(_tasks.values())
+    for task in tasks:
+        task.cancel()
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=t,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("executor_shutdown_timeout", remaining=len(_tasks))
+    _tasks.clear()
+    logger.info("executor_shutdown_complete")
+
+
+def _reset():
+    """Reset module state for testing."""
+    global _semaphore
+    _tasks.clear()
+    _semaphore = None

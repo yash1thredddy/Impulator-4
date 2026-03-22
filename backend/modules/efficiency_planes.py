@@ -18,7 +18,6 @@ For each plane, we calculate:
 
 import numpy as np
 import pandas as pd
-from typing import Dict, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
@@ -80,7 +79,7 @@ def calculate_sei_bei_plane_metrics(
     bei: float,
     psa: float,
     molecular_weight: float
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Calculate all geometric metrics for the SEI-BEI efficiency plane.
 
@@ -98,7 +97,7 @@ def calculate_sei_bei_plane_metrics(
         molecular_weight: Molecular weight (Da)
 
     Returns:
-        Dict[str, float]: Dictionary with Modulus_SEI_BEI, Angle_SEI_BEI, Slope_SEI_BEI
+        dict[str, float]: Dictionary with Modulus_SEI_BEI, Angle_SEI_BEI, Slope_SEI_BEI
     """
     try:
         modulus = calculate_modulus(sei, bei)
@@ -130,7 +129,7 @@ def calculate_nsei_nbei_plane_metrics(
     nbei: float,
     npol: float,
     heavy_atoms: float
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Calculate all geometric metrics for the NSEI-NBEI efficiency plane.
 
@@ -149,7 +148,7 @@ def calculate_nsei_nbei_plane_metrics(
         heavy_atoms: Number of heavy atoms (NHA)
 
     Returns:
-        Dict[str, float]: Dictionary with Modulus_NSEI_NBEI, Angle_NSEI_NBEI,
+        dict[str, float]: Dictionary with Modulus_NSEI_NBEI, Angle_NSEI_NBEI,
                          Slope_NSEI_NBEI, Intercept_NSEI_NBEI
     """
     try:
@@ -194,7 +193,7 @@ def calculate_all_plane_metrics(
     molecular_weight: float,
     npol: float,
     heavy_atoms: float
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Calculate geometric metrics for BOTH efficiency planes.
 
@@ -211,7 +210,7 @@ def calculate_all_plane_metrics(
         heavy_atoms: Number of heavy atoms (NHA)
 
     Returns:
-        Dict[str, float]: Dictionary containing all plane metrics (7 metrics total)
+        dict[str, float]: Dictionary containing all plane metrics (7 metrics total)
 
     Example:
         >>> plane_metrics = calculate_all_plane_metrics(
@@ -314,7 +313,7 @@ def calculate_plane_metrics_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def interpret_angle(angle: float) -> Tuple[str, str]:
+def interpret_angle(angle: float) -> tuple[str, str]:
     """
     Interpret the meaning of an angle in the efficiency plane.
 
@@ -322,7 +321,7 @@ def interpret_angle(angle: float) -> Tuple[str, str]:
         angle: Angle in degrees (0-90°)
 
     Returns:
-        Tuple[str, str]: (category, interpretation)
+        tuple[str, str]: (category, interpretation)
 
     Example:
         >>> category, interpretation = interpret_angle(48.5)

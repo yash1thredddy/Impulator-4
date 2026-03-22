@@ -24,7 +24,7 @@ def get_storage_path_from_entry_id(entry_id: str) -> str:
     if not entry_id:
         raise ValueError("entry_id cannot be empty")
 
-    # Normalize to lowercase for consistent paths
-    entry_id = entry_id.lower()
+    # Normalize to lowercase string for consistent paths (accepts UUID or str)
+    entry_id = str(entry_id).lower()
     prefix = entry_id[:2]
     return f"results/{prefix}/{entry_id}.zip"

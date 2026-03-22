@@ -1,9 +1,8 @@
 """
-Reset the database and Azure storage for a fresh start.
+Reset the database for a fresh start using Alembic.
 
-Deletes the local SQLite database, recreates empty tables,
-optionally clears all result ZIPs from Azure, and syncs
-the fresh database to Azure.
+Runs `alembic downgrade base` then `alembic upgrade head` to recreate
+all tables from scratch. Optionally clears all result ZIPs from Azure.
 
 Usage:
     # Reset DB only (keep Azure result ZIPs)
@@ -19,6 +18,7 @@ Usage:
 import argparse
 import logging
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -30,9 +30,7 @@ from backend.config import settings  # noqa: E402
 from backend.core.azure_sync import (  # noqa: E402
     is_azure_configured,
     _get_container_client,
-    sync_db_to_azure,
 )
-from backend.core.database import init_db  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,22 +38,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
-def delete_local_db():
-    """Delete the local SQLite database and WAL/SHM files."""
-    db_path = Path(settings.DATABASE_URL.replace("sqlite:///./", ""))
-    deleted = []
-
-    for suffix in ["", "-wal", "-shm"]:
-        p = Path(str(db_path) + suffix)
-        if p.exists():
-            p.unlink()
-            deleted.append(str(p))
-            logger.info(f"Deleted: {p}")
-
-    if not deleted:
-        logger.info("No local database files found")
-    return deleted
+# Directory containing alembic.ini
+BACKEND_DIR = Path(__file__).parent.parent
 
 
 def delete_local_results():
@@ -115,7 +99,7 @@ def main():
 
     # Confirmation
     if not args.yes:
-        msg = "This will DELETE the local database and all local results"
+        msg = "This will DROP all database tables and recreate them, and delete all local results"
         if args.purge_azure:
             msg += " AND all Azure result ZIPs"
         msg += ".\nThis action is IRREVERSIBLE. Continue? [y/N] "
@@ -129,36 +113,34 @@ def main():
     logger.info("RESETTING DATABASE")
     logger.info("=" * 60)
 
-    # 1. Delete local database
-    logger.info("Step 1: Deleting local database...")
-    delete_local_db()
-
-    # 2. Delete local result ZIPs
-    logger.info("Step 2: Deleting local results...")
+    # 1. Delete local result ZIPs
+    logger.info("Step 1: Deleting local results...")
     delete_local_results()
 
-    # 3. Optionally purge Azure results
+    # 2. Optionally purge Azure results
     if args.purge_azure:
-        logger.info("Step 3: Purging Azure result ZIPs...")
+        logger.info("Step 2: Purging Azure result ZIPs...")
         purge_azure_results()
     else:
-        logger.info("Step 3: Skipping Azure purge (use --purge-azure to enable)")
+        logger.info("Step 2: Skipping Azure purge (use --purge-azure to enable)")
 
-    # 4. Recreate fresh database
-    logger.info("Step 4: Creating fresh database with empty tables...")
-    settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    init_db()
+    # 3. Downgrade database to base (drop all tables)
+    logger.info("Step 3: Running alembic downgrade base...")
+    subprocess.run(
+        ["alembic", "downgrade", "base"],
+        check=True,
+        cwd=str(BACKEND_DIR),
+    )
+    logger.info("All tables dropped")
+
+    # 4. Upgrade database to head (recreate all tables)
+    logger.info("Step 4: Running alembic upgrade head...")
+    subprocess.run(
+        ["alembic", "upgrade", "head"],
+        check=True,
+        cwd=str(BACKEND_DIR),
+    )
     logger.info("Fresh database created")
-
-    # 5. Sync to Azure
-    logger.info("Step 5: Syncing fresh database to Azure...")
-    if is_azure_configured():
-        if sync_db_to_azure():
-            logger.info("Empty database synced to Azure successfully")
-        else:
-            logger.error("Failed to sync database to Azure")
-    else:
-        logger.warning("Azure not configured - skipped sync")
 
     logger.info("=" * 60)
     logger.info("RESET COMPLETE - Fresh start ready!")

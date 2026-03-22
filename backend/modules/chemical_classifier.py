@@ -1,221 +1,342 @@
 """
-Chemical Classification Module
+Chemical Classification Module (Async)
 
 Integrates ClassyFire and NPClassifier for comprehensive chemical taxonomy.
 
-ClassyFire: General chemical taxonomy (Kingdom → Subclass)
-NPClassifier: Natural product-specific classification (Pathway → Class)
+ClassyFire: General chemical taxonomy (Kingdom -> Subclass)
+NPClassifier: Natural product-specific classification (Pathway -> Class)
+
+All I/O functions are async and accept an httpx.AsyncClient as first parameter.
+Circuit breaker helpers are self-contained (no imports from api_client.py).
 
 Usage:
     from backend.modules.chemical_classifier import get_complete_classification
 
-    classification = get_complete_classification(smiles="...", inchikey="...")
-    print(classification['Class'])  # ClassyFire class
-    print(classification['NP_Pathway'])  # NPClassifier pathway
+    async with create_classifier_client() as client:
+        classification = await get_complete_classification(client, smiles="...", inchikey="...")
+        print(classification['Class'])       # ClassyFire class
+        print(classification['NP_Pathway'])  # NPClassifier pathway
 """
 
-import logging
-import threading
-from typing import Dict, Optional
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+import asyncio
+import time
+
+import httpx
+import structlog
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from backend.core.metrics import metrics
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
-# API timeout
-API_TIMEOUT = 10
-
-
-def _create_session():
-    """Create a requests session with retry configuration."""
-    s = requests.Session()
-    retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
-    adapter = HTTPAdapter(max_retries=retry)
-    s.mount('http://', adapter)
-    s.mount('https://', adapter)
-    return s
+# --------------------------------------------------------------------------- #
+# Client factory
+# --------------------------------------------------------------------------- #
 
 
-# Thread-local sessions (requests.Session is NOT thread-safe)
-_thread_local = threading.local()
+def create_classifier_client() -> httpx.AsyncClient:
+    """Create httpx client for ClassyFire/NPClassifier."""
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=5, read=15, write=10, pool=10),
+    )
 
 
-def _get_thread_session():
-    """Get a thread-local requests session."""
-    if not hasattr(_thread_local, 'session'):
-        _thread_local.session = _create_session()
-    return _thread_local.session
+# --------------------------------------------------------------------------- #
+# Self-contained circuit breaker helpers (D-31, D-33)
+# --------------------------------------------------------------------------- #
+
+_circuits: dict[str, dict] = {}
 
 
-# Module-level session for backward compatibility in single-threaded contexts
-session = _create_session()
+def _make_circuit(threshold: int = 3, cooldown: int = 300) -> dict:
+    """Create a new circuit breaker state dict."""
+    return {"failures": 0, "open_until": 0.0, "threshold": threshold, "cooldown": cooldown}
 
 
-def get_classyfire_classification(inchikey: str, max_retries: int = 2) -> Optional[Dict]:
+def _get_circuit(endpoint: str) -> dict:
+    """Get or create a circuit for the given endpoint."""
+    if endpoint not in _circuits:
+        _circuits[endpoint] = _make_circuit()
+    return _circuits[endpoint]
+
+
+def _is_circuit_open(circuit: dict) -> bool:
+    """Return True if the circuit is open (should skip call)."""
+    if circuit["failures"] < circuit["threshold"]:
+        return False
+    if time.monotonic() >= circuit["open_until"]:
+        circuit["failures"] = circuit["threshold"] - 1  # Half-open
+        return False
+    return True
+
+
+def _record_success(circuit: dict) -> None:
+    """Reset circuit on success."""
+    circuit["failures"] = 0
+    circuit["open_until"] = 0.0
+
+
+def _record_failure(circuit: dict) -> None:
+    """Increment failures; open circuit if threshold reached."""
+    circuit["failures"] += 1
+    if circuit["failures"] >= circuit["threshold"]:
+        circuit["open_until"] = time.monotonic() + circuit["cooldown"]
+
+
+# Pre-create circuits with higher threshold for non-critical classifiers (D-34)
+_circuits["classyfire"] = _make_circuit(threshold=5, cooldown=300)
+_circuits["npclassifier"] = _make_circuit(threshold=5, cooldown=300)
+
+
+# --------------------------------------------------------------------------- #
+# Retry decorator
+# --------------------------------------------------------------------------- #
+
+_RETRYABLE = (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)
+
+
+def _classifier_retry(max_attempts: int = 5):
+    """Tenacity retry: 5x exponential backoff (D-29)."""
+    return retry(
+        stop=stop_after_attempt(max_attempts),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=8),
+        retry=retry_if_exception_type(_RETRYABLE),
+        reraise=True,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Async I/O functions
+# --------------------------------------------------------------------------- #
+
+
+async def get_classyfire_classification(
+    client: httpx.AsyncClient,
+    inchikey: str,
+    max_retries: int = 5,
+) -> dict | None:
     """
     Get comprehensive ClassyFire classification with retry logic.
 
     ClassyFire provides chemical taxonomy based on structural features.
     API: http://classyfire.wishartlab.com/
 
-    Includes retry logic for transient failures (timeouts, connection errors).
-
     Args:
+        client: httpx.AsyncClient instance
         inchikey: Standard InChIKey identifier
-        max_retries: Maximum retry attempts for transient failures
+        max_retries: Maximum retry attempts (via tenacity)
 
     Returns:
         Dict with complete ClassyFire response, or None if failed
 
     Example:
-        >>> data = get_classyfire_classification("REFJWTPEDVJJIY-UHFFFAOYSA-N")
+        >>> data = await get_classyfire_classification(client, "REFJWTPEDVJJIY-UHFFFAOYSA-N")
         >>> print(data['kingdom']['name'])  # "Organic compounds"
     """
-    import time
+    circuit = _get_circuit("classyfire")
+    if _is_circuit_open(circuit):
+        logger.info("classyfire_circuit_open", inchikey=inchikey)
+        return None
 
-    url = f'http://classyfire.wishartlab.com/entities/{inchikey}.json'
+    url = f"http://classyfire.wishartlab.com/entities/{inchikey}.json"
 
-    for attempt in range(max_retries):
-        try:
-            _cf_start = time.time()
-            response = _get_thread_session().get(url, timeout=API_TIMEOUT)
-            metrics.increment('api_calls_total')
-            metrics.record_latency('classyfire', (time.time() - _cf_start) * 1000)
+    @_classifier_retry(max_attempts=max_retries)
+    async def _do_fetch() -> dict | None:
+        _start = time.time()
+        response = await client.get(url, timeout=30)
+        latency_ms = (time.time() - _start) * 1000
 
-            if response.status_code == 200:
-                return response.json()
-            elif response.status_code in [500, 502, 503, 504]:
-                # Server error - retry
-                if attempt < max_retries - 1:
-                    logger.warning(f"ClassyFire returned {response.status_code} (attempt {attempt + 1}), retrying...")
-                    time.sleep(1 * (attempt + 1))
-                    continue
-                else:
-                    logger.error(f"ClassyFire returned {response.status_code} after {max_retries} attempts")
-                    metrics.increment('api_calls_failed')
-                    return None
-            else:
-                # 4xx errors - don't retry
-                logger.warning(f"ClassyFire returned status {response.status_code} for {inchikey}")
-                return None
+        metrics.increment("api_calls_total")
+        metrics.record_latency("classyfire", latency_ms)
 
-        except requests.exceptions.Timeout:
-            metrics.increment('api_calls_total')
-            metrics.increment('api_calls_failed')
-            if attempt < max_retries - 1:
-                logger.warning(f"ClassyFire timeout for {inchikey} (attempt {attempt + 1}), retrying...")
-                time.sleep(1 * (attempt + 1))
-            else:
-                logger.error(f"ClassyFire timeout for {inchikey} after {max_retries} attempts")
-                return None
-        except requests.exceptions.ConnectionError:
-            metrics.increment('api_calls_total')
-            metrics.increment('api_calls_failed')
-            if attempt < max_retries - 1:
-                logger.warning(f"ClassyFire connection error for {inchikey} (attempt {attempt + 1}), retrying...")
-                time.sleep(1 * (attempt + 1))
-            else:
-                logger.error(f"ClassyFire connection error for {inchikey} after {max_retries} attempts")
-                return None
-        except Exception as e:
-            metrics.increment('api_calls_total')
-            metrics.increment('api_calls_failed')
-            logger.error(f"ClassyFire error for {inchikey}: {str(e)}")
-            return None
+        if response.status_code == 200:
+            return response.json()
 
-    return None
+        if response.status_code >= 500:
+            metrics.increment("api_calls_failed")
+            # 5xx trips circuit breaker via exception -> retry
+            raise httpx.ReadTimeout(f"ClassyFire {response.status_code}")
+
+        # 4xx: don't retry, don't trip circuit breaker
+        logger.warning("classyfire_client_error", status=response.status_code, inchikey=inchikey)
+        return None
+
+    try:
+        result = await _do_fetch()
+        if result is not None:
+            _record_success(circuit)
+        return result
+    except Exception as exc:
+        _record_failure(circuit)
+        metrics.increment("api_calls_failed")
+        logger.warning("classyfire_failed", inchikey=inchikey, error=str(exc))
+        return None
 
 
-def get_npclassifier_classification(smiles: str, max_retries: int = 2) -> Optional[Dict]:
+async def get_npclassifier_classification(
+    client: httpx.AsyncClient,
+    smiles: str,
+    max_retries: int = 5,
+) -> dict | None:
     """
     Get NPClassifier classification for natural products with retry logic.
 
-    NPClassifier is a deep learning tool specialized for natural product classification.
-    API: https://npclassifier.ucsd.edu/
-
-    Includes retry logic for transient failures (timeouts, connection errors).
+    NPClassifier is a deep learning tool for natural product classification.
+    API: https://npclassifier.gnps2.org/
 
     Args:
+        client: httpx.AsyncClient instance
         smiles: SMILES string
-        max_retries: Maximum retry attempts for transient failures
+        max_retries: Maximum retry attempts (via tenacity)
 
     Returns:
-        Dict with NP_Pathway, NP_Superclass, NP_Class, NP_isglycoside, or None if failed
+        Dict with NP_Pathway, NP_Superclass, NP_Class, NP_isglycoside, or None
 
     Example:
-        >>> data = get_npclassifier_classification("c1ccc(cc1)O")
+        >>> data = await get_npclassifier_classification(client, "c1ccc(cc1)O")
         >>> print(data['NP_Pathway'])  # "Shikimates and Phenylpropanoids"
     """
-    import time
+    circuit = _get_circuit("npclassifier")
+    if _is_circuit_open(circuit):
+        logger.info("npclassifier_circuit_open")
+        return None
 
-    url = 'https://npclassifier.ucsd.edu/classify'
-    params = {'smiles': smiles}
+    url = "https://npclassifier.gnps2.org/classify"
     smiles_preview = smiles[:50] + "..." if len(smiles) > 50 else smiles
 
-    for attempt in range(max_retries):
-        try:
-            _np_start = time.time()
-            response = _get_thread_session().get(url, params=params, timeout=API_TIMEOUT)
-            metrics.increment('api_calls_total')
-            metrics.record_latency('npclassifier', (time.time() - _np_start) * 1000)
+    @_classifier_retry(max_attempts=max_retries)
+    async def _do_fetch() -> dict | None:
+        _start = time.time()
+        response = await client.get(url, params={"smiles": smiles}, timeout=15)
+        latency_ms = (time.time() - _start) * 1000
 
-            if response.status_code == 200:
-                data = response.json()
+        metrics.increment("api_calls_total")
+        metrics.record_latency("npclassifier", latency_ms)
 
-                # Extract first prediction for each level
-                # NPClassifier returns arrays of predictions
-                return {
-                    'NP_Pathway': data.get('pathway_results', [None])[0] if data.get('pathway_results') else None,
-                    'NP_Superclass': data.get('superclass_results', [None])[0] if data.get('superclass_results') else None,
-                    'NP_Class': data.get('class_results', [None])[0] if data.get('class_results') else None,
-                    'NP_isglycoside': data.get('isglycoside', False)
-                }
-            elif response.status_code in [500, 502, 503, 504]:
-                # Server error - retry
-                if attempt < max_retries - 1:
-                    logger.warning(f"NPClassifier returned {response.status_code} (attempt {attempt + 1}), retrying...")
-                    time.sleep(1 * (attempt + 1))
-                    continue
-                else:
-                    logger.error(f"NPClassifier returned {response.status_code} after {max_retries} attempts")
-                    metrics.increment('api_calls_failed')
-                    return None
-            else:
-                # 4xx errors - don't retry
-                logger.warning(f"NPClassifier returned status {response.status_code}")
-                return None
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                "NP_Pathway": data.get("pathway_results", [None])[0]
+                if data.get("pathway_results")
+                else None,
+                "NP_Superclass": data.get("superclass_results", [None])[0]
+                if data.get("superclass_results")
+                else None,
+                "NP_Class": data.get("class_results", [None])[0]
+                if data.get("class_results")
+                else None,
+                "NP_isglycoside": data.get("isglycoside", False),
+            }
 
-        except requests.exceptions.Timeout:
-            metrics.increment('api_calls_total')
-            metrics.increment('api_calls_failed')
-            if attempt < max_retries - 1:
-                logger.warning(f"NPClassifier timeout (attempt {attempt + 1}) for SMILES: {smiles_preview}")
-                time.sleep(1 * (attempt + 1))
-            else:
-                logger.error(f"NPClassifier timeout for SMILES: {smiles_preview} after {max_retries} attempts")
-                return None
-        except requests.exceptions.ConnectionError:
-            metrics.increment('api_calls_total')
-            metrics.increment('api_calls_failed')
-            if attempt < max_retries - 1:
-                logger.warning(f"NPClassifier connection error (attempt {attempt + 1}) for SMILES: {smiles_preview}")
-                time.sleep(1 * (attempt + 1))
-            else:
-                logger.error(f"NPClassifier connection error for SMILES: {smiles_preview} after {max_retries} attempts")
-                return None
-        except Exception as e:
-            metrics.increment('api_calls_total')
-            metrics.increment('api_calls_failed')
-            logger.error(f"NPClassifier error for SMILES: {str(e)}")
-            return None
+        if response.status_code >= 500:
+            metrics.increment("api_calls_failed")
+            raise httpx.ReadTimeout(f"NPClassifier {response.status_code}")
 
-    return None
+        # 4xx: don't retry, don't trip circuit breaker
+        logger.warning("npclassifier_client_error", status=response.status_code)
+        return None
+
+    try:
+        result = await _do_fetch()
+        if result is not None:
+            _record_success(circuit)
+        return result
+    except Exception as exc:
+        _record_failure(circuit)
+        metrics.increment("api_calls_failed")
+        logger.warning("npclassifier_failed", smiles=smiles_preview, error=str(exc))
+        return None
 
 
-def extract_classyfire_fields(cf_data: Optional[Dict]) -> Dict[str, str]:
+async def get_complete_classification(
+    client: httpx.AsyncClient,
+    smiles: str,
+    inchikey: str,
+) -> dict[str, str]:
+    """
+    Get complete chemical classification from both ClassyFire and NPClassifier.
+
+    ClassyFire and NPClassifier are fetched in parallel via asyncio.gather.
+    If either fails, that section returns empty strings (graceful degradation).
+
+    Args:
+        client: httpx.AsyncClient instance
+        smiles: SMILES string
+        inchikey: InChIKey
+
+    Returns:
+        Dict with all classification fields (14 total):
+            ClassyFire: Kingdom, Superclass, Class, Subclass, Direct_Parent,
+                       Molecular_Framework, Description, ChEMONT_ID_Class, ChEMONT_ID_Subclass
+            NPClassifier: NP_Pathway, NP_Superclass, NP_Class, NP_isglycoside
+            classification_available: bool
+
+    Example:
+        >>> classification = await get_complete_classification(
+        ...     client,
+        ...     smiles="C1=CC(=C(C=C1O)O)C2=C(C(=O)C3=C(C=C(C=C3O2)O)O)O",
+        ...     inchikey="REFJWTPEDVJJIY-UHFFFAOYSA-N",
+        ... )
+        >>> print(f"Class: {classification['Class']}")  # "Flavonoids"
+    """
+    # Initialize with empty fields
+    classification: dict[str, str] = {
+        # ClassyFire fields
+        "Kingdom": "",
+        "Superclass": "",
+        "Class": "",
+        "Subclass": "",
+        "Direct_Parent": "",
+        "Molecular_Framework": "",
+        "Description": "",
+        "ChEMONT_ID_Class": "",
+        "ChEMONT_ID_Subclass": "",
+        # NPClassifier fields
+        "NP_Pathway": "",
+        "NP_Superclass": "",
+        "NP_Class": "",
+        "NP_isglycoside": False,
+    }
+
+    # Fetch both in parallel (D-34: both non-critical, graceful degradation)
+    cf_result, np_result = await asyncio.gather(
+        get_classyfire_classification(client, inchikey),
+        get_npclassifier_classification(client, smiles),
+        return_exceptions=True,
+    )
+
+    # Process ClassyFire
+    cf_data = cf_result if isinstance(cf_result, dict) else None
+    if cf_data:
+        cf_fields = extract_classyfire_fields(cf_data)
+        classification.update(cf_fields)
+        logger.info("classyfire_obtained", class_name=cf_fields.get("Class", "Unknown"))
+    else:
+        logger.warning("classyfire_unavailable", inchikey=inchikey)
+
+    # Process NPClassifier
+    np_data = np_result if isinstance(np_result, dict) else None
+    if np_data:
+        classification.update(np_data)
+        logger.info("npclassifier_obtained", pathway=np_data.get("NP_Pathway", "Unknown"))
+    else:
+        logger.warning("npclassifier_unavailable")
+
+    classification["classification_available"] = bool(cf_data or np_data)
+    return classification
+
+
+# --------------------------------------------------------------------------- #
+# Pure functions (sync, no I/O)
+# --------------------------------------------------------------------------- #
+
+
+def extract_classyfire_fields(cf_data: dict | None) -> dict[str, str]:
     """
     Extract enhanced ClassyFire fields from API response.
 
@@ -228,22 +349,24 @@ def extract_classyfire_fields(cf_data: Optional[Dict]) -> Dict[str, str]:
         Dict with Kingdom, Superclass, Class, Subclass, Direct_Parent,
         Molecular_Framework, Description, ChEMONT_ID_Class, ChEMONT_ID_Subclass
     """
+    empty = {
+        "Kingdom": "",
+        "Superclass": "",
+        "Class": "",
+        "Subclass": "",
+        "Direct_Parent": "",
+        "Molecular_Framework": "",
+        "Description": "",
+        "ChEMONT_ID_Class": "",
+        "ChEMONT_ID_Subclass": "",
+    }
+
     if cf_data is None:
-        return {
-            'Kingdom': '',
-            'Superclass': '',
-            'Class': '',
-            'Subclass': '',
-            'Direct_Parent': '',
-            'Molecular_Framework': '',
-            'Description': '',
-            'ChEMONT_ID_Class': '',
-            'ChEMONT_ID_Subclass': ''
-        }
+        return empty
 
     try:
-        # Helper to safely extract nested values (handles None values)
-        def safe_get(d, key1, key2='name', default=''):
+
+        def safe_get(d, key1, key2="name", default=""):
             """Safely get nested dict value, handling None at any level."""
             val = d.get(key1) if d else None
             if val is None:
@@ -253,98 +376,19 @@ def extract_classyfire_fields(cf_data: Optional[Dict]) -> Dict[str, str]:
             return str(val) if val else default
 
         return {
-            # Standard taxonomy levels
-            'Kingdom': safe_get(cf_data, 'kingdom', 'name'),
-            'Superclass': safe_get(cf_data, 'superclass', 'name'),
-            'Class': safe_get(cf_data, 'class', 'name'),
-            'Subclass': safe_get(cf_data, 'subclass', 'name'),
-
-            # Enhanced fields
-            'Direct_Parent': safe_get(cf_data, 'direct_parent', 'name'),
-            'Molecular_Framework': cf_data.get('molecular_framework', '') or '',
-            'Description': cf_data.get('description', '') or '',
-
-            # ChEMONT ontology IDs
-            'ChEMONT_ID_Class': safe_get(cf_data, 'class', 'chemont_id'),
-            'ChEMONT_ID_Subclass': safe_get(cf_data, 'subclass', 'chemont_id')
+            "Kingdom": safe_get(cf_data, "kingdom", "name"),
+            "Superclass": safe_get(cf_data, "superclass", "name"),
+            "Class": safe_get(cf_data, "class", "name"),
+            "Subclass": safe_get(cf_data, "subclass", "name"),
+            "Direct_Parent": safe_get(cf_data, "direct_parent", "name"),
+            "Molecular_Framework": cf_data.get("molecular_framework", "") or "",
+            "Description": cf_data.get("description", "") or "",
+            "ChEMONT_ID_Class": safe_get(cf_data, "class", "chemont_id"),
+            "ChEMONT_ID_Subclass": safe_get(cf_data, "subclass", "chemont_id"),
         }
-    except Exception as e:
-        logger.error(f"Error extracting ClassyFire fields: {str(e)}")
-        return {
-            'Kingdom': '',
-            'Superclass': '',
-            'Class': '',
-            'Subclass': '',
-            'Direct_Parent': '',
-            'Molecular_Framework': '',
-            'Description': '',
-            'ChEMONT_ID_Class': '',
-            'ChEMONT_ID_Subclass': ''
-        }
-
-
-def get_complete_classification(smiles: str, inchikey: str) -> Dict[str, str]:
-    """
-    Get complete chemical classification from both ClassyFire and NPClassifier.
-
-    This is the main function to use for comprehensive chemical taxonomy.
-
-    Args:
-        smiles: SMILES string
-        inchikey: InChIKey
-
-    Returns:
-        Dict with all classification fields (13-14 total):
-            - ClassyFire: Kingdom, Superclass, Class, Subclass, Direct_Parent,
-                         Molecular_Framework, Description, ChEMONT_ID_Class, ChEMONT_ID_Subclass
-            - NPClassifier: NP_Pathway, NP_Superclass, NP_Class, NP_isglycoside
-
-    Example:
-        >>> classification = get_complete_classification(
-        ...     smiles="C1=CC(=C(C=C1O)O)C2=C(C(=O)C3=C(C=C(C=C3O2)O)O)O",
-        ...     inchikey="REFJWTPEDVJJIY-UHFFFAOYSA-N"
-        ... )
-        >>> print(f"Class: {classification['Class']}")  # "Flavonoids"
-        >>> print(f"Pathway: {classification['NP_Pathway']}")  # "Shikimates and Phenylpropanoids"
-    """
-    # Initialize with empty fields
-    classification = {
-        # ClassyFire fields
-        'Kingdom': '',
-        'Superclass': '',
-        'Class': '',
-        'Subclass': '',
-        'Direct_Parent': '',
-        'Molecular_Framework': '',
-        'Description': '',
-        'ChEMONT_ID_Class': '',
-        'ChEMONT_ID_Subclass': '',
-
-        # NPClassifier fields
-        'NP_Pathway': '',
-        'NP_Superclass': '',
-        'NP_Class': '',
-        'NP_isglycoside': False
-    }
-
-    # Get ClassyFire data
-    cf_data = get_classyfire_classification(inchikey)
-    if cf_data:
-        cf_fields = extract_classyfire_fields(cf_data)
-        classification.update(cf_fields)
-        logger.info(f"ClassyFire classification obtained: {cf_fields.get('Class', 'Unknown')}")
-    else:
-        logger.warning(f"No ClassyFire data for {inchikey}")
-
-    # Get NPClassifier data
-    np_data = get_npclassifier_classification(smiles)
-    if np_data:
-        classification.update(np_data)
-        logger.info(f"NPClassifier classification obtained: {np_data.get('NP_Pathway', 'Unknown')}")
-    else:
-        logger.warning("No NPClassifier data for SMILES")
-
-    return classification
+    except Exception as exc:
+        logger.error("classyfire_extract_error", error=str(exc))
+        return empty
 
 
 def classify_compound_type(classification: Dict) -> str:
@@ -360,29 +404,34 @@ def classify_compound_type(classification: Dict) -> str:
         str: "Natural Product", "Synthetic", or "Semi-Synthetic"
 
     Example:
-        >>> classification = get_complete_classification(smiles="...", inchikey="...")
         >>> compound_type = classify_compound_type(classification)
         >>> print(compound_type)  # "Natural Product"
     """
-    # Has NPClassifier pathway → likely natural product
-    if classification.get('NP_Pathway'):
+    # Has NPClassifier pathway -> likely natural product
+    if classification.get("NP_Pathway"):
         return "Natural Product"
 
     # Check ClassyFire for natural product indicators
     np_keywords = [
-        'alkaloid', 'terpenoid', 'flavonoid', 'polyketide',
-        'phenylpropanoid', 'steroid', 'glycoside', 'saponin',
-        'tannin', 'coumarin', 'quinone', 'lignan'
+        "alkaloid",
+        "terpenoid",
+        "flavonoid",
+        "polyketide",
+        "phenylpropanoid",
+        "steroid",
+        "glycoside",
+        "saponin",
+        "tannin",
+        "coumarin",
+        "quinone",
+        "lignan",
     ]
 
-    # Check all ClassyFire levels
-    for field in ['Superclass', 'Class', 'Subclass', 'Direct_Parent']:
-        value = classification.get(field) or ''  # Guard against None
-        value = value.lower()
+    for field in ["Superclass", "Class", "Subclass", "Direct_Parent"]:
+        value = (classification.get(field) or "").lower()
         if any(keyword in value for keyword in np_keywords):
             return "Natural Product"
 
-    # Default to synthetic
     return "Synthetic"
 
 
@@ -395,68 +444,45 @@ def get_classification_summary(classification: Dict) -> str:
 
     Returns:
         str: Multi-line summary text
-
-    Example:
-        >>> classification = get_complete_classification(smiles="...", inchikey="...")
-        >>> print(get_classification_summary(classification))
     """
     lines = []
 
     lines.append("Chemical Classification Summary")
     lines.append("-" * 50)
 
-    # ClassyFire taxonomy
-    if classification.get('Class'):
-        lines.append(f"ClassyFire: {classification['Kingdom']} > {classification['Superclass']} > {classification['Class']} > {classification['Subclass']}")
+    if classification.get("Class"):
+        lines.append(
+            f"ClassyFire: {classification['Kingdom']} > "
+            f"{classification['Superclass']} > "
+            f"{classification['Class']} > "
+            f"{classification['Subclass']}"
+        )
     else:
         lines.append("ClassyFire: No classification available")
 
-    # NPClassifier (if natural product)
-    if classification.get('NP_Pathway'):
-        lines.append(f"NPClassifier: {classification['NP_Pathway']} > {classification['NP_Superclass']} > {classification['NP_Class']}")
-        if classification.get('NP_isglycoside'):
-            lines.append("  • Contains glycoside moiety")
+    if classification.get("NP_Pathway"):
+        lines.append(
+            f"NPClassifier: {classification['NP_Pathway']} > "
+            f"{classification['NP_Superclass']} > "
+            f"{classification['NP_Class']}"
+        )
+        if classification.get("NP_isglycoside"):
+            lines.append("  - Contains glycoside moiety")
 
-    # Compound type
     compound_type = classify_compound_type(classification)
     lines.append(f"Compound Type: {compound_type}")
 
-    # Molecular framework
-    if classification.get('Molecular_Framework'):
+    if classification.get("Molecular_Framework"):
         lines.append(f"Molecular Framework: {classification['Molecular_Framework']}")
 
     return "\n".join(lines)
 
 
-def shutdown_classifier():
-    """Close and reset thread-local sessions on shutdown (STAB-16)."""
-    global _thread_local
-    # Close the existing session for this thread (if any) before discarding
-    # the thread-local object.  Worker threads may have their own sessions but
-    # they are daemon threads and will be stopped by the executor shutdown that
-    # precedes this call, so we only need to handle the current thread here.
-    existing_session = getattr(_thread_local, 'session', None)
-    if existing_session is not None:
-        try:
-            existing_session.close()
-        except Exception:
-            pass
-    _thread_local = threading.local()
-    logger.info("Chemical classifier sessions reset")
+# --------------------------------------------------------------------------- #
+# Shutdown
+# --------------------------------------------------------------------------- #
 
 
-# For backward compatibility with existing code
-def get_classification(inchikey: str) -> Optional[Dict]:
-    """
-    Legacy function for backward compatibility with existing api_client.py.
-
-    This maintains the same interface as the old get_classification() function
-    but returns the enhanced data.
-
-    Args:
-        inchikey: InChIKey
-
-    Returns:
-        Full ClassyFire API response (same as before)
-    """
-    return get_classyfire_classification(inchikey)
+def shutdown_classifier() -> None:
+    """Log classifier shutdown. No resources to clean up (httpx client managed externally)."""
+    logger.info("chemical_classifier_shutdown")

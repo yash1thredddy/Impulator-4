@@ -7,7 +7,7 @@ Does NOT call fileConfig() -- preserves structlog configuration.
 import logging
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, pool, text
 
 # Import settings for DATABASE_URL (single source of truth)
 from backend.config import settings
@@ -26,8 +26,9 @@ if database_url.startswith("postgres://"):
     database_url = "postgresql://" + database_url[len("postgres://"):]
 config.set_main_option("sqlalchemy.url", database_url)
 
-# target_metadata -- None for Phase 13 (no models yet), set in Phase 14
-target_metadata = None
+# target_metadata -- PGBase contains all Postgres ORM model metadata
+from backend.models._pg_base import PGBase
+target_metadata = PGBase.metadata
 
 
 def run_migrations_offline() -> None:
@@ -41,6 +42,8 @@ def run_migrations_offline() -> None:
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
+        compare_type=True,              # D-45: detect column type drift
+        compare_server_default=True,    # D-45: detect server default drift
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -58,9 +61,13 @@ def run_migrations_online() -> None:
 
     if connectable is not None:
         # Connection provided by caller (e.g., FastAPI lifespan)
+        # Disable statement_timeout for DDL -- migrations may take longer than 60s
+        connectable.execute(text("SET statement_timeout = 0"))
         context.configure(
             connection=connectable,
             target_metadata=target_metadata,
+            compare_type=True,              # D-45: detect column type drift
+            compare_server_default=True,    # D-45: detect server default drift
         )
         with context.begin_transaction():
             context.run_migrations()
@@ -72,9 +79,13 @@ def run_migrations_online() -> None:
             poolclass=pool.NullPool,  # Single-use connection for DDL
         )
         with connectable.connect() as connection:
+            # Disable statement_timeout for DDL -- migrations may take longer than 60s
+            connection.execute(text("SET statement_timeout = 0"))
             context.configure(
                 connection=connection,
                 target_metadata=target_metadata,
+                compare_type=True,              # D-45: detect column type drift
+                compare_server_default=True,    # D-45: detect server default drift
             )
             with context.begin_transaction():
                 context.run_migrations()

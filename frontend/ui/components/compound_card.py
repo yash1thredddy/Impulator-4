@@ -25,6 +25,28 @@ except ImportError:
     logger.warning("RDKit not available - 2D structure rendering disabled")
 
 
+def _imp_score_badge_css(score: float | None) -> str:
+    """Return a CSS border-left style string for IMP score color coding.
+
+    Args:
+        score: IMP score (0.0-1.0) or None.
+
+    Returns:
+        CSS style string for border-left, or empty string if no score.
+    """
+    if score is None:
+        return ""
+    if score >= 0.9:
+        return "border-left: 4px solid #4CAF50;"   # Green - Exceptional
+    elif score >= 0.7:
+        return "border-left: 4px solid #2196F3;"   # Blue - Strong
+    elif score >= 0.5:
+        return "border-left: 4px solid #FF9800;"   # Orange - Moderate
+    elif score >= 0.3:
+        return "border-left: 4px solid #9E9E9E;"   # Gray - Weak
+    return ""
+
+
 def render_compound_card(compound: Dict[str, Any], key_prefix: str = "", select_mode: bool = False) -> bool:
     """Render a compound card in the grid view (matching old UI style).
 
@@ -59,6 +81,14 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "", select_
 
     # Escape for XSS prevention (CSS text-overflow handles truncation dynamically)
     safe_compound_name = html.escape(str(compound_name))
+
+    # IMP score color badge
+    badge_css = _imp_score_badge_css(imp_score)
+    if badge_css:
+        st.markdown(
+            f"<div style='{badge_css} padding-left: 4px;'>",
+            unsafe_allow_html=True,
+        )
 
     with st.container(border=True):
         # Selection checkbox in select mode
@@ -136,8 +166,12 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "", select_
             else:
                 # For legacy compounds without entry_id, key_prefix alone is unique per grid position
                 button_key = f"{key_prefix}view"
-            if st.button("View Details", key=button_key, type="primary", use_container_width=True):
+            if st.button("View Details", key=button_key, type="primary", width='stretch'):
                 return True
+
+    # Close IMP score badge div if it was opened
+    if badge_css:
+        st.markdown("</div>", unsafe_allow_html=True)
 
     return False
 
@@ -284,8 +318,10 @@ def render_compound_grid(compounds: list, columns: int = 3, select_mode: bool = 
                     clicked_compound = {
                         'compound_name': compound.get('compound_name'),
                         'entry_id': compound.get('entry_id'),
+                        'storage_path': compound.get('storage_path'),
                         'is_duplicate': compound.get('is_duplicate', False),
-                        'duplicate_of': compound.get('duplicate_of'),
+                        'parent_id': compound.get('parent_id'),
+                        'parent_name': compound.get('parent_name'),
                     }
 
     return clicked_compound
@@ -314,6 +350,10 @@ def render_compound_list(compounds: list, select_mode: bool = False) -> Optional
         similarity_threshold = compound.get('similarity_threshold', 90)
         has_imp_warning = compound.get('has_imp_warning', False)
         is_duplicate = compound.get('is_duplicate', False)
+        imp_score = compound.get('imp_score')
+
+        # IMP score color indicator for list rows
+        badge_css = _imp_score_badge_css(imp_score)
 
         if select_mode and entry_id:
             # Selection mode: checkbox + name + smiles + similarity
@@ -325,12 +365,13 @@ def render_compound_list(compounds: list, select_mode: bool = False) -> Optional
 
             with col1:
                 safe_name = html.escape(compound_name)
+                name_style = f"style='{badge_css} padding-left: 6px;'" if badge_css else ""
                 if is_duplicate:
-                    st.markdown(f"**{safe_name}** <span style='color: #ff6b35; font-size: 12px;'>[DUP]</span>", unsafe_allow_html=True)
+                    st.markdown(f"<div {name_style}>**{safe_name}** <span style='color: #ff6b35; font-size: 12px;'>[DUP]</span></div>", unsafe_allow_html=True)
                 elif has_imp_warning:
-                    st.markdown(f"**{safe_name}** ")
+                    st.markdown(f"<div {name_style}>**{safe_name}** </div>" if badge_css else f"**{safe_name}** ", unsafe_allow_html=True)
                 else:
-                    st.markdown(f"**{safe_name}**")
+                    st.markdown(f"<div {name_style}>**{safe_name}**</div>" if badge_css else f"**{safe_name}**", unsafe_allow_html=True)
 
             with col2:
                 st.code(smiles + "..." if len(compound.get('smiles', '')) > 50 else smiles)
@@ -343,12 +384,13 @@ def render_compound_list(compounds: list, select_mode: bool = False) -> Optional
 
             with col1:
                 safe_name = html.escape(compound_name)
+                name_style = f"style='{badge_css} padding-left: 6px;'" if badge_css else ""
                 if is_duplicate:
-                    st.markdown(f"**{safe_name}** <span style='color: #ff6b35; font-size: 12px;'>[DUP]</span>", unsafe_allow_html=True)
+                    st.markdown(f"<div {name_style}>**{safe_name}** <span style='color: #ff6b35; font-size: 12px;'>[DUP]</span></div>", unsafe_allow_html=True)
                 elif has_imp_warning:
-                    st.markdown(f"**{safe_name}** ")
+                    st.markdown(f"<div {name_style}>**{safe_name}** </div>" if badge_css else f"**{safe_name}** ", unsafe_allow_html=True)
                 else:
-                    st.markdown(f"**{safe_name}**")
+                    st.markdown(f"<div {name_style}>**{safe_name}**</div>" if badge_css else f"**{safe_name}**", unsafe_allow_html=True)
 
             with col2:
                 st.code(smiles + "..." if len(compound.get('smiles', '')) > 50 else smiles)
@@ -362,8 +404,10 @@ def render_compound_list(compounds: list, select_mode: bool = False) -> Optional
                     clicked_compound = {
                         'compound_name': compound_name,
                         'entry_id': entry_id,
+                        'storage_path': compound.get('storage_path'),
                         'is_duplicate': is_duplicate,
-                        'duplicate_of': compound.get('duplicate_of'),
+                        'parent_id': compound.get('parent_id'),
+                        'parent_name': compound.get('parent_name'),
                     }
 
         st.divider()

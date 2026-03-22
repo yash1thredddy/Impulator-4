@@ -17,17 +17,19 @@ from sqlalchemy.pool import StaticPool
 @pytest.fixture(scope="module")
 def test_engine():
     """Create a test database engine once per module (faster than per-function)."""
-    from backend.core.database import Base
-    from backend.models.database import Job, Compound, DeletedCompound  # noqa: F401
+    from backend.models._pg_base import PGBase
+    from backend.models.job import Job  # noqa: F401
+    from backend.models.compound import Compound  # noqa: F401
+    from backend.models.deleted_compound import DeletedCompound  # noqa: F401
 
     engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    Base.metadata.create_all(bind=engine)
+    PGBase.metadata.create_all(bind=engine)
     yield engine
-    Base.metadata.drop_all(bind=engine)
+    PGBase.metadata.drop_all(bind=engine)
     engine.dispose()
 
 
@@ -35,9 +37,9 @@ def test_engine():
 def _clean_tables(test_engine):
     """Truncate all tables after each test to isolate state."""
     yield
-    from backend.core.database import Base
+    from backend.models._pg_base import PGBase
     with test_engine.connect() as conn:
-        for table in reversed(Base.metadata.sorted_tables):
+        for table in reversed(PGBase.metadata.sorted_tables):
             conn.execute(table.delete())
         conn.commit()
 
@@ -72,12 +74,11 @@ def db_session(test_engine):
 def mock_azure():
     """Mock Azure storage for tests.
 
-    Patches all three Azure sync functions so no real Azure calls are made.
+    Patches Azure sync functions so no real Azure calls are made.
     """
     with patch('backend.core.azure_sync.is_azure_configured', return_value=False):
-        with patch('backend.core.azure_sync.sync_db_to_azure', return_value=True):
-            with patch('backend.core.azure_sync.delete_result_from_azure_by_entry_id', return_value=True):
-                yield
+        with patch('backend.core.azure_sync.delete_result_from_azure_by_entry_id', return_value=True):
+            yield
 
 
 @pytest.fixture
@@ -126,7 +127,7 @@ def client(test_engine, mock_azure):
 @pytest.fixture
 def seed_compound(db_session):
     """Factory fixture for creating test compounds with sensible defaults."""
-    from backend.models.database import Compound
+    from backend.models.compound import Compound
     from backend.services.job_service import _inchikey_structure_key
     import uuid
     from datetime import datetime, timezone
@@ -139,7 +140,7 @@ def seed_compound(db_session):
             "inchikey": inchikey,
             "inchikey_structure_key": _inchikey_structure_key(inchikey),
             "similarity_threshold": 90,
-            "activity_types": "EC50,IC50,Kd,Ki",
+            "activity_types": ["EC50", "IC50", "Kd", "Ki"],
             "processed_at": datetime.now(timezone.utc),
         }
         defaults.update(overrides)

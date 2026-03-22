@@ -30,7 +30,8 @@ except ImportError:
         ALLOWED_EXTENSIONS = frozenset({'.csv', '.xlsx'})
         MAX_ROWS_LIMIT = 100_000
         MAX_ROWS_WARNING = 10_000
-        MAX_SMILES_LENGTH = 10_000
+        MAX_SMILES_LENGTH = 5000
+        MAX_COMPOUND_NAME_LENGTH = 255
         MAX_CATEGORICAL_CARDINALITY = 50
     config = _MockConfig()
 

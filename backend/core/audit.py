@@ -18,7 +18,7 @@ Security Events Logged:
 - Authentication/authorization failures
 """
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any
 
 import structlog
 
@@ -43,8 +43,8 @@ audit_logger = structlog.get_logger("audit")
 
 def log_security_event(
     event: AuditEvent,
-    session_id: Optional[str] = None,
-    details: Optional[Dict[str, Any]] = None,
+    session_id: str | None = None,
+    details: dict[str, Any] | None = None,
     severity: str = "warning",
 ) -> None:
     """
@@ -85,7 +85,7 @@ def log_rate_limit_exceeded(
 def log_job_cancelled(
     session_id: str,
     job_id: str,
-    compound_name: Optional[str] = None
+    compound_name: str | None = None
 ) -> None:
     """Log when a job is cancelled."""
     log_security_event(
@@ -102,7 +102,7 @@ def log_job_cancelled(
 def log_job_deleted(
     session_id: str,
     job_id: str,
-    compound_name: Optional[str] = None
+    compound_name: str | None = None
 ) -> None:
     """Log when a job and its results are deleted."""
     log_security_event(

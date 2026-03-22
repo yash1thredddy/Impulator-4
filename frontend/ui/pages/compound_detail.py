@@ -23,7 +23,7 @@ from frontend.services import (
 )
 from frontend.utils import SessionState, sanitize_compound_name
 from frontend.ui.components import render_2d_structure, embed_structure_viewer, render_structure_viewer_hint
-from frontend.ui.components.charts import get_plotly_theme
+from frontend.ui.components.charts import get_plotly_theme, apply_impulator_theme
 from frontend.ui.components.plotly_legend import plotly_legend_monitor
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ def render_compound_detail_page() -> None:
     entry_id = SessionState.get('selected_compound_entry_id')
     storage_path = SessionState.get('selected_compound_storage_path')
     is_duplicate = SessionState.get('selected_compound_is_duplicate', False)
-    duplicate_of_name = SessionState.get('selected_compound_duplicate_of_name')
+    parent_name = SessionState.get('selected_compound_duplicate_of_name')
 
     if not compound_name:
         st.error("No compound selected")
@@ -52,14 +52,15 @@ def render_compound_detail_page() -> None:
     with col1:
         if st.button("← Back", width='stretch'):
             SessionState.navigate_to_home()
+            st.query_params.clear()
             st.rerun()
     with col2:
         safe_compound_name = html.escape(compound_name)
         st.markdown(f"<h2 style='text-align: center; margin: 0;'>{safe_compound_name}</h2>", unsafe_allow_html=True)
         if is_duplicate:
             dup_label = "Duplicate compound"
-            if duplicate_of_name:
-                safe_parent = html.escape(duplicate_of_name)
+            if parent_name:
+                safe_parent = html.escape(parent_name)
                 dup_label = f"Duplicate of {safe_parent}"
             st.markdown(
                 f"<p style='text-align: center; margin: 2px 0 0 0; color: #ff6b35; "
@@ -81,8 +82,14 @@ def render_compound_detail_page() -> None:
         entry_id=entry_id,
         storage_path=storage_path
     )
-    if data is None:
-        st.error(f"Could not load data for '{compound_name}'")
+    if data is None or '_error' in data:
+        error_type = data.get('_error', 'unknown') if data else 'unknown'
+        if error_type == 'not_found':
+            st.error(f"Compound '{compound_name}' not found. It may have been deleted or the storage path is invalid.")
+        elif error_type == 'parse_error':
+            st.error(f"Could not parse data for '{compound_name}'. The stored data may be corrupted.")
+        else:
+            st.error(f"Server error loading '{compound_name}'. Please try again later.")
         return
 
     # Quick stats row
@@ -100,9 +107,22 @@ def render_compound_detail_page() -> None:
         versions = st.session_state[cache_key]
         has_versions = len(versions) > 1  # >1 because list includes self
 
+    # Consume tab query param for deep linking (D-46)
+    # Only apply once per compound to avoid overriding user tab clicks
+    tab_param = st.query_params.get("tab")
+    if tab_param and st.session_state.get("_last_deep_link_id") != entry_id:
+        tab_map = {
+            "overview": 0, "imp_score": 1, "bioactivity": 2,
+            "efficiency": 3, "report": 4, "versions": 5,
+        }
+        tab_index = tab_map.get(tab_param.lower())
+        if tab_index is not None:
+            st.session_state["compound_details_tab"] = tab_index
+        st.session_state["_last_deep_link_id"] = entry_id
+
     # Main content with tabs
     # After navigating from Versions tab, temporarily hide it so the tab count
-    # changes — this resets Streamlit's internal tab index back to 0 (Overview).
+    # changes -- this resets Streamlit's internal tab index back to 0 (Overview).
     show_versions_tab = has_versions and not st.session_state.pop('_versions_nav_reset', False)
 
     tab_labels = ["📊 Overview", "📈 Visualizations", "🧬 Molecules", "📋 Data", "📄 Report"]
@@ -306,20 +326,11 @@ def _render_compound_info(data: Dict[str, Any], df: pd.DataFrame, summary: Dict)
                 types = activity_types.split(',') if isinstance(activity_types, str) else activity_types
                 st.markdown(" ".join([f"**`{t.strip()}`**" for t in types[:7]]))
 
-            # Chemical Formula from SMILES (larger display)
-            smiles_for_formula = data.get('smiles', '')
-            if smiles_for_formula:
-                try:
-                    from rdkit import Chem
-                    from rdkit.Chem import rdMolDescriptors
-                    mol = Chem.MolFromSmiles(smiles_for_formula)
-                    if mol:
-                        formula = rdMolDescriptors.CalcMolFormula(mol)
-                        if formula:
-                            st.markdown("#### Chemical Formula")
-                            st.markdown(f"### `{formula}`")
-                except Exception:
-                    pass  # Skip if RDKit not available
+            # Chemical Formula (pre-computed in _load_compound_data)
+            formula = data.get('mol_formula')
+            if formula:
+                st.markdown("#### Chemical Formula")
+                st.markdown(f"### `{formula}`")
 
         # View Compound Details - shows ALL similar compounds (not just those with bioactivity)
         if unique_count > 0 and df is not None:
@@ -486,12 +497,13 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
     druglike_cols = [c for c in numeric_cols if any(h.lower() in c.lower() for h in druglike_hints)]
     other_cols = [c for c in numeric_cols if c not in physchem_cols and c not in druglike_cols]
 
-    # View mode toggle
+    # View mode toggle (scoped to entry_id to prevent stale state across compounds)
+    _eid = SessionState.get('selected_compound_entry_id', '')
     view_mode = st.radio(
         "View mode",
         ["Summary Statistics", "Individual Compounds"],
         horizontal=True,
-        key="prop_view_mode"
+        key=f"prop_view_mode_{_eid}"
     )
 
     if view_mode == "Summary Statistics":
@@ -649,6 +661,7 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
                     fig.add_hline(y=5, line_dash="dash", line_color="red", annotation_text="LogP ≤ 5")
                     fig.add_vline(x=500, line_dash="dash", line_color="red", annotation_text="MW ≤ 500")
                     fig.update_layout(height=300, margin=dict(t=55, b=30, l=30, r=30))
+                    apply_impulator_theme(fig)
                     st.plotly_chart(fig, width='stretch')
                 else:
                     st.caption("No MW/LogP data available for visualization")
@@ -677,12 +690,14 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
                 fig.add_hline(y=10, line_dash="dash", line_color="red", annotation_text="HBD+HBA ≤ 10")
                 fig.add_vline(x=140, line_dash="dash", line_color="red", annotation_text="TPSA ≤ 140")
                 fig.update_layout(height=300, margin=dict(t=55, b=30, l=30, r=30))
+                apply_impulator_theme(fig)
                 st.plotly_chart(fig, width='stretch')
             elif has_tpsa:
                 # Fallback: TPSA distribution
                 fig = px.histogram(unique_df['TPSA'].dropna(), nbins=25, title='TPSA Distribution')
                 fig.add_vline(x=140, line_dash="dash", line_color="red", annotation_text="TPSA ≤ 140")
                 fig.update_layout(height=300, margin=dict(t=40, b=30, l=30, r=30))
+                apply_impulator_theme(fig)
                 st.plotly_chart(fig, width='stretch')
             else:
                 st.caption("TPSA vs HBD+HBA requires HBD/HBA data (reprocess compounds)")
@@ -707,6 +722,7 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
                 fig.add_hline(y=0.5, line_dash="dash", line_color="green", annotation_text="Good QED (≥0.5)")
                 fig.add_vline(x=140, line_dash="dash", line_color="red", annotation_text="TPSA ≤ 140")
                 fig.update_layout(height=300, margin=dict(t=55, b=30, l=30, r=30))
+                apply_impulator_theme(fig)
                 st.plotly_chart(fig, width='stretch')
 
         with viz_col4:
@@ -764,6 +780,7 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
                         xaxis_title="10 × PSA/MW",
                         yaxis_title="NPOL/NHA"
                     )
+                    apply_impulator_theme(fig)
                     st.plotly_chart(fig, width='stretch', key="psa_npol_scatter_chart")
                     if stats_caption:
                         st.caption(stats_caption)
@@ -890,6 +907,7 @@ def _render_activity_analysis(df: pd.DataFrame) -> None:
             )
         )
         fig.update_traces(textposition='inside', textinfo='percent+label')
+        apply_impulator_theme(fig)
         st.plotly_chart(fig, width='stretch')
 
     # Statistics by type
@@ -920,6 +938,7 @@ def _render_activity_analysis(df: pd.DataFrame) -> None:
             showlegend=False,
             coloraxis_showscale=False
         )
+        apply_impulator_theme(fig)
         st.plotly_chart(fig, width='stretch')
 
 
@@ -955,10 +974,11 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
     ctrl_cols = st.columns([1, 1, 2])
 
     with ctrl_cols[0]:
+        _eid = SessionState.get('selected_compound_entry_id', '')
         metric_choice = st.selectbox(
             "Metric",
             avail,
-            key="eff_metric_choice",
+            key=f"eff_metric_choice_{_eid}",
             help="Select efficiency metric to display"
         )
 
@@ -1025,6 +1045,7 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
                     borderwidth=1
                 )
             )
+            apply_impulator_theme(fig)
             st.plotly_chart(fig, width='stretch', key="eff_box_chart")
             st.caption("💡 **Click legend items** to show/hide groups. Double-click to isolate.")
         else:
@@ -1034,6 +1055,7 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
                 title=dict(text=f'{metric_choice} Distribution', subtitle=dict(text='Frequency distribution across compounds')),
                 height=420, margin=dict(t=55, b=30)
             )
+            apply_impulator_theme(fig)
             st.plotly_chart(fig, width='stretch', key="eff_hist_chart")
 
         # Embed structure viewer for click-to-view molecules (box plots)
@@ -1329,6 +1351,7 @@ def _render_pains_analysis(df: pd.DataFrame) -> None:
         if not patterns.empty:
             fig = px.bar(x=patterns.values, y=patterns.index, orientation='h')
             fig.update_layout(height=min(250, len(patterns) * 30 + 50), margin=dict(t=10, b=10, l=10, r=10))
+            apply_impulator_theme(fig)
             st.plotly_chart(fig, width='stretch')
 
     # Methodology & References section
@@ -1597,7 +1620,7 @@ def _render_imp_score_breakdown(df: pd.DataFrame) -> None:
             int_s = row.get('Interference_Score', 0)
             pdb_s = row.get('PDB_Score', 0)
             st.markdown(f"""
-<div style="background-color: #1a1a2e; padding: 16px 20px; border-radius: 8px; font-family: 'Courier New', monospace; font-size: 0.95rem; line-height: 1.8; white-space: pre-wrap; word-wrap: break-word;">
+<div style="background-color: var(--secondary-background-color); padding: 16px 20px; border-radius: 8px; font-family: 'Courier New', monospace; font-size: 0.95rem; line-height: 1.8; white-space: pre-wrap; word-wrap: break-word;">
 <span style="color: #82aaff; font-weight: 600;">Base Score</span>
   = 0.45 x Eff + 0.20 x Dist + 0.15 x Angle + 0.15 x Interf + 0.05 x PDB
   = 0.45 x <span style="color: #c3e88d;">{eff_s:.3f}</span> + 0.20 x <span style="color: #c3e88d;">{dist_s:.3f}</span> + 0.15 x <span style="color: #c3e88d;">{ang_s:.3f}</span> + 0.15 x <span style="color: #c3e88d;">{int_s:.3f}</span> + 0.05 x <span style="color: #c3e88d;">{pdb_s:.3f}</span>
@@ -1683,6 +1706,7 @@ def _render_contribution_chart(row: pd.Series) -> None:
         textinfo='text',
     )
     fig.update_layout(showlegend=False, height=300, margin=dict(t=55, b=10, l=10, r=10))
+    apply_impulator_theme(fig)
 
     st.plotly_chart(fig, width='stretch')
 
@@ -1771,6 +1795,7 @@ since NSEI and NBEI are derived from the same underlying activity data.
             # Add vertical lines for thresholds - higher score = MORE IMP risk
             fig.add_vline(x=0.3, line_dash="dash", line_color="orange", annotation_text="IMP Threshold")
             fig.add_vline(x=0.5, line_dash="dash", line_color="red", annotation_text="Moderate+ IMP")
+            apply_impulator_theme(fig)
             st.plotly_chart(fig, width='stretch')
 
         with col2:
@@ -1952,7 +1977,7 @@ def _render_visualizations_tab(data: Dict[str, Any]) -> None:
         "Select Plot",
         ["Activity Distribution", "Efficiency Scatter", "Efficiency by Compound", "Custom Plot"],
         horizontal=True,
-        label_visibility="collapsed"
+        label_visibility="hidden"
     )
 
     st.markdown("---")
@@ -2009,6 +2034,7 @@ def _plot_activity_distribution(df: pd.DataFrame) -> None:
             borderwidth=1
         )
     )
+    apply_impulator_theme(fig)
     st.plotly_chart(fig, width='stretch', height=400, key="activity_dist_chart")
     st.caption("💡 **Click legend items** to show/hide activity types. Double-click to isolate.")
 
@@ -2179,6 +2205,7 @@ def _plot_efficiency_scatter(df: pd.DataFrame) -> None:
         if is_categorical_color:
             st.caption("Click legend items to show/hide groups — stats update instantly.")
 
+    apply_impulator_theme(fig)
     st.plotly_chart(fig, width='stretch', key="efficiency_scatter_chart")
 
     # Embed structure viewer for click-to-view molecules
@@ -2217,6 +2244,7 @@ def _plot_efficiency_by_compound(df: pd.DataFrame) -> None:
     if not group_df.empty:
         fig = px.box(group_df, x='ChEMBL_ID', y=metric, color='ChEMBL_ID', points='all')
         fig.update_layout(height=450, xaxis_tickangle=-45, showlegend=False)
+        apply_impulator_theme(fig)
         st.plotly_chart(fig, width='stretch')
         st.caption(f"Group {group_num} of {num_groups} ({len(unique_ids)} total compounds)")
 
@@ -2416,6 +2444,7 @@ def _plot_custom(df: pd.DataFrame) -> None:
             if is_custom_categorical:
                 st.caption("Click legend items to show/hide groups — stats update instantly.")
 
+        apply_impulator_theme(fig)
         st.plotly_chart(fig, width='stretch', key="custom_plot_chart")
 
         # Embed structure viewer for click-to-view molecules (for scatter, box, violin)
@@ -2471,7 +2500,8 @@ def _render_molecule_viewer(df: pd.DataFrame) -> None:
     else:
         options = [f"Mol {i+1}" for i in range(len(unique_mols))]
 
-    selected = st.selectbox("Select", options, key="mol_select", label_visibility="collapsed")
+    _eid = SessionState.get('selected_compound_entry_id', '')
+    selected = st.selectbox("Select", options, key=f"mol_select_{_eid}", label_visibility="hidden")
     idx = options.index(selected)
     row = unique_mols.iloc[idx]
 
@@ -2804,6 +2834,7 @@ def _render_pdb_evidence(
         with col1:
             fig = px.histogram(unique_df, x='PDB_Score', nbins=20)
             fig.update_layout(height=250, margin=dict(t=20, b=30))
+            apply_impulator_theme(fig)
             st.plotly_chart(fig, width='stretch')
 
         with col2:
@@ -2840,7 +2871,7 @@ def _render_data_tab(data: Dict[str, Any]) -> None:
         "View",
         ["Core Analysis", "Interpretation", "All Similar", "Full Data"],
         horizontal=True,
-        label_visibility="collapsed"
+        label_visibility="hidden"
     )
 
     st.markdown("---")
@@ -3145,6 +3176,7 @@ def _render_drug_indications(data: Dict[str, Any]) -> None:
             height=320,
             margin=dict(t=55, b=40),
         )
+        apply_impulator_theme(fig)
         st.plotly_chart(fig, width='stretch')
 
 
@@ -3171,7 +3203,7 @@ def _load_compound_data(
         )
         if summary is None:
             logger.debug(f"Could not load summary for {compound_name} (entry_id={entry_id}, storage_path={storage_path})")
-            return None
+            return {'_error': 'not_found'}
 
         # Load results DataFrame using smart loader
         df = smart_load_dataframe(
@@ -3206,18 +3238,21 @@ def _load_compound_data(
         # Get display name from summary (compound_name is in summary.json)
         display_name = summary.get('compound_name', compound_name or entry_id)
 
-        # Compute InChI and InChIKey once for reuse across all tabs
+        # Compute InChI, InChIKey, and molecular formula once for reuse across all tabs
         smiles = summary.get('smiles', summary.get('query_smiles', ''))
         inchi = None
         inchikey = None
+        mol_formula = None
         if smiles:
             try:
                 from rdkit import Chem
                 from rdkit.Chem.inchi import MolToInchi, MolToInchiKey
+                from rdkit.Chem import rdMolDescriptors
                 mol = Chem.MolFromSmiles(smiles)
                 if mol:
                     inchi = MolToInchi(mol)
                     inchikey = MolToInchiKey(mol)
+                    mol_formula = rdMolDescriptors.CalcMolFormula(mol)
             except Exception as e:
                 logger.warning(f"InChI/InChIKey conversion failed for '{display_name}' (SMILES={smiles[:50]}): {e}")
 
@@ -3229,6 +3264,7 @@ def _load_compound_data(
             'smiles': smiles,
             'inchi': inchi,
             'inchikey': inchikey,
+            'mol_formula': mol_formula,
             'similar_count': summary.get('similar_count', summary.get('total_compounds', 0)),
             'has_imp_warning': summary.get('has_imp_candidates', False),
             'summary': summary,
@@ -3237,9 +3273,12 @@ def _load_compound_data(
             'all_similar': all_similar_df,
         }
 
+    except (ValueError, KeyError, TypeError) as e:
+        logger.error(f"Error parsing compound data for '{compound_name}': {e}")
+        return {'_error': 'parse_error', '_detail': str(e)}
     except Exception as e:
-        logger.error(f"Error loading compound data: {e}")
-        return None
+        logger.error(f"Error loading compound data for '{compound_name}': {e}")
+        return {'_error': 'server_error', '_detail': str(e)}
 
 
 def _show_delete_confirmation(compound_name: str, entry_id: Optional[str] = None) -> None:
@@ -3386,14 +3425,19 @@ def _render_report_tab(data: Dict[str, Any]) -> None:
 
     # On-demand HTML generation using session state to save memory
     # HTML is only generated when user clicks "Generate Report", not on every page load
-    report_key = f"html_report_{compound_name}"
+    # Key prefix matches evict_report_cache() pattern: "_report_"
+    report_key = f"_report_{compound_name}"
 
     col1, col2, col3 = st.columns([2, 2, 4])
     with col1:
         # Generate button - only creates HTML when clicked
-        if st.button("🔄 Generate HTML Report", key="generate_report_btn", help="Click to generate the HTML report for download"):
+        _eid = data.get('entry_id', '')
+        if st.button("🔄 Generate HTML Report", key=f"generate_report_btn_{_eid}", help="Click to generate the HTML report for download"):
             with st.spinner("Generating report with charts..."):
                 html_content = _generate_html_report(data, df)
+                # Evict old reports before caching new one (limit to 5)
+                from frontend.utils.session_state import evict_report_cache
+                evict_report_cache()
                 st.session_state[report_key] = html_content
                 st.success("Report ready for download!")
 
@@ -3405,7 +3449,7 @@ def _render_report_tab(data: Dict[str, Any]) -> None:
                 st.session_state[report_key],
                 f"{compound_name.replace(' ', '_')}_report.html",
                 "text/html",
-                key="download_report_btn"
+                key=f"download_report_btn_{_eid}"
             )
         else:
             st.markdown("<small style='color: var(--text-color); opacity: 0.5;'>Click 'Generate' first</small>", unsafe_allow_html=True)
@@ -3849,6 +3893,7 @@ def _render_report_bioactivity_donut(df: pd.DataFrame) -> None:
             showlegend=True,
             legend=dict(orientation="v", yanchor="middle", y=0.5, xanchor="left", x=1.02)
         )
+        apply_impulator_theme(fig)
         st.plotly_chart(fig, width='stretch', key="report_activity_donut")
 
     with col2:
@@ -3942,6 +3987,7 @@ def _render_report_efficiency_boxplots(df: pd.DataFrame) -> None:
         xaxis_title="Efficiency Metric",
         yaxis_title="Value"
     )
+    apply_impulator_theme(fig)
     st.plotly_chart(fig, width='stretch', key="report_efficiency_box")
 
     # Enhanced descriptions
@@ -4103,6 +4149,7 @@ def _render_report_efficiency_plane(df: pd.DataFrame) -> None:
         )
     )
 
+    apply_impulator_theme(fig)
     st.plotly_chart(fig, width='stretch', key="report_efficiency_plane")
 
     # Enhanced interpretation with metrics cards
@@ -4313,6 +4360,7 @@ def _render_report_pdb_evidence(df: pd.DataFrame, data: Dict[str, Any]) -> None:
             xaxis_title="Number of Structures",
             yaxis_title=""
         )
+        apply_impulator_theme(fig)
         st.plotly_chart(fig, width='stretch', key="report_pdb_quality")
 
         # List high-quality PDB codes as clickable links
@@ -5595,9 +5643,9 @@ def _render_versions_tab(versions: list, current_entry_id: str) -> None:
             with cols[2]:
                 st.metric("Author", html.escape(sib.get("author_name") or "—"))
 
-            if sib.get("duplicate_of_name"):
+            if sib.get("parent_name"):
                 st.caption(
-                    f"Duplicate of: {html.escape(sib['duplicate_of_name'])}"
+                    f"Duplicate of: {html.escape(sib['parent_name'])}"
                 )
 
             # Navigate button
@@ -5619,7 +5667,7 @@ def _render_versions_tab(versions: list, current_entry_id: str) -> None:
                     compound_name=sib.get("compound_name", ""),
                     entry_id=sib.get("entry_id"),
                     storage_path=sib.get("storage_path"),
-                    is_duplicate=sib.get("is_duplicate", False),
-                    duplicate_of_name=sib.get("duplicate_of_name"),
+                    is_duplicate=sib.get("parent_id") is not None,
+                    duplicate_of_name=sib.get("parent_name"),
                 )
                 st.rerun()

@@ -4,13 +4,18 @@ Tests for imp_scoring module.
 Tests the following fixes:
 - 3.2: Sigmoid Z-score normalization (preserves ranking for exceptional compounds)
 - 3.11: Distance score clipping to 0-1 range
+
+Async functions (calculate_imp_score, calculate_pdb_evidence_score) tested with
+AsyncMock httpx.AsyncClient. Pure math functions tested synchronously.
 """
 
 import pytest
 import numpy as np
 import pandas as pd
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
+
+import httpx
 
 from backend.modules.imp_scoring import (
     calculate_efficiency_outlier_score,
@@ -31,6 +36,12 @@ from backend.modules.imp_scoring import (
     WEIGHT_INTERFERENCE,
     WEIGHT_PDB,
 )
+
+
+@pytest.fixture
+def mock_client():
+    """Mock httpx.AsyncClient for async PDB tests."""
+    return AsyncMock(spec=httpx.AsyncClient)
 
 
 class TestEfficiencyOutlierScore:
@@ -281,7 +292,7 @@ class TestInterpretScore:
 class TestIMPScoreNewWeights:
     """Tests for new IMP Score weight system (5 components, direct percentages)."""
 
-    def test_imp_score_new_weights(self):
+    async def test_imp_score_new_weights(self, mock_client):
         """Verify new weight system: 45/20/15/15/5, no normalization."""
         df = pd.DataFrame({
             'SEI': [5.0, 10.0, 15.0],
@@ -299,7 +310,7 @@ class TestIMPScoreNewWeights:
             'Thiol_Reactive': [0, 0, 0],
         })
 
-        result = calculate_imp_score(df, use_pdb=False)
+        result = await calculate_imp_score(mock_client, df, use_pdb=False)
 
         assert 'Interference_Score' in result.columns
         assert 'Interference_Contribution' in result.columns
@@ -588,7 +599,7 @@ class TestNewWeights:
 
 
 class TestCalculateImpScore:
-    """Tests for unified calculate_imp_score function."""
+    """Tests for unified calculate_imp_score function (async)."""
 
     def _make_test_df(self, interference_flags=None):
         """Helper to create test DataFrame with all required columns."""
@@ -610,14 +621,14 @@ class TestCalculateImpScore:
                 data[col] = [0, 0, 0]
         return pd.DataFrame(data)
 
-    def test_has_interference_contribution(self):
+    async def test_has_interference_contribution(self, mock_client):
         """New function should produce Interference_Score and Interference_Contribution columns."""
         df = self._make_test_df()
-        result = calculate_imp_score(df, use_pdb=False)
+        result = await calculate_imp_score(mock_client, df, use_pdb=False)
         assert 'Interference_Score' in result.columns
         assert 'Interference_Contribution' in result.columns
 
-    def test_interference_affects_final_score(self):
+    async def test_interference_affects_final_score(self, mock_client):
         """Compounds with interference flags should have higher IMP scores than clean ones."""
         df_clean = self._make_test_df()
         df_flagged = self._make_test_df(interference_flags={
@@ -627,40 +638,40 @@ class TestCalculateImpScore:
             'Fluorescence_Interference': [0, 0, 0],
             'Thiol_Reactive': [0, 0, 0],
         })
-        result_clean = calculate_imp_score(df_clean, use_pdb=False)
-        result_flagged = calculate_imp_score(df_flagged, use_pdb=False)
+        result_clean = await calculate_imp_score(mock_client, df_clean, use_pdb=False)
+        result_flagged = await calculate_imp_score(mock_client, df_flagged, use_pdb=False)
 
         for i in range(len(result_clean)):
             assert result_flagged['IMP_Final_Score'].iloc[i] > result_clean['IMP_Final_Score'].iloc[i]
 
-    def test_no_pdb_sets_pdb_zero(self):
+    async def test_no_pdb_sets_pdb_zero(self, mock_client):
         """With use_pdb=False, PDB_Score and PDB_Contribution should be 0."""
         df = self._make_test_df()
-        result = calculate_imp_score(df, use_pdb=False)
+        result = await calculate_imp_score(mock_client, df, use_pdb=False)
         assert all(result['PDB_Score'] == 0.0)
         assert all(result['PDB_Contribution'] == 0.0)
 
-    def test_scores_in_valid_range(self):
+    async def test_scores_in_valid_range(self, mock_client):
         """All final scores should be in [0, 1]."""
         df = self._make_test_df()
-        result = calculate_imp_score(df, use_pdb=False)
+        result = await calculate_imp_score(mock_client, df, use_pdb=False)
         assert all(result['IMP_Final_Score'] >= 0.0)
         assert all(result['IMP_Final_Score'] <= 1.0)
 
-    def test_qed_multiplier_still_works(self):
+    async def test_qed_multiplier_still_works(self, mock_client):
         """QED multiplier formula should still be 0.75 + 0.25 * QED."""
         df = self._make_test_df()
         df['QED'] = [0.0, 0.5, 1.0]
-        result = calculate_imp_score(df, use_pdb=False)
+        result = await calculate_imp_score(mock_client, df, use_pdb=False)
         assert abs(result['QED_Multiplier'].iloc[0] - 0.75) < 0.001
         assert abs(result['QED_Multiplier'].iloc[1] - 0.875) < 0.001
         assert abs(result['QED_Multiplier'].iloc[2] - 1.0) < 0.001
 
-    def test_base_score_formula(self):
+    async def test_base_score_formula(self, mock_client):
         """Base score should equal sum of weighted components (verifiable with known inputs)."""
         df = self._make_test_df()
         df['QED'] = [1.0, 1.0, 1.0]
-        result = calculate_imp_score(df, use_pdb=False)
+        result = await calculate_imp_score(mock_client, df, use_pdb=False)
 
         for i in range(len(result)):
             expected = (
@@ -688,20 +699,20 @@ class TestEfficiencyOutlierScoreMissingMetrics:
 
 
 class TestCalculateImpScoreMissingColumns:
-    """Tests for missing required columns in calculate_imp_score."""
+    """Tests for missing required columns in calculate_imp_score (async)."""
 
-    def test_missing_smiles_raises(self):
+    async def test_missing_smiles_raises(self, mock_client):
         df = pd.DataFrame({
             'SEI': [10], 'BEI': [25], 'NSEI': [2], 'NBEI': [0.35],
             'Angle_SEI_BEI': [45], 'Modulus_SEI_BEI': [30], 'QED': [1.0],
         })
         with pytest.raises(ValueError, match="Missing required columns"):
-            calculate_imp_score(df, use_pdb=False)
+            await calculate_imp_score(mock_client, df, use_pdb=False)
 
-    def test_missing_all_raises(self):
+    async def test_missing_all_raises(self, mock_client):
         df = pd.DataFrame({'x': [1]})
         with pytest.raises(ValueError, match="Missing required columns"):
-            calculate_imp_score(df, use_pdb=False)
+            await calculate_imp_score(mock_client, df, use_pdb=False)
 
     def test_phase1_missing_columns_raises(self):
         df = pd.DataFrame({'SEI': [10], 'BEI': [25]})
@@ -834,10 +845,10 @@ class TestGoldenFixtures:
         rows = [c["input"] for c in golden_compounds]
         return pd.DataFrame(rows)
 
-    def test_golden_scores_match(self, golden_compounds):
+    async def test_golden_scores_match(self, golden_compounds, mock_client):
         """All 10 golden compounds produce expected scores to 4dp when run as full cohort."""
         df = self._build_golden_df(golden_compounds)
-        result = calculate_imp_score(df, use_pdb=False)
+        result = await calculate_imp_score(mock_client, df, use_pdb=False)
         result = add_imp_score_interpretation(result)
 
         numeric_keys = [
@@ -855,10 +866,10 @@ class TestGoldenFixtures:
                     f"Compound {i} ({compound['name']}): {key} expected {exp_val}, got {act_val}"
                 )
 
-    def test_golden_classifications_match(self, golden_compounds):
+    async def test_golden_classifications_match(self, golden_compounds, mock_client):
         """IMP_Classification strings match expected for all 10 compounds."""
         df = self._build_golden_df(golden_compounds)
-        result = calculate_imp_score(df, use_pdb=False)
+        result = await calculate_imp_score(mock_client, df, use_pdb=False)
         result = add_imp_score_interpretation(result)
 
         valid_tiers = {"Exceptional IMP", "Strong IMP", "Moderate IMP", "Weak IMP", "Not IMP"}
@@ -870,23 +881,23 @@ class TestGoldenFixtures:
             )
             assert actual in valid_tiers
 
-    def test_qed_zero_multiplier_floor(self, golden_compounds):
+    async def test_qed_zero_multiplier_floor(self, golden_compounds, mock_client):
         """Compound with QED=0 has QED_Multiplier == 0.75."""
         df = self._build_golden_df(golden_compounds)
-        result = calculate_imp_score(df, use_pdb=False)
+        result = await calculate_imp_score(mock_client, df, use_pdb=False)
         # Index 5 is QED=0 edge
         assert result["QED_Multiplier"].iloc[5] == pytest.approx(0.75, abs=0.0001)
 
-    def test_qed_one_multiplier_ceiling(self, golden_compounds):
+    async def test_qed_one_multiplier_ceiling(self, golden_compounds, mock_client):
         """Compound with QED=1 has QED_Multiplier == 1.0."""
         df = self._build_golden_df(golden_compounds)
-        result = calculate_imp_score(df, use_pdb=False)
+        result = await calculate_imp_score(mock_client, df, use_pdb=False)
         # Index 6 is QED=1 edge
         assert result["QED_Multiplier"].iloc[6] == pytest.approx(1.0, abs=0.0001)
 
 
 class TestPDBEvidenceScore:
-    """Tests for calculate_pdb_evidence_score paths."""
+    """Tests for calculate_pdb_evidence_score paths (async)."""
 
     def _make_pdb_df(self, n=2):
         """Create minimal DataFrame for PDB tests."""
@@ -896,18 +907,18 @@ class TestPDBEvidenceScore:
             "BEI": [25.0, 30.0][:n],
         })
 
-    def test_pdb_disabled_returns_zeros(self):
+    async def test_pdb_disabled_returns_zeros(self, mock_client):
         """With use_pdb=False, PDB_Score is 0.0 for all rows."""
         df = self._make_pdb_df()
-        result = calculate_pdb_evidence_score(df, use_pdb=False)
+        result = await calculate_pdb_evidence_score(mock_client, df, use_pdb=False)
         assert all(result["PDB_Score"] == 0.0)
         assert all(result["PDB_Num_Structures"] == 0)
         assert all(result["PDB_IDs"] == "")
 
-    @patch("backend.modules.pdb_client.get_pdb_evidence_score")
-    def test_pdb_enabled_with_mock(self, mock_pdb):
+    @patch("backend.modules.imp_scoring._fetch_pdb_for_compound", new_callable=AsyncMock)
+    async def test_pdb_enabled_with_mock(self, mock_fetch, mock_client):
         """Mocked PDB returns valid scores."""
-        mock_pdb.return_value = {
+        mock_fetch.return_value = {
             "pdb_score": 0.8,
             "num_structures": 2,
             "num_high_quality": 1,
@@ -917,24 +928,15 @@ class TestPDBEvidenceScore:
             "resolutions": [1.5, 2.5],
         }
         df = self._make_pdb_df()
-        result = calculate_pdb_evidence_score(df, use_pdb=True)
+        result = await calculate_pdb_evidence_score(mock_client, df, use_pdb=True)
         for val in result["PDB_Score"]:
             assert val == pytest.approx(0.8, abs=0.001)
         assert all(result["PDB_Num_Structures"] == 2)
 
-    @patch("backend.modules.imp_scoring.logger")
-    def test_pdb_import_failure(self, mock_logger):
-        """When pdb_client import fails, returns zero PDB scores."""
-        df = self._make_pdb_df()
-        with patch.dict("sys.modules", {"backend.modules.pdb_client": None}):
-            # Force the import to fail by making the module None
-            result = calculate_pdb_evidence_score(df, use_pdb=True)
-        assert all(result["PDB_Score"] == 0.0)
-
-    @patch("backend.modules.pdb_client.get_pdb_evidence_score")
-    def test_pdb_progress_callback(self, mock_pdb):
+    @patch("backend.modules.imp_scoring._fetch_pdb_for_compound", new_callable=AsyncMock)
+    async def test_pdb_progress_callback(self, mock_fetch, mock_client):
         """Progress callback is called during PDB scoring."""
-        mock_pdb.return_value = {
+        mock_fetch.return_value = {
             "pdb_score": 0.5,
             "num_structures": 1,
             "num_high_quality": 1,
@@ -945,33 +947,44 @@ class TestPDBEvidenceScore:
         }
         callback = MagicMock()
         df = self._make_pdb_df()
-        calculate_pdb_evidence_score(df, use_pdb=True, progress_callback=callback)
+        await calculate_pdb_evidence_score(mock_client, df, use_pdb=True, progress_callback=callback)
         assert callback.call_count >= 1
 
-    @patch("backend.modules.pdb_client.get_pdb_evidence_score")
-    def test_pdb_transient_retry(self, mock_pdb):
-        """Retries on transient errors and returns fallback on failure."""
-        mock_pdb.side_effect = ConnectionError("connection timeout")
+    @patch("backend.modules.imp_scoring._fetch_pdb_for_compound", new_callable=AsyncMock)
+    async def test_pdb_transient_retry(self, mock_fetch, mock_client):
+        """Exception in PDB fetch falls back to zero score."""
+        mock_fetch.side_effect = ConnectionError("connection timeout")
         df = self._make_pdb_df(n=1)
-        result = calculate_pdb_evidence_score(df, use_pdb=True)
-        # After retries exhausted, falls back to zero
+        result = await calculate_pdb_evidence_score(mock_client, df, use_pdb=True)
+        # After exception, falls back to zero
         assert result["PDB_Score"].iloc[0] == pytest.approx(0.0, abs=0.001)
 
 
 class TestCreateDetailedPdbSummary:
-    """Tests for create_detailed_pdb_summary."""
+    """Tests for create_detailed_pdb_summary (reads from _pdb_details_cache)."""
 
-    @patch("backend.modules.pdb_client.classify_resolution_quality")
-    @patch("backend.modules.pdb_client.get_structure_details")
-    def test_basic_detail_fetch(self, mock_details, mock_quality):
-        """Mocked get_structure_details returns valid DataFrame."""
-        mock_details.return_value = {
+    @patch("backend.modules.imp_scoring._pdb_details_cache", {
+        "1ABC": {
+            "pdb_id": "1ABC",
             "title": "Test Structure",
             "resolution": 1.8,
             "experimental_method": "X-RAY DIFFRACTION",
             "uniprot_ids": ["P12345"],
-        }
-        mock_quality.return_value = ("***", "High")
+            "url": "https://www.rcsb.org/structure/1ABC",
+            "doi": "10.1234/test",
+        },
+        "2DEF": {
+            "pdb_id": "2DEF",
+            "title": "Another Structure",
+            "resolution": 2.5,
+            "experimental_method": "X-RAY DIFFRACTION",
+            "uniprot_ids": ["P67890"],
+            "url": "https://www.rcsb.org/structure/2DEF",
+            "doi": "10.5678/test",
+        },
+    })
+    def test_basic_detail_fetch(self):
+        """Cache-based create_detailed_pdb_summary returns valid DataFrame."""
         df = pd.DataFrame({
             "PDB_IDs": ["1ABC,2DEF"],
             "ChEMBL_ID": ["CHEMBL25"],
@@ -1001,11 +1014,9 @@ class TestCreateDetailedPdbSummary:
         result = create_detailed_pdb_summary(df)
         assert result.empty
 
-    @patch("backend.modules.pdb_client.classify_resolution_quality")
-    @patch("backend.modules.pdb_client.get_structure_details")
-    def test_api_error_produces_na_fallback(self, mock_details, mock_quality):
-        """Errors produce N/A fallback entries."""
-        mock_details.side_effect = Exception("API error")
+    @patch("backend.modules.imp_scoring._pdb_details_cache", {})
+    def test_missing_cache_produces_na_fallback(self):
+        """When PDB IDs not in cache, produces N/A fallback entries."""
         df = pd.DataFrame({
             "PDB_IDs": ["1ABC"],
             "ChEMBL_ID": ["CHEMBL25"],
@@ -1106,7 +1117,7 @@ class TestGetImpScoreBreakdown:
 
 
 class TestEdgeCases:
-    """Edge case tests for IMP scoring robustness."""
+    """Edge case tests for IMP scoring robustness (async)."""
 
     def _make_5row_df(self, **overrides):
         """Create a 5-row DataFrame with one row overridden for edge case testing."""
@@ -1133,7 +1144,7 @@ class TestEdgeCases:
                 data[key][0] = val
         return pd.DataFrame(data)
 
-    def test_single_row_dataframe(self):
+    async def test_single_row_dataframe(self, mock_client):
         """Single compound does not crash, scores are valid 0-1 or NaN."""
         df = pd.DataFrame({
             "SEI": [15.0], "BEI": [25.0], "NSEI": [2.0], "NBEI": [0.35],
@@ -1143,11 +1154,11 @@ class TestEdgeCases:
             "Redox_Reactive": [0], "Fluorescence_Interference": [0],
             "Thiol_Reactive": [0],
         })
-        result = calculate_imp_score(df, use_pdb=False)
+        result = await calculate_imp_score(mock_client, df, use_pdb=False)
         score = result["IMP_Final_Score"].iloc[0]
         assert np.isnan(score) or (0.0 <= score <= 1.0)
 
-    def test_all_nan_metrics(self):
+    async def test_all_nan_metrics(self, mock_client):
         """All NaN SEI/BEI/NSEI/NBEI handles gracefully."""
         df = self._make_5row_df()
         df.loc[0, "SEI"] = np.nan
@@ -1155,7 +1166,7 @@ class TestEdgeCases:
         df.loc[0, "NSEI"] = np.nan
         df.loc[0, "NBEI"] = np.nan
         # Should not crash
-        result = calculate_imp_score(df, use_pdb=False)
+        result = await calculate_imp_score(mock_client, df, use_pdb=False)
         assert len(result) == 5
 
     def test_boundary_score_0_3(self):
@@ -1183,25 +1194,25 @@ class TestEdgeCases:
         result = interpret_imp_score(float("nan"))
         assert result["classification"] == "Invalid"
 
-    def test_negative_modulus(self):
+    async def test_negative_modulus(self, mock_client):
         """Negative Modulus_SEI_BEI does not crash."""
         df = self._make_5row_df()
         df.loc[0, "Modulus_SEI_BEI"] = -5.0
-        result = calculate_imp_score(df, use_pdb=False)
+        result = await calculate_imp_score(mock_client, df, use_pdb=False)
         assert len(result) == 5
 
-    def test_angle_greater_than_90(self):
+    async def test_angle_greater_than_90(self, mock_client):
         """Angle > 90 does not crash."""
         df = self._make_5row_df()
         df.loc[0, "Angle_SEI_BEI"] = 120.0
-        result = calculate_imp_score(df, use_pdb=False)
+        result = await calculate_imp_score(mock_client, df, use_pdb=False)
         assert len(result) == 5
 
-    def test_angle_negative(self):
+    async def test_angle_negative(self, mock_client):
         """Angle < 0 does not crash."""
         df = self._make_5row_df()
         df.loc[0, "Angle_SEI_BEI"] = -10.0
-        result = calculate_imp_score(df, use_pdb=False)
+        result = await calculate_imp_score(mock_client, df, use_pdb=False)
         assert len(result) == 5
 
 

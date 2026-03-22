@@ -89,7 +89,7 @@ class TestActiveJobResponseSchema:
     def test_valid_active_job_response(self):
         """Test valid active job response."""
         from backend.models.schemas import ActiveJobResponse
-        from backend.models.database import JobStatus
+        from backend.models.enums import JobStatus
 
         response = ActiveJobResponse(
             id="test-123",
@@ -100,25 +100,6 @@ class TestActiveJobResponseSchema:
         )
         assert response.id == "test-123"
         assert response.progress == 45.5
-
-
-class TestExecutorStatsSchema:
-    """Tests for ExecutorStats schema."""
-
-    def test_valid_executor_stats(self):
-        """Test valid executor stats."""
-        from backend.models.schemas import ExecutorStats
-
-        stats = ExecutorStats(
-            max_workers=2,
-            active_jobs=1,
-            has_capacity=True,
-            job_ids=["job-1"]
-        )
-        assert stats.max_workers == 2
-        assert stats.active_jobs == 1
-        assert stats.has_capacity is True
-        assert "job-1" in stats.job_ids
 
 
 class TestSMILESValidation:

@@ -96,7 +96,15 @@ def configure_logging() -> None:
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
+        structlog.processors.CallsiteParameterAdder(  # D-10: auto-inject callsite info
+            [
+                structlog.processors.CallsiteParameter.MODULE,
+                structlog.processors.CallsiteParameter.FUNC_NAME,
+                structlog.processors.CallsiteParameter.LINENO,
+            ]
+        ),
         structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,  # D-11: structures tracebacks as 'exception' key
         structlog.processors.UnicodeDecoder(),
     ]
 

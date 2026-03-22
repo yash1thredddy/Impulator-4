@@ -17,7 +17,7 @@ def _make_compound(session, **overrides):
     Returns a SimpleNamespace (not ORM object) to avoid DetachedInstanceError
     when the session is closed after creation.
     """
-    from backend.models.database import Compound
+    from backend.models.compound import Compound
 
     defaults = {
         "entry_id": str(uuid.uuid4()),
@@ -25,7 +25,7 @@ def _make_compound(session, **overrides):
         "smiles": "CCO",
         "inchikey": "LFQSCWFLJHTTHZ-UHFFFAOYSA-N",
         "similarity_threshold": 90,
-        "activity_types": "IC50",
+        "activity_types": ["IC50"],
         "processed_at": datetime.now(timezone.utc),
     }
     defaults.update(overrides)
@@ -213,7 +213,7 @@ class TestCompoundVersionsEndpoint:
             compound_name="Compound_v1",
             inchikey=inchikey,
             similarity_threshold=90,
-            activity_types="IC50,Ki",
+            activity_types=["IC50", "Ki"],
             imp_score=0.75,
             qed=0.8,
             similar_compounds=15,

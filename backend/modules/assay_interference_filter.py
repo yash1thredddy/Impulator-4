@@ -72,7 +72,7 @@ polypharmacology rather than assay artifacts.
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 from rdkit import Chem
 from rdkit.Chem import FilterCatalog, rdMolDescriptors, Descriptors
@@ -182,10 +182,10 @@ FLUORESCENT_SMARTS = {
 # Pre-compile SMARTS patterns for performance (lazy-initialized cache)
 # =============================================================================
 
-_compiled_patterns: Dict[str, Dict[str, Chem.Mol]] = {}
+_compiled_patterns: dict[str, dict[str, Chem.Mol]] = {}
 
 
-def _get_compiled_patterns(category: str) -> Dict[str, Chem.Mol]:
+def _get_compiled_patterns(category: str) -> dict[str, Chem.Mol]:
     """Get compiled SMARTS patterns for a category (cached).
 
     Args:
@@ -221,7 +221,7 @@ def _get_compiled_patterns(category: str) -> Dict[str, Chem.Mol]:
 # FilterCatalog cache (lazy-initialized)
 # =============================================================================
 
-_filter_catalogs: Dict[str, FilterCatalog.FilterCatalog] = {}
+_filter_catalogs: dict[str, FilterCatalog.FilterCatalog] = {}
 
 
 def _get_filter_catalog(catalog_type: str) -> FilterCatalog.FilterCatalog:
@@ -281,13 +281,13 @@ class InterferenceFlags:
     nih: bool = False
 
     # Details for each flag
-    pains_details: List[str] = field(default_factory=list)
+    pains_details: list[str] = field(default_factory=list)
     aggregator_reason: str = ""
-    thiol_details: List[str] = field(default_factory=list)
-    redox_details: List[str] = field(default_factory=list)
-    fluorescence_details: List[str] = field(default_factory=list)
-    brenk_details: List[str] = field(default_factory=list)
-    nih_details: List[str] = field(default_factory=list)
+    thiol_details: list[str] = field(default_factory=list)
+    redox_details: list[str] = field(default_factory=list)
+    fluorescence_details: list[str] = field(default_factory=list)
+    brenk_details: list[str] = field(default_factory=list)
+    nih_details: list[str] = field(default_factory=list)
 
     @property
     def total_flags(self) -> int:
@@ -307,7 +307,7 @@ class InterferenceFlags:
         """Check if compound has no interference flags."""
         return self.total_flags == 0
 
-    def to_dict(self) -> Dict[str, int]:
+    def to_dict(self) -> dict[str, int]:
         """Convert to dictionary with integer flags (0/1) for DataFrame usage."""
         return {
             'PAINS': 1 if self.pains else 0,
@@ -319,7 +319,7 @@ class InterferenceFlags:
             'NIH': 1 if self.nih else 0,
         }
 
-    def to_detailed_dict(self) -> Dict[str, Any]:
+    def to_detailed_dict(self) -> dict[str, Any]:
         """Convert to detailed dictionary including reasons.
 
         All detail columns use consistent '_Details' suffix.
@@ -359,7 +359,7 @@ AGGREGATOR_MIN_LOGP = 3
 # PAINS Detection - RDKit FilterCatalog.PAINS
 # =============================================================================
 
-def check_pains_violations(mol: Chem.Mol) -> Tuple[bool, List[str]]:
+def check_pains_violations(mol: Chem.Mol) -> tuple[bool, list[str]]:
     """Check for PAINS using RDKit's built-in FilterCatalog.PAINS.
 
     Uses the peer-reviewed PAINS filter set (480 patterns) as published
@@ -400,7 +400,7 @@ def check_pains_violations(mol: Chem.Mol) -> Tuple[bool, List[str]]:
 # BRENK Filter Detection - RDKit FilterCatalog.BRENK
 # =============================================================================
 
-def check_brenk_alerts(mol: Chem.Mol) -> Tuple[bool, List[str]]:
+def check_brenk_alerts(mol: Chem.Mol) -> tuple[bool, list[str]]:
     """Check for BRENK filter alerts using RDKit's built-in FilterCatalog.BRENK.
 
     BRENK filter contains 104 unwanted substructures as published by
@@ -442,7 +442,7 @@ def check_brenk_alerts(mol: Chem.Mol) -> Tuple[bool, List[str]]:
 # NIH Filter Detection - RDKit FilterCatalog.NIH
 # =============================================================================
 
-def check_nih_alerts(mol: Chem.Mol) -> Tuple[bool, List[str]]:
+def check_nih_alerts(mol: Chem.Mol) -> tuple[bool, list[str]]:
     """Check for NIH filter alerts using RDKit's built-in FilterCatalog.NIH.
 
     NIH filter identifies compounds with problematic functional groups
@@ -483,7 +483,7 @@ def check_nih_alerts(mol: Chem.Mol) -> Tuple[bool, List[str]]:
 # Aggregation Risk Detection - Shoichet Lab Heuristics
 # =============================================================================
 
-def check_aggregator_risk(mol: Chem.Mol) -> Tuple[bool, str]:
+def check_aggregator_risk(mol: Chem.Mol) -> tuple[bool, str]:
     """Detect aggregation risk using published Shoichet laboratory heuristics.
 
     Risk factors (ALL must be met):
@@ -543,7 +543,7 @@ def check_aggregator_risk(mol: Chem.Mol) -> Tuple[bool, str]:
 # THIOL-REACTIVE Detection - Dahlin HTS electrophile SMARTS
 # =============================================================================
 
-def check_thiol_reactive(mol: Chem.Mol) -> Tuple[bool, List[str]]:
+def check_thiol_reactive(mol: Chem.Mol) -> tuple[bool, list[str]]:
     """Check for thiol-reactive electrophiles using published HTS interference patterns.
 
     Detects electrophilic chemotypes causing HTS interference:
@@ -587,7 +587,7 @@ def check_thiol_reactive(mol: Chem.Mol) -> Tuple[bool, List[str]]:
 # REDOX-ACTIVE Detection - Quinone/Catechol SMARTS
 # =============================================================================
 
-def check_redox_active(mol: Chem.Mol) -> Tuple[bool, List[str]]:
+def check_redox_active(mol: Chem.Mol) -> tuple[bool, list[str]]:
     """Check for redox-active compounds using published SMARTS patterns.
 
     Detects compounds that generate H2O2/ROS via redox cycling:
@@ -629,7 +629,7 @@ def check_redox_active(mol: Chem.Mol) -> Tuple[bool, List[str]]:
 # AUTOFLUORESCENCE Detection - Fluorophore SMARTS
 # =============================================================================
 
-def check_fluorescence_interference(mol: Chem.Mol) -> Tuple[bool, List[str]]:
+def check_fluorescence_interference(mol: Chem.Mol) -> tuple[bool, list[str]]:
     """Check for autofluorescent scaffolds using published SMARTS patterns.
 
     Detects common fluorophore scaffolds:
@@ -735,7 +735,7 @@ def get_interference_flags_from_smiles(smiles: str) -> InterferenceFlags:
         return InterferenceFlags()
 
 
-def get_interference_summary(flags: InterferenceFlags) -> Dict[str, Any]:
+def get_interference_summary(flags: InterferenceFlags) -> dict[str, Any]:
     """Get a summary of interference flags for display.
 
     Args:
@@ -752,7 +752,7 @@ def get_interference_summary(flags: InterferenceFlags) -> Dict[str, Any]:
     }
 
 
-def get_all_filter_matches(mol: Chem.Mol) -> Dict[str, List[str]]:
+def get_all_filter_matches(mol: Chem.Mol) -> dict[str, list[str]]:
     """Get all matches from all available RDKit FilterCatalogs for a molecule.
 
     Args:
@@ -999,6 +999,6 @@ def get_methodology_doi(flag_name: str) -> str:
     return ""
 
 
-def get_all_methodology_references() -> Dict[str, Dict[str, Any]]:
+def get_all_methodology_references() -> dict[str, dict[str, Any]]:
     """Get all methodology references for documentation."""
     return METHODOLOGY_REFERENCES.copy()

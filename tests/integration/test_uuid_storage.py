@@ -174,15 +174,16 @@ class TestCompoundEntryWithEntryId:
         """Create an in-memory test database session."""
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
-        from backend.core.database import Base
-        # Import models BEFORE create_all to register them with Base
-        from backend.models.database import Job, Compound  # noqa: F401
+        from backend.models._pg_base import PGBase
+        from backend.models.job import Job  # noqa: F401
+        from backend.models.compound import Compound  # noqa: F401
+        from backend.models.deleted_compound import DeletedCompound  # noqa: F401
 
         engine = create_engine(
             "sqlite:///:memory:",
             connect_args={"check_same_thread": False}
         )
-        Base.metadata.create_all(bind=engine)
+        PGBase.metadata.create_all(bind=engine)
         Session = sessionmaker(bind=engine)
         session = Session()
         yield session
@@ -191,7 +192,7 @@ class TestCompoundEntryWithEntryId:
 
     def test_create_compound_with_entry_id(self, db_session):
         """Test creating a compound with entry_id."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
 
         entry_id = str(uuid.uuid4())
         compound = Compound(
@@ -213,7 +214,7 @@ class TestCompoundEntryWithEntryId:
 
     def test_compound_entry_id_unique(self, db_session):
         """Test that entry_id is unique."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
         from sqlalchemy.exc import IntegrityError
 
         entry_id = str(uuid.uuid4())
@@ -239,7 +240,7 @@ class TestCompoundEntryWithEntryId:
 
     def test_compound_with_storage_path(self, db_session):
         """Test compound with UUID-based storage path."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
         from backend.core.azure_sync import get_storage_path_from_entry_id
 
         entry_id = str(uuid.uuid4())
@@ -263,7 +264,7 @@ class TestCompoundEntryWithEntryId:
 
     def test_duplicate_compound_with_different_entry_id(self, db_session):
         """Test that same compound name can exist with different entry_ids."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
 
         # Create two compounds with same name but different entry_ids
         entry_id1 = str(uuid.uuid4())
@@ -304,15 +305,16 @@ class TestJobServiceCompoundUpdate:
         """Create an in-memory test database session."""
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
-        from backend.core.database import Base
-        # Import models BEFORE create_all to register them with Base
-        from backend.models.database import Job, Compound  # noqa: F401
+        from backend.models._pg_base import PGBase
+        from backend.models.job import Job  # noqa: F401
+        from backend.models.compound import Compound  # noqa: F401
+        from backend.models.deleted_compound import DeletedCompound  # noqa: F401
 
         engine = create_engine(
             "sqlite:///:memory:",
             connect_args={"check_same_thread": False}
         )
-        Base.metadata.create_all(bind=engine)
+        PGBase.metadata.create_all(bind=engine)
         Session = sessionmaker(bind=engine)
         session = Session()
         yield session
@@ -327,7 +329,7 @@ class TestJobServiceCompoundUpdate:
 
     def test_update_compound_entry_creates_new(self, service, db_session):
         """Test that _update_compound_entry creates new entry."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
 
         entry_id = str(uuid.uuid4())
         result_summary = {
@@ -357,7 +359,7 @@ class TestJobServiceCompoundUpdate:
 
     def test_update_compound_entry_updates_existing(self, service, db_session):
         """Test that _update_compound_entry updates existing entry."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
         from backend.services.job_service import generate_inchikey
 
         smiles = "CCO"
@@ -402,7 +404,7 @@ class TestJobServiceCompoundUpdate:
 
     def test_update_compound_entry_creates_duplicate(self, service, db_session):
         """Test that _update_compound_entry creates duplicate entry when requested."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
         from backend.services.job_service import generate_inchikey
 
         smiles = "CCO"

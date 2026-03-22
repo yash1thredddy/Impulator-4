@@ -97,7 +97,7 @@ class TestConcurrentJobCreation:
 
             # Verify database integrity - jobs may exist even if response failed
             # (SQLite commits can succeed but refresh can fail under concurrency)
-            from backend.models.database import Job
+            from backend.models.job import Job
             session = TestSessionLocal()
             try:
                 db_jobs = session.query(Job).all()
@@ -120,7 +120,7 @@ class TestConcurrentJobCreation:
     def test_parallel_progress_updates(self, test_engine, mock_azure):
         """Test that concurrent progress updates don't lose data."""
         from backend.services.job_service import job_service
-        from backend.models.database import JobType, JobStatus
+        from backend.models.job import JobType, JobStatus
         from backend.core import database as db_module
 
         # Setup test database
@@ -252,32 +252,3 @@ class TestRateLimiterUnderLoad:
         assert session2_successes == 5, f"Session 2 results: {results_session2}"
 
 
-class TestDatabaseConcurrencySafety:
-    """Tests for database concurrency safety."""
-
-    def test_write_lock_prevents_corruption(self, test_engine, mock_azure):
-        """Test that write lock prevents data corruption."""
-        from backend.core import database as db_module
-        from backend.services.job_service import _db_write_lock
-
-        TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
-        db_module.engine = test_engine
-        db_module.SessionLocal = TestSessionLocal
-
-        # Verify write lock exists
-        assert _db_write_lock is not None
-        assert isinstance(_db_write_lock, (type(threading.Lock()), type(threading.RLock())))
-
-        # Test acquiring and releasing lock
-        acquired = _db_write_lock.acquire(blocking=False)
-        assert acquired, "Could not acquire write lock"
-        _db_write_lock.release()
-
-    def test_nullpool_creates_separate_connections(self, test_engine):
-        """Test that NullPool behavior creates separate connections."""
-        from backend.core.database import engine as real_engine
-
-        # The real engine should use NullPool
-        assert real_engine.pool.__class__.__name__ == 'NullPool' or \
-               real_engine.pool.__class__.__name__ == 'StaticPool', \
-               f"Engine uses {real_engine.pool.__class__.__name__}"

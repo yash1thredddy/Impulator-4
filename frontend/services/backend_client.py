@@ -5,7 +5,6 @@ Provides type-safe access to backend API with retry logic and error handling.
 """
 
 import json
-import time
 import logging
 import threading
 import contextvars
@@ -13,6 +12,7 @@ from dataclasses import dataclass
 from typing import Optional, Dict, List, Any
 
 import requests
+import streamlit as st
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -134,7 +134,8 @@ class ImpulatorAPIClient:
         try:
             response = self._request('GET', '/api/v1/health')
             return response.status_code == 200
-        except Exception:
+        except requests.exceptions.RequestException as e:
+            logger.debug(f"Health check failed: {e}")
             return False
 
     # Job Management
@@ -173,7 +174,7 @@ class ImpulatorAPIClient:
         try:
             response = self._request('POST', '/api/v1/jobs', json=payload)
 
-            if response.status_code == 201:
+            if response.status_code in (200, 201):
                 try:
                     data = response.json()
                 except (json.JSONDecodeError, ValueError) as e:
@@ -398,7 +399,7 @@ class ImpulatorAPIClient:
         try:
             response = self._request('POST', '/api/v1/jobs/resolve-duplicate', json=payload)
 
-            if response.status_code == 201:
+            if response.status_code in (200, 201):
                 try:
                     data = response.json()
                 except (json.JSONDecodeError, ValueError) as e:
@@ -460,13 +461,21 @@ class ImpulatorAPIClient:
         try:
             response = self._request('POST', '/api/v1/jobs/batch', json=payload)
 
-            if response.status_code == 201:
+            if response.status_code in (200, 201):
                 try:
                     data = response.json()
-                    return {"success": True, **data}
                 except (json.JSONDecodeError, ValueError) as e:
                     logger.error(f"Invalid JSON in batch job response: {e}")
                     return {"success": False, "error": "Invalid response from server"}
+
+                # Surface failed compounds if present
+                failed = data.get("failed", [])
+                if failed:
+                    logger.warning(
+                        f"Batch submission had {len(failed)} failures: "
+                        f"{[f.get('compound_name', 'unknown') for f in failed[:5]]}"
+                    )
+                return {"success": True, **data}
             else:
                 try:
                     error = response.json().get('detail', f"HTTP {response.status_code}")
@@ -563,11 +572,11 @@ class ImpulatorAPIClient:
         except requests.exceptions.RequestException as e:
             return JobResponse(success=False, error=str(e))
 
-    def get_active_jobs(self) -> List[dict]:
+    def get_active_jobs(self) -> Optional[List[dict]]:
         """Get list of active jobs.
 
         Returns:
-            List of active job dictionaries
+            List of active job dictionaries, or None on error
         """
         try:
             response = self._request('GET', '/api/v1/jobs/active')
@@ -578,11 +587,13 @@ class ImpulatorAPIClient:
                     return data if isinstance(data, list) else []
                 except (json.JSONDecodeError, ValueError):
                     logger.warning("Invalid JSON in active jobs response")
-                    return []
-            return []
+                    return None
+            logger.debug(f"get_active_jobs returned HTTP {response.status_code}")
+            return None
 
-        except requests.exceptions.RequestException:
-            return []
+        except requests.exceptions.RequestException as e:
+            logger.debug(f"get_active_jobs request failed: {e}")
+            return None
 
     def cancel_job(self, job_id: str) -> JobResponse:
         """Cancel a running job.
@@ -625,46 +636,6 @@ class ImpulatorAPIClient:
             return JobResponse(success=False, error=str(e))
 
     # Compound Management
-    def list_compounds(
-        self,
-        page: int = 1,
-        per_page: int = None
-    ) -> CompoundListResponse:
-        """List processed compounds.
-
-        Args:
-            page: Page number (1-indexed)
-            per_page: Items per page
-
-        Returns:
-            CompoundListResponse with compound list
-        """
-        per_page = per_page or config.RESULTS_PER_PAGE
-
-        try:
-            response = self._request(
-                'GET',
-                '/api/v1/compounds',
-                params={'page': page, 'page_size': per_page}
-            )
-
-            if response.status_code == 200:
-                try:
-                    data = response.json()
-                except (json.JSONDecodeError, ValueError) as e:
-                    logger.error(f"Invalid JSON in list compounds response: {e}")
-                    return CompoundListResponse(success=False, error="Invalid response from server")
-                return CompoundListResponse(
-                    success=True,
-                    compounds=data.get('items', []),
-                    total=data.get('total', 0)
-                )
-            else:
-                return CompoundListResponse(success=False, error=f"HTTP {response.status_code}")
-
-        except requests.exceptions.RequestException as e:
-            return CompoundListResponse(success=False, error=str(e))
-
     def get_compounds_from_db(
         self,
         page: int = 1,
@@ -821,13 +792,24 @@ class ImpulatorAPIClient:
             if response.status_code == 200:
                 try:
                     data = response.json()
+                except (json.JSONDecodeError, ValueError):
+                    return JobResponse(success=True, message="Compounds deleted")
+
+                total_failed = data.get("total_failed", 0)
+                failed_list = data.get("failed", [])
+                if total_failed > 0:
+                    failed_names = [f.get("compound_name", f.get("entry_id", "unknown")) for f in failed_list]
                     return JobResponse(
                         success=True,
                         message=data.get("message", "Compounds deleted"),
                         data=data,
+                        error=f"{total_failed} compound(s) failed to delete: {', '.join(failed_names[:5])}{'...' if len(failed_names) > 5 else ''}",
                     )
-                except (json.JSONDecodeError, ValueError):
-                    return JobResponse(success=True, message="Compounds deleted")
+                return JobResponse(
+                    success=True,
+                    message=data.get("message", "Compounds deleted"),
+                    data=data,
+                )
             else:
                 try:
                     error = response.json().get('detail', f"HTTP {response.status_code}")
@@ -862,71 +844,6 @@ class ImpulatorAPIClient:
 
         except requests.exceptions.RequestException as e:
             return JobResponse(success=False, error=str(e))
-
-    def poll_job_until_complete(
-        self,
-        job_id: str,
-        callback=None,
-        timeout: int = None
-    ) -> JobResponse:
-        """Poll job until completion or timeout.
-
-        Args:
-            job_id: Job ID to poll
-            callback: Optional callback(progress, message) for updates
-            timeout: Timeout in seconds (default from config)
-
-        Returns:
-            Final JobResponse
-        """
-        timeout = timeout or config.JOB_TIMEOUT_SECONDS
-        start_time = time.time()
-        poll_interval = config.JOB_POLL_INTERVAL_SECONDS
-
-        while True:
-            elapsed = time.time() - start_time
-            if elapsed > timeout:
-                return JobResponse(
-                    success=False,
-                    job_id=job_id,
-                    error=f"Job timed out after {timeout} seconds"
-                )
-
-            response = self.get_job_status(job_id)
-
-            if not response.success:
-                return response
-
-            if callback:
-                callback(response.progress, response.message)
-
-            if response.status == 'completed':
-                return response
-            elif response.status == 'failed':
-                failure_data = response.data or {}
-                failure_reason = (
-                    response.error
-                    or failure_data.get('error_message')
-                    or failure_data.get('detail')
-                    or failure_data.get('error')
-                    or 'Job failed'
-                )
-                return JobResponse(
-                    success=False,
-                    job_id=job_id,
-                    status='failed',
-                    error=failure_reason,
-                    data=failure_data
-                )
-            elif response.status == 'cancelled':
-                return JobResponse(
-                    success=False,
-                    job_id=job_id,
-                    status='cancelled',
-                    error='Job was cancelled'
-                )
-
-            time.sleep(poll_interval)
 
     # PubChem InChIKey Resolution
 
@@ -1039,3 +956,28 @@ def set_session_id(session_id: str) -> None:
     """
     _session_id_var.set(session_id)
     logger.debug(f"API client session ID set: {session_id[:8]}...")
+
+
+@st.cache_data(ttl=60)
+def get_compounds_cached(
+    page: int = 1,
+    per_page: int = 50,
+    search: Optional[str] = None,
+    include_duplicates: bool = False,
+) -> CompoundListResponse:
+    """Cached wrapper around ImpulatorAPIClient.get_compounds_from_db.
+
+    Uses st.cache_data with a 60-second TTL to reduce redundant API calls
+    on the compound list page. Call ``get_compounds_cached.clear()`` to
+    invalidate (e.g. after a job completes).
+
+    Note: Job-related endpoints are NOT cached (per D-02). Version data
+    stays in session_state (per D-03).
+    """
+    client = get_api_client()
+    return client.get_compounds_from_db(
+        page=page,
+        per_page=per_page,
+        search=search,
+        include_duplicates=include_duplicates,
+    )

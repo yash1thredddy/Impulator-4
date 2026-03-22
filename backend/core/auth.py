@@ -10,7 +10,6 @@ import hmac
 import logging
 from fastapi import Header, HTTPException, Security
 from fastapi.security import APIKeyHeader
-from typing import Optional
 
 from backend.config import settings
 
@@ -26,7 +25,7 @@ SESSION_ID_PATTERN = re.compile(
 )
 
 
-def validate_session_id(x_session_id: Optional[str] = Header(None, alias="X-Session-ID")) -> str:
+def validate_session_id(x_session_id: str | None = Header(None, alias="X-Session-ID")) -> str:
     """Validate and return session ID.
 
     Ensures session ID is a valid UUID format to prevent injection.
@@ -61,7 +60,7 @@ def validate_session_id(x_session_id: Optional[str] = Header(None, alias="X-Sess
     return x_session_id
 
 
-def truncate_session_id(session_id: Optional[str]) -> str:
+def truncate_session_id(session_id: str | None) -> str:
     """Truncate session ID for safe logging.
 
     Args:
@@ -76,7 +75,7 @@ def truncate_session_id(session_id: Optional[str]) -> str:
 
 
 def verify_admin_api_key(
-    api_key: Optional[str] = Security(admin_api_key_header)
+    api_key: str | None = Security(admin_api_key_header)
 ) -> bool:
     """Verify admin API key for protected endpoints.
 
@@ -92,7 +91,7 @@ def verify_admin_api_key(
     Raises:
         HTTPException: If API key is missing, not configured, or invalid
     """
-    configured_key = settings.ADMIN_API_KEY
+    configured_key = settings.ADMIN_API_KEY.get_secret_value()
 
     # Check if admin key is configured
     if not configured_key:

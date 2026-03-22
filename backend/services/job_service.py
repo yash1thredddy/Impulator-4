@@ -1,21 +1,24 @@
 """
 Job service for CRUD operations and state management.
 Handles job creation, progress updates, and completion tracking.
+
+Rewritten for Postgres: direct column access, no JSON serialization,
+parent_id versioning, no SYNC_PENDING, no sync_db_to_azure.
 """
-import json
+import asyncio
 import re
 import uuid
 import logging
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any, Callable, Union
+from typing import Any, Callable
 
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError, InvalidRequestError
 
-from backend.models.database import Compound, Job, JobStatus, JobType
+from backend.models.job import Job
+from backend.models.compound import Compound
+from backend.models.enums import JobStatus, JobType
 from backend.models.schemas import (
-    InputParams,
-    ResultSummary,
     JobResponse,
     DuplicateFoundResponse,
     ExistingCompoundInfo,
@@ -37,10 +40,10 @@ from backend.models.schemas import (
     CheckAvailabilityBatchRequest,
     DeleteResponse,
 )
-from backend.core.azure_sync import sync_db_to_azure, delete_result_from_azure_by_entry_id
+from backend.core.azure_sync import delete_result_from_azure_by_entry_id
 from backend.config import settings
 from backend.core.metrics import metrics
-from backend.repositories import job_repo, compound_repo, _db_write_lock
+from backend.repositories import job_repo, compound_repo
 
 logger = logging.getLogger(__name__)
 
@@ -48,21 +51,21 @@ logger = logging.getLogger(__name__)
 _DEFAULT_ACTIVITY_TYPES = "AC50,EC50,GI50,IC50,Kd,Ki,MIC"
 
 
-def _normalize_activity_types(activity_types: Optional[List[str]]) -> str:
-    """Normalize a list of activity types to sorted comma-separated string for comparison."""
+def _normalize_activity_types_list(activity_types: list[str] | None) -> list[str]:
+    """Normalize a list of activity types to a sorted list for comparison."""
     if not activity_types:
-        return _DEFAULT_ACTIVITY_TYPES
-    return ",".join(sorted(at.strip() for at in activity_types))
+        return sorted(_DEFAULT_ACTIVITY_TYPES.split(","))
+    return sorted(at.strip() for at in activity_types)
 
 
-def _normalize_activity_types_str(stored: Optional[str]) -> str:
-    """Normalize a stored comma-separated activity_types string for comparison."""
+def _normalize_activity_types_str(stored: list[str] | None) -> str:
+    """Normalize stored activity_types list to sorted comma-separated string for display."""
     if not stored:
         return _DEFAULT_ACTIVITY_TYPES
-    return ",".join(sorted(at.strip() for at in stored.split(",")))
+    return ",".join(sorted(at.strip() for at in stored))
 
 
-def _inchikey_structure_key(inchikey: Optional[str]) -> Optional[str]:
+def _inchikey_structure_key(inchikey: str | None) -> str | None:
     """Return a protonation-insensitive structure key from an InChIKey.
 
     InChIKey format is typically AAAA...-BBBB...-C where the last block encodes
@@ -81,7 +84,7 @@ def _inchikey_structure_key(inchikey: Optional[str]) -> Optional[str]:
 def _compute_config_match(
     existing: Compound,
     submitted_threshold: int,
-    submitted_activity_types: str,
+    submitted_activity_types: list[str],
 ) -> str:
     """Compare existing compound's config with submitted config.
 
@@ -92,7 +95,7 @@ def _compute_config_match(
     - 'different_both': Different threshold AND different activity types
     """
     threshold_same = (existing.similarity_threshold or 90) == submitted_threshold
-    at_same = _normalize_activity_types_str(existing.activity_types) == submitted_activity_types
+    at_same = _normalize_activity_types_list(existing.activity_types) == sorted(submitted_activity_types)
 
     if threshold_same and at_same:
         return "identical"
@@ -155,7 +158,7 @@ def get_next_version_name(db: Session, base_name: str) -> str:
     return f"{true_base}_v{next_version}"
 
 
-def get_next_version_names_bulk(db: Session, compound_names: List[str]) -> Dict[str, str]:
+def get_next_version_names_bulk(db: Session, compound_names: list[str]) -> dict[str, str]:
     """
     Calculate next available version names for multiple compounds in a single query.
 
@@ -174,8 +177,8 @@ def get_next_version_names_bulk(db: Session, compound_names: List[str]) -> Dict[
 
     # Extract true base names (strip any existing _vN suffix)
     version_pattern = re.compile(r'^(.+?)(_v(\d+))?$')
-    name_to_base: Dict[str, str] = {}  # original input name -> true_base
-    normalized_base_to_sample: Dict[str, str] = {}  # lower(base) -> representative base
+    name_to_base: dict[str, str] = {}  # original input name -> true_base
+    normalized_base_to_sample: dict[str, str] = {}  # lower(base) -> representative base
 
     for original_name in compound_names:
         clean_name = (original_name or "").strip()
@@ -217,7 +220,7 @@ def get_next_version_names_bulk(db: Session, compound_names: List[str]) -> Dict[
                     base_max_versions[base_norm] = max(base_max_versions[base_norm], 1)
 
     # Build result dict using original input names as keys
-    result: Dict[str, str] = {}
+    result: dict[str, str] = {}
     for original_name in compound_names:
         true_base = name_to_base.get(original_name)
         if not true_base:
@@ -229,29 +232,18 @@ def get_next_version_names_bulk(db: Session, compound_names: List[str]) -> Dict[
     return result
 
 
-# Valid status transitions for job state machine
+# Valid status transitions for job state machine (D-46: PENDING_UPLOAD two-phase completion)
 VALID_TRANSITIONS = {
     JobStatus.PENDING: {JobStatus.PROCESSING, JobStatus.CANCELLED},
-    JobStatus.PROCESSING: {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.SYNC_PENDING},
-    JobStatus.SYNC_PENDING: {JobStatus.COMPLETED, JobStatus.FAILED},
-    JobStatus.COMPLETED: set(),  # Terminal state
-    JobStatus.FAILED: set(),     # Terminal state
-    JobStatus.CANCELLED: set(),  # Terminal state
+    JobStatus.PROCESSING: {JobStatus.PENDING_UPLOAD, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.PENDING},
+    JobStatus.PENDING_UPLOAD: {JobStatus.COMPLETED, JobStatus.PENDING, JobStatus.FAILED},
+    JobStatus.COMPLETED: set(),   # Terminal state
+    JobStatus.FAILED: {JobStatus.PENDING},  # Requeue after 3 cycles (D-49)
+    JobStatus.CANCELLED: set(),   # Terminal state
 }
 
 
-def _safe_json_loads(json_str: Optional[str], default: Any = None) -> Any:
-    """Safely parse JSON string, returning default on failure."""
-    if not json_str:
-        return default
-    try:
-        return json.loads(json_str)
-    except (json.JSONDecodeError, TypeError) as e:
-        logger.warning(f"Failed to parse JSON: {e}")
-        return default
-
-
-def generate_inchikey(smiles: str) -> Optional[str]:
+def generate_inchikey(smiles: str) -> str | None:
     """
     Generate InChIKey from SMILES (100% deterministic).
 
@@ -287,7 +279,7 @@ def generate_inchikey(smiles: str) -> Optional[str]:
         return None
 
 
-def generate_canonical_smiles(smiles: str) -> Optional[str]:
+def generate_canonical_smiles(smiles: str) -> str | None:
     """
     Generate canonical SMILES from input SMILES.
 
@@ -323,7 +315,7 @@ def generate_canonical_smiles(smiles: str) -> Optional[str]:
 # ============================================================================
 
 
-def _normalize_inchikey_input(inchikey: Optional[str]) -> Optional[str]:
+def _normalize_inchikey_input(inchikey: str | None) -> str | None:
     """Normalize optional InChIKey input from request payload."""
     if not inchikey:
         return None
@@ -333,7 +325,7 @@ def _normalize_inchikey_input(inchikey: Optional[str]) -> Optional[str]:
     return normalized
 
 
-def _inchi_to_smiles(inchi: str) -> Optional[str]:
+def _inchi_to_smiles(inchi: str) -> str | None:
     """Convert InChI to SMILES using RDKit."""
     try:
         from rdkit import Chem
@@ -347,40 +339,33 @@ def _inchi_to_smiles(inchi: str) -> Optional[str]:
 
 
 def _job_to_response(job) -> JobResponse:
-    """Convert Job model to JobResponse, extracting compound info from input_params."""
-    data = {
-        "id": job.id,
-        "job_type": job.job_type,
-        "status": job.status,
-        "progress": job.progress,
-        "current_step": job.current_step,
-        "result_path": job.result_path,
-        "error_message": job.error_message,
-        "created_at": job.created_at,
-        "started_at": job.started_at,
-        "completed_at": job.completed_at,
-        "session_id": job.session_id,
-        "batch_id": job.batch_id,
-    }
-
-    # Extract compound_name and smiles from input_params using typed model
-    if job.input_params:
-        try:
-            params = InputParams.model_validate_json(job.input_params)
-            data["compound_name"] = params.compound_name or "Unknown"
-            data["smiles"] = params.smiles or ""
-        except Exception:
-            data["compound_name"] = "Unknown"
-            data["smiles"] = ""
-
-    return JobResponse(**data)
+    """Convert Job model to JobResponse using direct column access."""
+    return JobResponse(
+        id=job.id,
+        job_type=job.job_type,
+        status=job.status,
+        compound_name=job.compound_name or "Unknown",
+        smiles=job.smiles or "",
+        similarity_threshold=job.similarity_threshold or 90,
+        activity_types=job.activity_types,
+        progress=job.progress or 0.0,
+        current_step=job.current_step,
+        error_message=job.error_message,
+        created_at=job.created_at,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+        cancelled_at=job.cancelled_at,
+        updated_at=job.updated_at,
+        session_id=job.session_id,
+        batch_id=job.batch_id,
+    )
 
 
 def _build_config_diff(
     existing_compound: Compound,
     submitted_threshold: int,
-    submitted_activity_types: str,
-) -> Optional[Dict]:
+    submitted_activity_types: list[str],
+) -> dict | None:
     """Build config diff dict if configs differ, else None."""
     config_match = _compute_config_match(existing_compound, submitted_threshold, submitted_activity_types)
     if config_match == "identical":
@@ -391,8 +376,8 @@ def _build_config_diff(
             "submitted": submitted_threshold,
         },
         "activity_types": {
-            "existing": _normalize_activity_types_str(existing_compound.activity_types),
-            "submitted": submitted_activity_types,
+            "existing": sorted(existing_compound.activity_types or []),
+            "submitted": sorted(submitted_activity_types),
         },
     }
 
@@ -400,7 +385,7 @@ def _build_config_diff(
 def _build_existing_at_threshold(
     existing_compound: Compound,
     submitted_threshold: int,
-    submitted_activity_types: str,
+    submitted_activity_types: list[str],
 ) -> ExistingCompoundAtThreshold:
     """Build ExistingCompoundAtThreshold from a Compound ORM object."""
     config_match = _compute_config_match(existing_compound, submitted_threshold, submitted_activity_types)
@@ -410,50 +395,57 @@ def _build_existing_at_threshold(
         entry_id=existing_compound.entry_id,
         compound_name=existing_compound.compound_name,
         similarity_threshold=existing_compound.similarity_threshold,
-        activity_types=_normalize_activity_types_str(existing_compound.activity_types),
+        activity_types=existing_compound.activity_types,
         config_match=config_match,
         config_diff=config_diff,
         imp_score=existing_compound.imp_score,
-        processed_at=existing_compound.processed_at.isoformat() if existing_compound.processed_at else None,
+        processed_at=existing_compound.processed_at if existing_compound.processed_at else None,
         author_name=existing_compound.author_name,
     )
 
 
-def _check_single_availability(
+async def _check_single_availability(
     smiles: str,
     compound_name: str,
     similarity_threshold: int,
-    activity_types: Optional[List[str]],
+    activity_types: list[str] | None,
     db: Session,
 ) -> CompoundAvailability:
     """Check ChEMBL data availability for a single compound.
 
-    Probes all thresholds and finds existing compounds by InChIKey.
+    Probes all thresholds for similar compound counts AND verifies bioactivity
+    exists at the requested threshold. The ``available`` flag reflects whether
+    there is actual usable bioactivity data, not just similar compounds.
     """
-    from backend.modules.api_client import probe_all_thresholds
+    from backend.modules.api_client import probe_all_thresholds, quick_has_bioactivity, create_chembl_client
 
-    submitted_at = _normalize_activity_types(activity_types)
+    submitted_at = _normalize_activity_types_list(activity_types)
 
-    # Probe ALL thresholds (includes requested threshold)
-    thresholds = probe_all_thresholds(smiles, similarity_threshold)
+    async with create_chembl_client() as client:
+        # Probe ALL thresholds (includes requested threshold)
+        thresholds = await probe_all_thresholds(client, smiles, similarity_threshold)
 
-    threshold_items = [
-        ThresholdAvailability(threshold=t["threshold"], count=t["count"])
-        for t in thresholds
-    ]
+        threshold_items = [
+            ThresholdAvailability(threshold=t["threshold"], count=t["count"])
+            for t in thresholds
+        ]
 
-    # Find count at requested threshold
-    count_at_threshold = 0
-    for t in thresholds:
-        if t["threshold"] == similarity_threshold:
-            count_at_threshold = t["count"]
-            break
+        # Find count at requested threshold
+        count_at_threshold = 0
+        for t in thresholds:
+            if t["threshold"] == similarity_threshold:
+                count_at_threshold = t["count"]
+                break
 
-    available = count_at_threshold > 0
-    has_any_data = any(t["count"] > 0 for t in thresholds)
+        # Verify bioactivity exists at requested threshold (not just similar compounds)
+        if count_at_threshold > 0:
+            available = await quick_has_bioactivity(client, smiles, similarity_threshold, activity_types)
+        else:
+            available = False
+        has_any_data = any(t["count"] > 0 for t in thresholds)
 
     # Find existing compounds by InChIKey
-    existing_compounds: List[ExistingCompoundAtThreshold] = []
+    existing_compounds: list[ExistingCompoundAtThreshold] = []
     inchikey = generate_inchikey(smiles)
     structure_key = _inchikey_structure_key(inchikey)
     if structure_key:
@@ -485,10 +477,20 @@ class JobService:
         self,
         db: Session,
         job_type: JobType,
-        input_params: Dict[str, Any],
-        session_id: Optional[str] = None,
-        batch_id: Optional[str] = None,
-        idempotency_key: Optional[str] = None,
+        *,
+        compound_name: str,
+        smiles: str | None = None,
+        similarity_threshold: int = 90,
+        activity_types: list[str] | None = None,
+        session_id: str | None = None,
+        batch_id: str | None = None,
+        batch_index: int | None = None,
+        idempotency_key: str | None = None,
+        # Workflow metadata stored in result_summary JSONB
+        replace_entry_id: str | None = None,
+        parent_id_for_new: str | None = None,
+        inherit_children_from: str | None = None,
+        author_name: str | None = None,
     ) -> Job:
         """
         Create a new job record.
@@ -496,35 +498,62 @@ class JobService:
         Args:
             db: Database session
             job_type: Type of job (single/batch)
-            input_params: Input parameters for the job
+            compound_name: Name of the compound
+            smiles: SMILES string
+            similarity_threshold: Similarity threshold (40-100)
+            activity_types: List of activity types
             session_id: Session ID for user isolation
             batch_id: Batch ID for grouping related jobs
+            batch_index: Index within batch
             idempotency_key: Optional key for safe retries (unique per session)
+            replace_entry_id: Entry ID of compound to replace on completion
+            parent_id_for_new: Parent entry ID for child compound creation
+            inherit_children_from: Entry ID whose children should be re-parented
+            author_name: Name of the person submitting the analysis
 
         Returns:
             Created Job object
         """
-        job = Job(
-            id=str(uuid.uuid4()),
+        # Build workflow metadata dict (stored in result_summary JSONB)
+        workflow_meta = {}
+        if replace_entry_id:
+            workflow_meta["replace_entry_id"] = replace_entry_id
+        if parent_id_for_new:
+            workflow_meta["parent_id_for_new"] = parent_id_for_new
+        if inherit_children_from:
+            workflow_meta["inherit_children_from"] = inherit_children_from
+        if author_name:
+            workflow_meta["author_name"] = author_name
+
+        job = job_repo.create_job(
+            db,
+            id=uuid.uuid4(),
             job_type=job_type,
-            status=JobStatus.PENDING,
-            session_id=session_id,
-            batch_id=batch_id,
-            idempotency_key=idempotency_key,
-            input_params=json.dumps(input_params),
-            progress=0.0,
-            current_step="Queued",
-            created_at=datetime.now(timezone.utc),
+            compound_name=compound_name,
+            smiles=smiles,
+            similarity_threshold=similarity_threshold,
+            activity_types=activity_types,
+            session_id=uuid.UUID(session_id) if session_id else uuid.uuid4(),
+            batch_id=uuid.UUID(batch_id) if batch_id else None,
+            batch_index=batch_index,
+            idempotency_key=idempotency_key[:64] if idempotency_key else None,
         )
-        db.add(job)
+
+        # Store workflow metadata if any
+        if workflow_meta:
+            job.result_summary = workflow_meta  # JSONB -- dict directly, no json.dumps
+            db.flush()
+
+        # Audit event
+        from backend.services._audit import log_audit_event
+        from backend.models.enums import AuditEventType as AET
+        log_audit_event(
+            db, AET.JOB_CREATED,
+            session_id=uuid.UUID(session_id) if session_id else None,
+            details={"job_id": str(job.id), "compound_name": compound_name, "job_type": job_type.value},
+        )
+
         db.commit()
-        try:
-            db.refresh(job)
-        except InvalidRequestError:
-            # Under concurrent SQLite access, refresh can fail even after
-            # a successful commit. The job is already persisted and all
-            # fields are set from Python-side defaults, so this is safe.
-            pass
         metrics.increment('jobs_created')
         logger.info(f"Created job {job.id} ({job_type.value}) session={session_id} batch={batch_id}")
         return job
@@ -533,23 +562,22 @@ class JobService:
         """Generate a new batch ID for grouping jobs."""
         return str(uuid.uuid4())
 
-    def get_job(self, db: Session, job_id: str) -> Optional[Job]:
+    def get_job(self, db: Session, job_id: str) -> Job | None:
         """Get a job by ID."""
         return job_repo.get_by_job_id(db, job_id)
 
-    def _get_job_for_update(self, db: Session, job_id: str) -> Optional[Job]:
-        """Get a job by ID with thread-safe locking.
+    def _get_job_for_update(self, db: Session, job_id: str) -> Job | None:
+        """Get a job by ID for update.
 
-        Note: SQLite doesn't support FOR UPDATE, so we use application-level
-        locking via _db_write_lock. All callers must acquire the lock before
-        calling this method and hold it through commit.
+        Note: Postgres uses FOR UPDATE row-level locking at the repository
+        layer. No application-level lock needed.
         """
         return job_repo.get_by_job_id(db, job_id)
 
     def _execute_with_lock(self, db: Session, operation: Callable) -> Any:
-        """Execute a database write operation with thread-safe locking.
+        """Execute a database write operation.
 
-        Ensures serialized writes to SQLite to prevent corruption.
+        Postgres MVCC handles concurrency; no application-level lock needed.
 
         Args:
             db: Database session
@@ -558,41 +586,42 @@ class JobService:
         Returns:
             Result of the operation
         """
-        with _db_write_lock:
-            result = operation()
-            db.commit()
-            return result
+        result = operation()
+        db.commit()
+        return result
 
-    def get_job_with_params(self, db: Session, job_id: str) -> Optional[Dict[str, Any]]:
-        """Get job with parsed input parameters."""
+    def get_job_with_params(self, db: Session, job_id: str) -> dict[str, Any] | None:
+        """Get job with direct column values as a dict."""
         job = self.get_job(db, job_id)
         if not job:
             return None
 
-        result = job.to_dict()
-        if job.input_params:
-            try:
-                params = InputParams.model_validate_json(job.input_params)
-                result["input_params"] = params.model_dump()
-            except Exception:
-                raw = job.input_params
-                result["input_params"] = _safe_json_loads(raw, {})
-        if job.result_summary:
-            try:
-                summary = ResultSummary.model_validate_json(job.result_summary)
-                result["result_summary"] = summary.model_dump()
-            except Exception:
-                raw = job.result_summary
-                result["result_summary"] = _safe_json_loads(raw, {})
-        return result
+        return {
+            "id": str(job.id),
+            "job_type": job.job_type.value if job.job_type else None,
+            "status": job.status.value if job.status else None,
+            "compound_name": job.compound_name,
+            "smiles": job.smiles,
+            "similarity_threshold": job.similarity_threshold,
+            "activity_types": job.activity_types,
+            "progress": job.progress,
+            "current_step": job.current_step,
+            "error_message": job.error_message,
+            "result_summary": job.result_summary,  # JSONB -- already a dict
+            "created_at": job.created_at.isoformat() if job.created_at else None,
+            "started_at": job.started_at.isoformat() if job.started_at else None,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+            "session_id": str(job.session_id) if job.session_id else None,
+            "batch_id": str(job.batch_id) if job.batch_id else None,
+        }
 
     def list_jobs(
         self,
         db: Session,
-        statuses: Optional[List[JobStatus]] = None,
+        statuses: list[JobStatus] | None = None,
         page: int = 1,
         page_size: int = 20,
-        session_id: Optional[str] = None,
+        session_id: str | None = None,
     ) -> Dict:
         """
         List jobs with optional status filter, session filter, and pagination.
@@ -628,9 +657,9 @@ class JobService:
     def get_active_jobs(
         self,
         db: Session,
-        session_id: Optional[str] = None,
+        session_id: str | None = None,
         include_recent_minutes: int = 2,
-    ) -> List[Dict]:
+    ) -> list[dict]:
         """
         Get active (pending/processing) jobs and recently completed jobs for sidebar.
 
@@ -671,7 +700,7 @@ class JobService:
 
         all_jobs.sort(
             key=lambda j: (
-                0 if j.status in [JobStatus.COMPLETED, JobStatus.FAILED] else 1,
+                0 if j.status in [JobStatus.COMPLETED, JobStatus.PENDING_UPLOAD, JobStatus.FAILED] else 1,
                 -_sort_ts(j.created_at),
             )
         )
@@ -687,72 +716,49 @@ class JobService:
                 "created_at": job.created_at.isoformat() if job.created_at else None,
                 "completed_at": job.completed_at.isoformat() if job.completed_at else None,
             }
-            # Extract compound name from input params using typed model
-            compound_name = "Unknown"
-            params_dict = {}
-            if job.input_params:
-                try:
-                    params = InputParams.model_validate_json(job.input_params)
-                    compound_name = params.compound_name or "Unknown"
-                    params_dict = params.model_dump()
-                except Exception:
-                    raw = job.input_params
-                    params_dict = _safe_json_loads(raw, {})
-                    compound_name = params_dict.get("compound_name", "Unknown")
+
+            # Direct column access -- no JSON parsing
+            compound_name = job.compound_name or "Unknown"
             item["compound_name"] = compound_name
 
-            # For completed jobs, include entry_id and storage_path for UUID-based storage lookup
+            # For completed/pending_upload jobs, include entry_id and storage_path
             entry_id = None
             storage_path = None
-            if job.status == JobStatus.COMPLETED:
-                # First try result_summary
-                if job.result_summary:
-                    try:
-                        summary = ResultSummary.model_validate_json(job.result_summary)
-                        entry_id = summary.entry_id
-                        storage_path = summary.storage_path
-                    except Exception:
-                        raw = job.result_summary
-                        result_data = _safe_json_loads(raw, {})
-                        entry_id = result_data.get("entry_id")
-                        storage_path = result_data.get("storage_path")
+            if job.status in (JobStatus.COMPLETED, JobStatus.PENDING_UPLOAD) and job.result_summary:
+                result_data = job.result_summary  # Already a dict (JSONB)
+                entry_id = result_data.get("entry_id")
+                storage_path = result_data.get("storage_path")
 
-                # Fallback: derive from the job result path (UUID-based filename)
-                if not entry_id and job.result_path:
-                    from pathlib import Path
-                    candidate = Path(job.result_path).stem
-                    try:
-                        entry_id = str(uuid.UUID(candidate))
-                    except (ValueError, TypeError, AttributeError):
-                        entry_id = None
-
-                # Build storage_path deterministically from entry_id
-                if entry_id and not storage_path:
-                    try:
-                        from backend.core.storage_paths import get_storage_path_from_entry_id
-                        storage_path = get_storage_path_from_entry_id(entry_id)
-                    except Exception as e:
-                        logger.debug(f"Could not derive storage_path from entry_id {entry_id}: {e}")
+            # Build storage_path deterministically from entry_id
+            if entry_id and not storage_path:
+                try:
+                    from backend.core.storage_paths import get_storage_path_from_entry_id
+                    storage_path = get_storage_path_from_entry_id(entry_id)
+                except Exception as e:
+                    logger.debug(f"Could not derive storage_path from entry_id {entry_id}: {e}")
 
             item["entry_id"] = entry_id
             item["storage_path"] = storage_path
             item["error_message"] = job.error_message
 
-            # For failed jobs, include cascade similarity results and input params for resubmission
+            # Map PENDING_UPLOAD to "completed" for user-facing display (D-03)
+            # Users don't need to know about Azure upload status
+            if item["status"] == "pending_upload":
+                item["status"] = "completed"
+
+            # Always include input_params for frontend resubmission / display (D-70)
+            item["input_params"] = {
+                "compound_name": job.compound_name,
+                "smiles": job.smiles,
+                "similarity_threshold": job.similarity_threshold,
+                "activity_types": job.activity_types,
+            }
+
+            # For failed jobs, include cascade similarity results
             if job.status == JobStatus.FAILED and job.result_summary:
-                try:
-                    failed_summary = ResultSummary.model_validate_json(job.result_summary)
-                    cascade = getattr(failed_summary, 'cascade_results', None)
-                    if cascade:
-                        item["cascade_results"] = cascade
-                        item["input_params"] = params_dict
-                except Exception:
-                    raw = job.result_summary
-                    failed_data = _safe_json_loads(raw, {})
-                    cascade = failed_data.get("cascade_results")
-                    if cascade:
-                        item["cascade_results"] = cascade
-                        item["input_params"] = params_dict
+                cascade = job.result_summary.get("cascade_results")
+                if cascade:
+                    item["cascade_results"] = cascade
 
             result.append(item)
 
@@ -782,22 +788,21 @@ class JobService:
         Returns:
             Number of jobs cancelled
         """
-        with _db_write_lock:
-            cancelled_count = job_repo.cancel_batch_jobs(db, batch_id)
-            if cancelled_count > 0:
-                db.commit()
-                logger.info(f"Cancelled {cancelled_count} jobs in batch {batch_id}")
-            return cancelled_count
+        cancelled_count = job_repo.cancel_batch_jobs(db, batch_id)
+        if cancelled_count > 0:
+            db.commit()
+            logger.info(f"Cancelled {cancelled_count} jobs in batch {batch_id}")
+        return cancelled_count
 
     def check_existing_compounds(
         self,
         db: Session,
-        compound_names: List[str],
-    ) -> Dict[str, bool]:
+        compound_names: list[str],
+    ) -> dict[str, bool]:
         """
         Check which compounds already have completed results.
 
-        Checks the SQLite Compound table (database is the source of truth).
+        Checks the Compound table (database is the source of truth).
         UUID-based storage paths are used, so Azure lookup by name is not supported.
         Use InChIKey for accurate duplicate detection instead of compound names.
 
@@ -827,13 +832,13 @@ class JobService:
     def check_pending_compounds(
         self,
         db: Session,
-        compound_names: List[str],
-    ) -> Dict[str, str]:
+        compound_names: list[str],
+    ) -> dict[str, str]:
         """
         Check which compounds are currently being processed.
 
         Fetches all pending/processing jobs once and filters in Python
-        for accurate JSON matching (avoids SQL LIKE injection issues).
+        using direct column access (no JSON parsing).
 
         Args:
             db: Database session
@@ -849,7 +854,7 @@ class JobService:
             return (name or "").strip().lower()
 
         # Track normalized input names while preserving the original key users submitted.
-        normalized_to_original: Dict[str, str] = {}
+        normalized_to_original: dict[str, str] = {}
         for name in compound_names:
             normalized = _normalize_name(name)
             if normalized and normalized not in normalized_to_original:
@@ -861,24 +866,18 @@ class JobService:
         # Fetch all pending/processing jobs in one query
         pending_jobs = job_repo.get_active_jobs(db)
 
-        # Parse JSON and match compound names
+        # Match compound names using direct column access
         for job in pending_jobs:
-            if not job.input_params:
-                continue
-            try:
-                params = InputParams.model_validate_json(job.input_params)
-                job_compound_name = params.compound_name
-                normalized_job_name = _normalize_name(job_compound_name) if job_compound_name else ""
-                if normalized_job_name and normalized_job_name in names_to_check:
-                    original_name = normalized_to_original[normalized_job_name]
-                    result[original_name] = job.id
-                    # Remove from set to avoid duplicate matches
-                    names_to_check.discard(normalized_job_name)
-                    # Early exit if all found
-                    if not names_to_check:
-                        break
-            except Exception:
-                continue
+            job_compound_name = job.compound_name
+            normalized_job_name = _normalize_name(job_compound_name) if job_compound_name else ""
+            if normalized_job_name and normalized_job_name in names_to_check:
+                original_name = normalized_to_original[normalized_job_name]
+                result[original_name] = job.id
+                # Remove from set to avoid duplicate matches
+                names_to_check.discard(normalized_job_name)
+                # Early exit if all found
+                if not names_to_check:
+                    break
 
         return result
 
@@ -888,8 +887,8 @@ class JobService:
         job_id: str,
         progress: float,
         current_step: str,
-        status: Optional[JobStatus] = None,
-    ) -> Optional[Job]:
+        status: JobStatus | None = None,
+    ) -> Job | None:
         """
         Update job progress with thread-safe locking and status validation.
 
@@ -900,176 +899,182 @@ class JobService:
             current_step: Description of current step
             status: Optional status update
         """
-        with _db_write_lock:
-            job = self._get_job_for_update(db, job_id)
-            if not job:
-                logger.warning(f"Job {job_id} not found for progress update")
+        job = self._get_job_for_update(db, job_id)
+        if not job:
+            logger.warning(f"Job {job_id} not found for progress update")
+            return None
+
+        # Validate status transition if status is being changed
+        if status and status != job.status:
+            valid_next = VALID_TRANSITIONS.get(job.status, set())
+            if status not in valid_next:
+                logger.warning(
+                    f"Invalid status transition {job.status.value} -> {status.value} "
+                    f"for job {job_id}"
+                )
                 return None
 
-            # Validate status transition if status is being changed
-            if status and status != job.status:
-                valid_next = VALID_TRANSITIONS.get(job.status, set())
-                if status not in valid_next:
-                    logger.warning(
-                        f"Invalid status transition {job.status.value} -> {status.value} "
-                        f"for job {job_id}"
-                    )
-                    return None
+        job.progress = progress
+        job.current_step = current_step
 
-            job.progress = progress
-            job.current_step = current_step
+        if status:
+            job.status = status
+            if status == JobStatus.PROCESSING and not job.started_at:
+                job.started_at = datetime.now(timezone.utc)
 
-            if status:
-                job.status = status
-                if status == JobStatus.PROCESSING and not job.started_at:
-                    job.started_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(job)
+        return job
 
-            db.commit()
-            db.refresh(job)
-            return job
-
-    def complete_job(
+    def mark_pending_upload(
         self,
         db: Session,
         job_id: str,
-        result_path: str,
-        result_summary: Dict[str, Any],
-    ) -> Optional[Job]:
-        """
-        Mark job as completed, update Compound table, and trigger Azure sync.
+        result_summary: dict[str, Any],
+    ) -> Job | None:
+        """Mark job as PENDING_UPLOAD and create Compound entry (per D-32, D-33).
 
-        Uses thread-safe locking to prevent race conditions.
+        User can browse results immediately. Azure upload happens separately.
 
         Args:
             db: Database session
             job_id: Job ID
-            result_path: Path to result file
-            result_summary: Summary statistics
+            result_summary: Summary statistics dict (stored as JSONB)
         """
-        with _db_write_lock:
-            job = self._get_job_for_update(db, job_id)
-            if not job:
-                logger.warning(f"Job {job_id} not found for completion")
-                return None
+        job = self._get_job_for_update(db, job_id)
+        if not job:
+            logger.warning(f"Job {job_id} not found for completion")
+            return None
 
-            # Guard: don't resurrect cancelled/failed jobs to COMPLETED
-            if job.status in (JobStatus.CANCELLED, JobStatus.FAILED):
-                logger.warning(f"Job {job_id} is {job.status.value}, not completing")
-                return None
+        # Guard: don't resurrect cancelled/failed jobs
+        if job.status in (JobStatus.CANCELLED, JobStatus.FAILED):
+            logger.warning(f"Job {job_id} is {job.status.value}, not completing")
+            return None
 
-            # Preserve result metadata on both success and failure paths
-            # (ZIP exists regardless -- allows re-processing on failure)
-            job.result_path = result_path
-            job.result_summary = json.dumps(result_summary)
+        # Get workflow metadata from job's stored result_summary (set during create_job)
+        workflow_meta = job.result_summary or {}
+        parent_id_for_new = workflow_meta.get("parent_id_for_new")
+        inherit_children_from = workflow_meta.get("inherit_children_from")
+        replace_entry_id = workflow_meta.get("replace_entry_id")
 
-            # Extract duplicate metadata from job input_params using typed model
-            job_params = InputParams()
-            if job.input_params:
-                try:
-                    job_params = InputParams.model_validate_json(job.input_params)
-                except Exception:
-                    pass
+        # Store the full analysis result_summary (overwrites workflow metadata)
+        job.result_summary = result_summary  # JSONB -- dict directly, no json.dumps
 
-            # Try to update compound entry FIRST -- if this fails, job must be FAILED
-            try:
-                self._update_compound_entry(
-                    db,
-                    result_summary,
-                    result_path,
-                    is_duplicate=job_params.is_duplicate,
-                    duplicate_of=job_params.duplicate_of,
-                    inherit_children_from=job_params.inherit_children_from,
-                    replace_entry_id=job_params.replace_entry_id,
-                    session_id=job.session_id,
-                    job_id=job_id,
-                )
-            except Exception as e:
-                # Compound entry failed -- mark job as FAILED, not COMPLETED
-                # ZIP result still exists -- user can re-submit
-                logger.error(f"Job {job_id}: compound entry update failed, marking FAILED: {e}")
-                job.status = JobStatus.FAILED
-                job.error_message = f"Compound entry could not be saved: {e}"
-                job.completed_at = datetime.now(timezone.utc)
-                db.commit()
-                db.refresh(job)
-                metrics.increment('jobs_failed')
-                return job
-
-            # Re-apply result metadata in case _update_compound_entry rolled back
-            # the session (e.g. IntegrityError on duplicate structure key).
-            # db.rollback() reverts ALL dirty ORM state, including result_path
-            # and result_summary set above.
-            job.result_path = result_path
-            job.result_summary = json.dumps(result_summary)
-
-            # Compound entry succeeded (or was silently skipped) -- mark COMPLETED
-            job.status = JobStatus.COMPLETED
-            job.progress = 100.0
-            job.current_step = "Completed"
+        # Try to update compound entry FIRST -- if this fails, job must be FAILED
+        try:
+            self._update_compound_entry(
+                db,
+                result_summary,
+                parent_id=uuid.UUID(parent_id_for_new) if parent_id_for_new else None,
+                inherit_children_from=inherit_children_from,
+                replace_entry_id=replace_entry_id,
+                session_id=str(job.session_id) if job.session_id else None,
+                job_id=job.id,
+            )
+        except Exception as e:
+            # Compound entry failed -- mark job as FAILED
+            logger.error(f"Job {job_id}: compound entry update failed, marking FAILED: {e}")
+            job.status = JobStatus.FAILED
+            job.error_message = f"Compound entry could not be saved: {e}"
             job.completed_at = datetime.now(timezone.utc)
             db.commit()
             db.refresh(job)
-            metrics.increment('jobs_completed')
+            metrics.increment('jobs_failed')
+            return job
 
-        # All network I/O happens OUTSIDE the lock to avoid blocking other threads
+        # Re-apply result_summary in case _update_compound_entry rolled back
+        # the session (e.g. IntegrityError on duplicate structure key).
+        job.result_summary = result_summary
 
-        # Clean up replaced compound's files (Azure + local)
-        replace_entry_id = job_params.replace_entry_id
+        # Set PENDING_UPLOAD (not COMPLETED) -- D-47: no direct PROCESSING -> COMPLETED
+        job.status = JobStatus.PENDING_UPLOAD
+        job.progress = 95.0
+        job.current_step = "Processing complete"
+        db.commit()
+        db.refresh(job)
+
+        # Clean up replaced compound's files (Azure + local) -- after DB commit
         if replace_entry_id:
             try:
-                from backend.core.azure_sync import delete_result_from_azure_by_entry_id
                 delete_result_from_azure_by_entry_id(replace_entry_id)
             except Exception as e:
                 logger.warning(f"Failed to delete Azure result for replaced compound: {e}")
 
             try:
-                from backend.config import settings
-                prefix = replace_entry_id[:2].lower()
-                local_zip = settings.RESULTS_DIR / prefix / f"{replace_entry_id}.zip"
+                rid = str(replace_entry_id).lower()
+                prefix = rid[:2]
+                local_zip = settings.RESULTS_DIR / prefix / f"{rid}.zip"
                 if local_zip.exists():
                     local_zip.unlink()
                     logger.debug(f"Deleted local result for replaced compound: {local_zip}")
             except Exception as e:
                 logger.warning(f"Failed to delete local result for replaced compound: {e}")
 
-        # Immediate sync to Azure (outside lock - this is network I/O)
-        sync_db_to_azure()
+        logger.info(f"Job {job_id} marked PENDING_UPLOAD")
+        return job
 
-        logger.info(f"Job {job_id} completed successfully")
+    def mark_completed(self, db: Session, job_id: str) -> Job | None:
+        """Mark job COMPLETED after Azure upload (per D-34).
+
+        Only updates status from PENDING_UPLOAD -> COMPLETED. No compound table change.
+        """
+        job = self._get_job_for_update(db, job_id)
+        if not job:
+            return None
+        if job.status != JobStatus.PENDING_UPLOAD:
+            logger.warning(f"Job {job_id} is {job.status.value}, not PENDING_UPLOAD")
+            return None
+        job.status = JobStatus.COMPLETED
+        job.progress = 100.0
+        job.current_step = "Completed"
+        job.completed_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(job)
+        metrics.increment('jobs_completed')
+        logger.info(f"Job {job_id} completed")
+        return job
+
+    def complete_job(
+        self,
+        db: Session,
+        job_id: str,
+        result_summary: dict[str, Any],
+    ) -> Job | None:
+        """Legacy convenience: mark_pending_upload + mark_completed in one call.
+
+        For non-Azure deployments (D-35) or callers that don't need two-phase flow.
+        """
+        job = self.mark_pending_upload(db, job_id, result_summary)
+        if job and job.status == JobStatus.PENDING_UPLOAD:
+            job = self.mark_completed(db, job_id)
         return job
 
     def _update_compound_entry(
         self,
         db: Session,
-        result_summary: Dict[str, Any],
-        result_path: str,
-        is_duplicate: bool = False,
-        duplicate_of: Optional[str] = None,
-        inherit_children_from: Optional[str] = None,
-        replace_entry_id: Optional[str] = None,
-        session_id: Optional[str] = None,
-        job_id: Optional[str] = None,
+        result_summary: dict[str, Any],
+        *,
+        parent_id: uuid.UUID | None = None,
+        inherit_children_from: str | None = None,
+        replace_entry_id: str | None = None,
+        session_id: str | None = None,
+        job_id: uuid.UUID | None = None,
     ) -> None:
         """
-        Create or update Compound entry in local database.
+        Create or update Compound entry in database.
 
-        This ensures the Compound table stays in sync with completed jobs,
-        without waiting for the next startup sync from Azure.
+        Uses compound_repo.create_compound() with parent_id versioning.
+        No is_duplicate/duplicate_of -- replaced by parent_id/version.
 
         Args:
             db: Database session
             result_summary: Summary from job processing
-            result_path: Path to result file
-            is_duplicate: Whether this compound is a tagged duplicate
-            duplicate_of: Entry ID of the original compound (if duplicate)
+            parent_id: Parent compound UUID for child creation (repo auto-calculates version)
             inherit_children_from: Entry ID of old compound whose children should be re-pointed
             replace_entry_id: Entry ID of old compound to delete after successful replacement
             session_id: Session ID for audit trail
-            job_id: Job ID for audit trail
+            job_id: Job UUID for linking
         """
-        from backend.models.database import Compound, DeletedCompound
-        import uuid
-
         # Validate result_summary before accessing
         if not result_summary or not isinstance(result_summary, dict):
             logger.warning("Invalid result_summary (None or not dict), skipping Compound update")
@@ -1086,68 +1091,28 @@ class JobService:
         inchikey = generate_inchikey(smiles) if smiles else None
         canonical_smiles = generate_canonical_smiles(smiles) if smiles else None
 
-        # Compute inchikey_structure_key
-        inchikey_structure_key = None
-        if inchikey and '-' in inchikey:
-            parts = inchikey.split('-')
-            if len(parts) >= 2:
-                inchikey_structure_key = f"{parts[0]}-{parts[1]}"
-
         # Use entry_id from result_summary if available (generated by compound_service)
-        # Otherwise generate a new one
-        entry_id_from_summary = result_summary.get('entry_id')
+        entry_id_str = result_summary.get('entry_id')
+        entry_id = uuid.UUID(entry_id_str) if entry_id_str else uuid.uuid4()
 
         # Use storage_path from result_summary if available (UUID-based path)
-        # Otherwise fall back to result_path (legacy name-based path)
-        storage_path = result_summary.get('storage_path') or result_path
+        storage_path = result_summary.get('storage_path')
+        if not storage_path:
+            from backend.core.storage_paths import get_storage_path_from_entry_id
+            storage_path = get_storage_path_from_entry_id(str(entry_id))
 
         try:
-            # Extract additional summary fields for home page display
-            similarity_threshold = result_summary.get('similarity_threshold', 90)
-            activity_types = result_summary.get('activity_types')
-            qed = result_summary.get('qed', 0.0)
-            num_outliers = result_summary.get('num_outliers', 0)
             similar_compounds = result_summary.get('total_similar', result_summary.get('similar_count', result_summary.get('total_compounds', 0)))
 
-            # For duplicates, always create new entry (don't update existing)
-            if is_duplicate:
-                # Use entry_id from summary or generate new one
-                entry_id = entry_id_from_summary or str(uuid.uuid4())
-                compound = Compound(
-                    entry_id=entry_id,
-                    compound_name=compound_name,
-                    smiles=smiles,
-                    canonical_smiles=canonical_smiles,
-                    inchikey=inchikey,
-                    inchikey_structure_key=inchikey_structure_key,
-                    chembl_id=result_summary.get('chembl_id', ''),
-                    total_activities=result_summary.get('total_activities', 0),
-                    imp_candidates=result_summary.get('imp_candidates', 0),
-                    imp_score=result_summary.get('imp_score'),
-                    similarity_threshold=similarity_threshold,
-                    activity_types=activity_types,
-                    qed=qed,
-                    num_outliers=num_outliers,
-                    similar_compounds=similar_compounds,
-                    author_name=result_summary.get('author_name'),
-                    storage_path=storage_path,
-                    is_duplicate=True,
-                    duplicate_of=duplicate_of,
-                    processed_at=datetime.now(timezone.utc),
-                )
-                db.add(compound)
-                logger.info(f"Created Compound entry (duplicate): {compound_name} -> {entry_id}")
-                return
-
-            # Check if compound exists, preferring InChIKey match over name
+            # Check if compound exists (for non-child, non-replacement updates)
             # When replacing, ALWAYS create a fresh entry -- never update another
-            # compound that happens to share the InChIKey or name. The old compound
-            # (replace_entry_id) will be deleted after this new one is saved.
+            # compound that happens to share the InChIKey or name.
             existing = None
-            if not replace_entry_id:
+            if not replace_entry_id and parent_id is None:
                 if inchikey:
-                    existing = compound_repo.find_by_inchikey(db, inchikey)
-                    existing = existing[0] if existing else None
+                    # D-27: FOR UPDATE prevents concurrent compound creation race
+                    existing_list = compound_repo.find_by_inchikey(db, inchikey, for_update=True)
+                    existing = existing_list[0] if existing_list else None
 
                 # Only fall back to exact name match if:
                 # 1. No InChIKey provided for the new compound, AND
@@ -1160,110 +1125,91 @@ class JobService:
                 existing.smiles = smiles
                 existing.canonical_smiles = canonical_smiles
                 existing.inchikey = inchikey
-                existing.inchikey_structure_key = inchikey_structure_key
+                if inchikey and '-' in inchikey:
+                    parts = inchikey.split('-')
+                    if len(parts) >= 2:
+                        existing.inchikey_structure_key = f"{parts[0]}-{parts[1]}"
                 existing.chembl_id = result_summary.get('chembl_id', '')
                 existing.total_activities = result_summary.get('total_activities', 0)
                 existing.imp_candidates = result_summary.get('imp_candidates', 0)
                 existing.imp_score = result_summary.get('imp_score')
-                existing.similarity_threshold = similarity_threshold
-                existing.activity_types = activity_types
-                existing.qed = qed
-                existing.num_outliers = num_outliers
+                existing.similarity_threshold = result_summary.get('similarity_threshold', 90)
+                # activity_types in result_summary may be comma-separated string
+                # from ZIP metadata; convert to list for TEXT[] column
+                raw_at = result_summary.get('activity_types')
+                existing.activity_types = raw_at.split(',') if isinstance(raw_at, str) else (raw_at or [])
+                existing.qed = result_summary.get('qed', 0.0)
+                existing.num_outliers = result_summary.get('num_outliers', 0)
                 existing.similar_compounds = similar_compounds
                 existing.author_name = result_summary.get('author_name')
                 existing.storage_path = storage_path
-                existing.processed_at = datetime.now(timezone.utc)  # Update timestamp
-                # Update entry_id if missing (for older records) or use the new one
-                if not existing.entry_id:
-                    existing.entry_id = entry_id_from_summary or str(uuid.uuid4())
+                existing.processed_at = datetime.now(timezone.utc)
+                existing.job_id = job_id
                 logger.info(f"Updated Compound entry: {compound_name}")
             else:
-                # Create new entry with UUID from summary or generate new
-                entry_id = entry_id_from_summary or str(uuid.uuid4())
-                compound = Compound(
+                # Create new entry via repo (handles parent_id versioning automatically)
+                compound_repo.create_compound(
+                    db,
                     entry_id=entry_id,
+                    job_id=job_id,
                     compound_name=compound_name,
                     smiles=smiles,
                     canonical_smiles=canonical_smiles,
                     inchikey=inchikey,
-                    inchikey_structure_key=inchikey_structure_key,
                     chembl_id=result_summary.get('chembl_id', ''),
+                    imp_score=result_summary.get('imp_score'),
+                    similar_compounds=similar_compounds,
                     total_activities=result_summary.get('total_activities', 0),
                     imp_candidates=result_summary.get('imp_candidates', 0),
-                    imp_score=result_summary.get('imp_score'),
-                    similarity_threshold=similarity_threshold,
-                    activity_types=activity_types,
-                    qed=qed,
-                    num_outliers=num_outliers,
-                    similar_compounds=similar_compounds,
+                    qed=result_summary.get('qed', 0.0),
+                    num_outliers=result_summary.get('num_outliers', 0),
+                    similarity_threshold=result_summary.get('similarity_threshold', 90),
+                    activity_types=(
+                        raw_at.split(',') if isinstance((raw_at := result_summary.get('activity_types')), str)
+                        else (raw_at or [])
+                    ),
                     author_name=result_summary.get('author_name'),
                     storage_path=storage_path,
-                    is_duplicate=is_duplicate,
-                    duplicate_of=duplicate_of,
-                    processed_at=datetime.now(timezone.utc),
+                    parent_id=parent_id,  # None for root, UUID for child -- repo auto-calculates version
                 )
-                db.add(compound)
                 logger.info(f"Created Compound entry: {compound_name} -> {entry_id}")
 
+            # Determine the entry_id of the newly created/updated compound
+            new_entry_id = existing.entry_id if existing else entry_id
+
             # Re-point orphaned children from a replaced compound to this new one
-            if inherit_children_from and not is_duplicate:
-                # Determine the entry_id of the newly created/updated compound
-                if existing:
-                    new_entry_id = existing.entry_id
-                else:
-                    new_entry_id = entry_id  # Set in the "else" branch above
-                children = compound_repo.find_children(db, inherit_children_from)
+            if inherit_children_from:
+                children = compound_repo.find_children(db, uuid.UUID(inherit_children_from))
                 for child in children:
-                    child.duplicate_of = new_entry_id
+                    child.parent_id = new_entry_id
                     logger.info(
                         f"Re-pointed child '{child.compound_name}' ({child.entry_id}) "
-                        f"duplicate_of: {inherit_children_from} -> {new_entry_id}"
+                        f"parent_id: {inherit_children_from} -> {new_entry_id}"
                     )
                 if children:
                     logger.info(f"Inherited {len(children)} children from {inherit_children_from}")
 
             # Delete old compound AFTER replacement succeeds (deferred from job creation)
-            # This prevents data loss: if the job had failed, the old compound would remain
-            # NOTE: Azure/local file cleanup is deferred to AFTER the lock is released
-            # (see complete_job) to avoid blocking other threads on network I/O.
             if replace_entry_id:
-                old_compound = compound_repo.get_by_entry_id(db, replace_entry_id)
+                old_compound = compound_repo.get_by_entry_id(db, uuid.UUID(replace_entry_id))
                 if old_compound:
                     old_name = old_compound.compound_name
 
-                    # Promote children before deleting (prevents orphans)
-                    if not old_compound.is_duplicate:
-                        # Re-point any remaining children to the new compound
-                        remaining_children = compound_repo.find_children(db, replace_entry_id)
-                        new_id = existing.entry_id if existing else entry_id
-                        for child in remaining_children:
-                            child.duplicate_of = new_id
-                            logger.info(
-                                f"Re-pointed child '{child.compound_name}' from replaced "
-                                f"compound to new entry {new_id}"
-                            )
+                    # Re-point any remaining children to the new compound
+                    remaining_children = compound_repo.find_children(db, uuid.UUID(replace_entry_id))
+                    for child in remaining_children:
+                        child.parent_id = new_entry_id
+                        logger.info(
+                            f"Re-pointed child '{child.compound_name}' from replaced "
+                            f"compound to new entry {new_entry_id}"
+                        )
 
-                    # Archive to deleted_compounds table before deletion (audit trail)
-                    deleted_record = DeletedCompound(
-                        original_id=old_compound.id,
-                        entry_id=old_compound.entry_id,
-                        compound_name=old_compound.compound_name,
-                        chembl_id=old_compound.chembl_id,
-                        smiles=old_compound.smiles,
-                        inchikey=old_compound.inchikey,
-                        author_name=old_compound.author_name,
-                        is_duplicate=old_compound.is_duplicate,
-                        duplicate_of=old_compound.duplicate_of,
-                        activity_types=old_compound.activity_types,
-                        storage_path=old_compound.storage_path,
-                        deleted_by_session=session_id,
-                        deleted_by_job_id=job_id,
+                    # Archive via repo method and delete
+                    compound_repo.archive_compound(
+                        db, old_compound,
+                        deleted_by=uuid.UUID(session_id) if session_id else None,
                         deletion_reason="replaced",
-                        original_processed_at=old_compound.processed_at,
                     )
-                    db.add(deleted_record)
-
-                    # Delete from database (DB operation - safe inside lock)
                     db.delete(old_compound)
                     logger.info(
                         f"Replacement complete: archived and deleted old compound '{old_name}' "
@@ -1271,17 +1217,31 @@ class JobService:
                     )
 
         except IntegrityError as e:
-            # Unique constraint on inchikey_structure_key -- concurrent duplicate submission
-            # lost the race. Roll back and log; the other submission's compound will be kept.
-            # NOTE: db.rollback() reverts ALL pending ORM changes in this session,
-            # including job.result_path and job.result_summary set by complete_job.
-            # We must signal the caller to re-apply them after rollback.
+            # D-28, D-30: Constraint-aware IntegrityError attribution
             db.rollback()
-            logger.warning(
-                f"Duplicate structure key race for {compound_name} "
-                f"(structure_key={inchikey_structure_key}): {e}"
-            )
-            return
+            try:
+                from psycopg2.errors import UniqueViolation  # type: ignore[import-untyped]
+                if isinstance(e.orig, UniqueViolation):
+                    constraint = getattr(e.orig.diag, 'constraint_name', None)
+                    if constraint == 'compounds_pkey':
+                        logger.warning(f"UUID collision on entry_id={entry_id}")
+                    elif constraint == 'uq_compound_parent_version':
+                        logger.warning(f"Version conflict on parent_id/version for {compound_name}")
+                    elif constraint and 'inchikey' in constraint:
+                        logger.warning(f"InChIKey structure key conflict for {inchikey}")
+                    else:
+                        logger.warning(f"Unique constraint violation ({constraint}) for {compound_name}")
+                else:
+                    logger.warning(f"IntegrityError for {compound_name}: {e}")
+            except ImportError:
+                logger.warning(f"IntegrityError for {compound_name}: {e}")
+            # Re-fetch existing compound and treat as duplicate
+            existing_after = compound_repo.find_by_inchikey(db, inchikey) if inchikey else []
+            if existing_after:
+                logger.info(f"Treating as existing compound after constraint violation for {compound_name}")
+                return
+            # Unknown IntegrityError with no existing compound -- re-raise
+            raise
         except Exception as e:
             logger.error(f"Failed to update Compound entry for {compound_name}: {e}")
             raise  # Propagate to complete_job -- job must not be marked COMPLETED
@@ -1292,37 +1252,33 @@ class JobService:
         job_id: str,
         error_message: str,
         cascade_results: list = None,
-    ) -> Optional[Job]:
+    ) -> Job | None:
         """
-        Mark job as failed with thread-safe locking.
+        Mark job as failed.
 
         Args:
             db: Database session
             job_id: Job ID
             error_message: Error description
             cascade_results: Optional list of {threshold, count} dicts from
-                cascade similarity probing (stored in result_summary JSON).
+                cascade similarity probing (stored in result_summary JSONB).
         """
-        with _db_write_lock:
-            job = self._get_job_for_update(db, job_id)
-            if not job:
-                logger.warning(f"Job {job_id} not found for failure")
-                return None
+        job = self._get_job_for_update(db, job_id)
+        if not job:
+            logger.warning(f"Job {job_id} not found for failure")
+            return None
 
-            job.status = JobStatus.FAILED
-            job.current_step = "Failed"
-            job.error_message = error_message
-            job.completed_at = datetime.now(timezone.utc)
+        job.status = JobStatus.FAILED
+        job.current_step = "Failed"
+        job.error_message = error_message
+        job.completed_at = datetime.now(timezone.utc)
 
-            if cascade_results is not None:
-                job.result_summary = json.dumps({"cascade_results": cascade_results})
+        if cascade_results is not None:
+            job.result_summary = {"cascade_results": cascade_results}  # JSONB -- dict directly
 
-            db.commit()
-            db.refresh(job)
-            metrics.increment('jobs_failed')
-
-        # Sync to Azure (outside lock - this is network I/O)
-        sync_db_to_azure()
+        db.commit()
+        db.refresh(job)
+        metrics.increment('jobs_failed')
 
         logger.error(f"Job {job_id} failed: {error_message}")
         return job
@@ -1331,31 +1287,61 @@ class JobService:
         self,
         db: Session,
         job_id: str,
-    ) -> Optional[Job]:
+    ) -> Job | None:
         """
-        Mark job as cancelled with thread-safe locking.
+        Mark job as cancelled.
 
         Args:
             db: Database session
             job_id: Job ID
         """
-        with _db_write_lock:
-            job = self._get_job_for_update(db, job_id)
-            if not job:
-                logger.warning(f"Job {job_id} not found for cancellation")
-                return None
+        job = self._get_job_for_update(db, job_id)
+        if not job:
+            logger.warning(f"Job {job_id} not found for cancellation")
+            return None
 
-            if job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
-                logger.warning(f"Job {job_id} cannot be cancelled (status: {job.status})")
-                return job
+        if job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
+            logger.warning(f"Job {job_id} cannot be cancelled (status: {job.status})")
+            return job
 
-            job.status = JobStatus.CANCELLED
-            job.current_step = "Cancelled"
-            job.completed_at = datetime.now(timezone.utc)
+        # Clean up orphaned compound if cancelling a PENDING_UPLOAD job (D-05)
+        if job.status == JobStatus.PENDING_UPLOAD:
+            entry_id = None
+            if job.result_summary:
+                entry_id = job.result_summary.get("entry_id")
+            if entry_id:
+                try:
+                    compound = compound_repo.get_by_entry_id(db, entry_id)
+                    if compound:
+                        compound_repo.delete_compound(db, compound)
+                        logger.warning(
+                            f"Cleaning up orphaned compound {entry_id} "
+                            f"from cancelled PENDING_UPLOAD job {job_id}"
+                        )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to clean up compound {entry_id} "
+                        f"from cancelled PENDING_UPLOAD job {job_id}: {e}"
+                    )
 
-            db.commit()
-            db.refresh(job)
-            metrics.increment('jobs_cancelled')
+        job.status = JobStatus.CANCELLED
+        job.current_step = "Cancelled"
+        now = datetime.now(timezone.utc)
+        job.cancelled_at = now
+        job.completed_at = now
+
+        # Audit event
+        from backend.services._audit import log_audit_event
+        from backend.models.enums import AuditEventType
+        log_audit_event(
+            db, AuditEventType.JOB_CANCELLED,
+            session_id=job.session_id,
+            details={"job_id": str(job_id), "compound_name": job.compound_name},
+        )
+
+        db.commit()
+        db.refresh(job)
+        metrics.increment('jobs_cancelled')
 
         logger.info(f"Job {job_id} cancelled")
         return job
@@ -1373,6 +1359,12 @@ class JobService:
         """
         result = job_repo.delete_job(db, job_id)
         if result:
+            from backend.services._audit import log_audit_event
+            from backend.models.enums import AuditEventType
+            log_audit_event(
+                db, AuditEventType.JOB_DELETED,
+                details={"job_id": str(job_id)},
+            )
             db.commit()
             logger.info(f"Job {job_id} deleted")
         return result
@@ -1382,7 +1374,7 @@ class JobService:
     ) -> DeleteResponse:
         """Delete a job and clean up all associated resources.
 
-        Orchestrates: JSON parsing, Azure deletion, local file cleanup,
+        Orchestrates: Azure deletion, local file cleanup,
         compound archiving, compound deletion, and job deletion.
 
         Args:
@@ -1400,53 +1392,48 @@ class JobService:
         if not job:
             raise ValueError("Job not found")
 
-        # Extract compound name from input_params
-        compound_name = None
-        if job.input_params:
-            try:
-                params = InputParams.model_validate_json(job.input_params)
-                compound_name = params.compound_name
-            except Exception:
-                pass
+        # D-24: Defense in depth -- block delete of active jobs
+        if job.status in (JobStatus.PENDING, JobStatus.PROCESSING):
+            raise ValueError(
+                "Cannot delete active jobs. Cancel first "
+                "(POST /jobs/{id}/cancel), then delete after status is CANCELLED."
+            )
 
-        # Extract entry_id from result_summary
+        # Direct column access -- no JSON parsing
+        compound_name = job.compound_name
+
+        # Extract entry_id from result_summary JSONB
         entry_id = None
         if job.result_summary:
-            try:
-                summary = ResultSummary.model_validate_json(job.result_summary)
-                entry_id = summary.entry_id
-            except Exception:
-                pass
+            entry_id = job.result_summary.get("entry_id")
 
         # Clean up result files and compound record
         if entry_id:
-            delete_result_from_azure_by_entry_id(entry_id)
-            prefix = entry_id[:2].lower()
-            local_zip = settings.RESULTS_DIR / prefix / f"{entry_id}.zip"
+            eid = str(entry_id).lower()
+            delete_result_from_azure_by_entry_id(eid)
+            prefix = eid[:2]
+            local_zip = settings.RESULTS_DIR / prefix / f"{eid}.zip"
             if local_zip.exists():
                 try:
                     local_zip.unlink()
                 except Exception as e:
                     logger.warning(f"Failed to delete local result {local_zip}: {e}")
 
-            with _db_write_lock:
-                compound_entry = compound_repo.get_by_entry_id(db, entry_id)
-                if compound_entry:
-                    compound_repo.archive_compound(
-                        db, compound_entry,
-                        session_id=session_id,
-                        deletion_reason="user_request",
-                        job_id=job_id,
-                    )
-                    compound_repo.delete_compound(db, compound_entry)
-                # Delete job in same transaction to maintain atomicity
-                job_repo.delete_job(db, job_id)
-                db.commit()
+            compound_entry = compound_repo.get_by_entry_id(db, entry_id)
+            if compound_entry:
+                compound_repo.archive_compound(
+                    db, compound_entry,
+                    deleted_by=uuid.UUID(session_id) if session_id else None,
+                    deletion_reason="user_request",
+                )
+                compound_repo.delete_compound(db, compound_entry)
+            # Delete job in same transaction to maintain atomicity
+            job_repo.delete_job(db, job_id)
+            db.commit()
         else:
-            # No compound to clean up — just delete the job
-            with _db_write_lock:
-                job_repo.delete_job(db, job_id)
-                db.commit()
+            # No compound to clean up -- just delete the job
+            job_repo.delete_job(db, job_id)
+            db.commit()
 
         return DeleteResponse(
             message="Job and results deleted",
@@ -1463,8 +1450,8 @@ class JobService:
         db: Session,
         request: JobCreate,
         session_id: str,
-        idempotency_key: Optional[str] = None,
-    ) -> Union[JobResponse, DuplicateFoundResponse]:
+        idempotency_key: str | None = None,
+    ) -> JobResponse | DuplicateFoundResponse:
         """Submit a new compound processing job with duplicate detection.
 
         Handles idempotency, InChIKey-based duplicate detection, and atomic
@@ -1486,7 +1473,7 @@ class JobService:
 
         # Pre-compute submitted config for comparison
         submitted_threshold = request.similarity_threshold or 90
-        submitted_at = _normalize_activity_types(request.activity_types)
+        submitted_at = _normalize_activity_types_list(request.activity_types)
 
         def _build_duplicate_response(
             existing_compound: Compound,
@@ -1513,7 +1500,7 @@ class JobService:
                     inchikey=existing_compound.inchikey,
                     processed_at=existing_compound.processed_at.isoformat() if existing_compound.processed_at else None,
                     similarity_threshold=existing_compound.similarity_threshold,
-                    activity_types=_normalize_activity_types_str(existing_compound.activity_types),
+                    activity_types=existing_compound.activity_types or [],
                     author_name=existing_compound.author_name,
                 ),
                 submitted={
@@ -1521,13 +1508,13 @@ class JobService:
                     "inchikey": inchikey,
                     "smiles": request.smiles,
                     "similarity_threshold": submitted_threshold,
-                    "activity_types": submitted_at,
+                    "activity_types": sorted(submitted_at),
                 },
                 suggested_name=suggested_name,
                 config_diff=config_diff,
             )
 
-        def _find_best_duplicate_match() -> Optional[DuplicateFoundResponse]:
+        def _find_best_duplicate_match() -> DuplicateFoundResponse | None:
             if not inchikey:
                 return None
             existing_compounds = compound_repo.find_by_inchikey(db, inchikey)
@@ -1535,16 +1522,16 @@ class JobService:
                 return None
 
             exact_config_match = None
-            first_non_duplicate = None
+            first_root = None
             for comp in existing_compounds:
                 config = _compute_config_match(comp, submitted_threshold, submitted_at)
                 if config == "identical":
                     exact_config_match = comp
                     break
-                if not comp.is_duplicate and first_non_duplicate is None:
-                    first_non_duplicate = comp
+                if comp.parent_id is None and first_root is None:
+                    first_root = comp
 
-            match_compound = exact_config_match or first_non_duplicate or existing_compounds[0]
+            match_compound = exact_config_match or first_root or existing_compounds[0]
             config_match = _compute_config_match(match_compound, submitted_threshold, submitted_at)
             return _build_duplicate_response(match_compound, config_match)
 
@@ -1559,9 +1546,13 @@ class JobService:
                 job = self.create_job(
                     db,
                     JobType.SINGLE,
-                    request.model_dump(exclude={"session_id"}),
+                    compound_name=request.compound_name,
+                    smiles=request.smiles,
+                    similarity_threshold=request.similarity_threshold or 90,
+                    activity_types=request.activity_types,
                     session_id=session_id,
                     idempotency_key=idempotency_key,
+                    author_name=getattr(request, 'author_name', None),
                 )
                 return _job_to_response(job)
 
@@ -1583,7 +1574,7 @@ class JobService:
         db: Session,
         request: ResolveDuplicateRequest,
         session_id: str,
-    ) -> Union[JobResponse, SkipResponse]:
+    ) -> JobResponse | SkipResponse:
         """Resolve a duplicate compound situation based on user's choice.
 
         Returns:
@@ -1592,7 +1583,7 @@ class JobService:
         Raises:
             ValueError: For invalid requests (missing entry_id, identical config duplicate).
         """
-        from backend.core.scheduler import job_scheduler
+        from backend.core import scheduler
 
         # Handle SKIP action
         if request.action == DuplicateAction.SKIP:
@@ -1613,12 +1604,13 @@ class JobService:
                 if existing:
                     old_name = existing.compound_name
                     old_entry_id = existing.entry_id
-                    replace_entry_id = old_entry_id
+                    replace_entry_id = str(old_entry_id)
 
-                    if not existing.is_duplicate:
+                    # Root compounds may have children that need re-parenting
+                    if existing.parent_id is None:
                         children = compound_repo.find_children(db, old_entry_id)
                         if children:
-                            inherit_children_from = old_entry_id
+                            inherit_children_from = str(old_entry_id)
                             logger.info(
                                 f"Compound '{old_name}' has {len(children)} children - "
                                 f"will inherit after replacement completes"
@@ -1634,29 +1626,21 @@ class JobService:
             else:
                 compound_name = request.new_compound_name or request.compound_name
 
-            job_params = {
-                "compound_name": compound_name,
-                "author_name": request.author_name,
-                "smiles": request.smiles,
-                "similarity_threshold": request.similarity_threshold,
-                "activity_types": request.activity_types,
-            }
-            if inherit_children_from:
-                job_params["inherit_children_from"] = inherit_children_from
-            if replace_entry_id:
-                job_params["replace_entry_id"] = replace_entry_id
-                if existing and existing.is_duplicate:
-                    job_params["is_duplicate"] = True
-                    job_params["duplicate_of"] = existing.duplicate_of
-
             job = self.create_job(
                 db,
                 JobType.SINGLE,
-                job_params,
+                compound_name=compound_name,
+                smiles=request.smiles,
+                similarity_threshold=request.similarity_threshold or 90,
+                activity_types=request.activity_types,
                 session_id=session_id,
+                replace_entry_id=replace_entry_id,
+                inherit_children_from=inherit_children_from,
+                parent_id_for_new=str(existing.parent_id) if existing and existing.parent_id is not None else None,
+                author_name=getattr(request, 'author_name', None),
             )
 
-            job_scheduler.trigger()
+            scheduler.trigger()
             logger.info(f"Job {job.id} created as replacement for {compound_name}")
             return _job_to_response(job)
 
@@ -1669,7 +1653,7 @@ class JobService:
             if not existing:
                 raise ValueError("Invalid existing_entry_id for duplicate action.")
 
-            submitted_at = _normalize_activity_types(request.activity_types)
+            submitted_at = _normalize_activity_types_list(request.activity_types)
             config = _compute_config_match(
                 existing, request.similarity_threshold or 90, submitted_at
             )
@@ -1684,19 +1668,16 @@ class JobService:
             job = self.create_job(
                 db,
                 JobType.SINGLE,
-                {
-                    "compound_name": compound_name,
-                    "author_name": request.author_name,
-                    "smiles": request.smiles,
-                    "similarity_threshold": request.similarity_threshold,
-                    "activity_types": request.activity_types,
-                    "is_duplicate": True,
-                    "duplicate_of": existing.entry_id,
-                },
+                compound_name=compound_name,
+                smiles=request.smiles,
+                similarity_threshold=request.similarity_threshold,
+                activity_types=request.activity_types,
                 session_id=session_id,
+                parent_id_for_new=str(existing.entry_id),
+                author_name=getattr(request, 'author_name', None),
             )
 
-            job_scheduler.trigger()
+            scheduler.trigger()
             logger.info(f"Job {job.id} created as duplicate (tagged) for {compound_name}")
             return _job_to_response(job)
 
@@ -1714,19 +1695,19 @@ class JobService:
         Raises:
             ValueError: If neither compound_names nor compounds provided.
         """
-        structure_matches: List[DuplicateMatch] = []
-        internal_duplicates: List[InternalDuplicateMatch] = []
+        structure_matches: list[DuplicateMatch] = []
+        internal_duplicates: list[InternalDuplicateMatch] = []
         submitted_threshold = request.similarity_threshold or 90
-        submitted_at = _normalize_activity_types(request.activity_types)
+        submitted_at = _normalize_activity_types_list(request.activity_types)
 
-        def _normalize_name(name: Optional[str]) -> str:
+        def _normalize_name(name: str | None) -> str:
             return (name or "").strip().lower()
 
         # Determine which mode we're in
         if request.compounds:
-            compound_names: List[str] = []
-            seen_structure_key_to_name: Dict[str, str] = {}
-            seen_name_to_name: Dict[str, str] = {}
+            compound_names: list[str] = []
+            seen_structure_key_to_name: dict[str, str] = {}
+            seen_name_to_name: dict[str, str] = {}
 
             for compound in request.compounds:
                 submitted_name = compound.compound_name
@@ -1790,16 +1771,16 @@ class JobService:
                         candidates_for_selection = same_name_candidates or existing_candidates
 
                         exact_config_match = None
-                        first_non_duplicate = None
+                        first_root = None
                         for candidate in candidates_for_selection:
                             config = _compute_config_match(candidate, submitted_threshold, submitted_at)
                             if config == "identical":
                                 exact_config_match = candidate
                                 break
-                            if not candidate.is_duplicate and first_non_duplicate is None:
-                                first_non_duplicate = candidate
+                            if candidate.parent_id is None and first_root is None:
+                                first_root = candidate
 
-                        existing_compound = exact_config_match or first_non_duplicate or candidates_for_selection[0]
+                        existing_compound = exact_config_match or first_root or candidates_for_selection[0]
                         config_match = _compute_config_match(existing_compound, submitted_threshold, submitted_at)
                         config_diff = _build_config_diff(existing_compound, submitted_threshold, submitted_at)
 
@@ -1818,7 +1799,7 @@ class JobService:
                             config_match=config_match,
                             config_diff=config_diff,
                             existing_similarity_threshold=existing_compound.similarity_threshold or 90,
-                            existing_activity_types=_normalize_activity_types_str(existing_compound.activity_types),
+                            existing_activity_types=existing_compound.activity_types or [],
                             existing_author_name=existing_compound.author_name,
                             existing_processed_at=(
                                 existing_compound.processed_at.isoformat()
@@ -1873,7 +1854,7 @@ class JobService:
         )
 
         # Compute suggested version names
-        version_targets: List[str] = []
+        version_targets: list[str] = []
         seen_targets = set()
         for m in structure_matches:
             name = m.compound_name
@@ -1907,7 +1888,7 @@ class JobService:
 
         Handles per-compound duplicate decisions, internal dedup, and batch creation.
         """
-        from backend.core.scheduler import job_scheduler
+        from backend.core import scheduler
 
         # Generate a batch_id to link all jobs
         batch_id = self.generate_batch_id()
@@ -1926,8 +1907,8 @@ class JobService:
         marked_duplicate = []
         skipped_internal_duplicates = []
         failed_compounds = []
-        seen_structure_key_to_name: Dict[str, str] = {}
-        seen_name_to_name: Dict[str, str] = {}
+        seen_structure_key_to_name: dict[str, str] = {}
+        seen_name_to_name: dict[str, str] = {}
 
         jobs = []
         for compound in request.compounds:
@@ -1972,6 +1953,7 @@ class JobService:
 
                 replace_entry_id = None
                 inherit_children_from = None
+                parent_id_for_new = None
 
                 if compound_action == 'replace':
                     existing = None
@@ -1979,29 +1961,25 @@ class JobService:
                     if compound_inchikey:
                         candidates = compound_repo.find_by_inchikey(db, compound_inchikey)
                         existing = next(
-                            (c for c in candidates if not c.is_duplicate),
+                            (c for c in candidates if c.parent_id is None),
                             candidates[0] if candidates else None
                         )
                     if existing:
-                        replace_entry_id = existing.entry_id
-                        if not existing.is_duplicate:
+                        replace_entry_id = str(existing.entry_id)
+                        if existing.parent_id is None:
                             children = compound_repo.find_children(db, existing.entry_id)
                             if children:
-                                inherit_children_from = existing.entry_id
+                                inherit_children_from = str(existing.entry_id)
+
+                        # If the existing compound being replaced is a child, preserve its parent_id
+                        if existing.parent_id is not None:
+                            parent_id_for_new = str(existing.parent_id)
 
                         logger.info(
                             f"Batch replace: deletion of '{compound_name}' (entry_id={replace_entry_id}) "
                             f"deferred until replacement job completes"
                         )
 
-                job_params = compound.model_dump(exclude={"session_id", "duplicate_action", "original_compound_name"})
-                if inherit_children_from:
-                    job_params["inherit_children_from"] = inherit_children_from
-                if replace_entry_id:
-                    job_params["replace_entry_id"] = replace_entry_id
-                    if existing and existing.is_duplicate:
-                        job_params["is_duplicate"] = True
-                        job_params["duplicate_of"] = existing.duplicate_of
                 if compound_action == 'duplicate':
                     dup_inchikey = generate_inchikey(compound.smiles) if compound.smiles else None
                     dup_existing = None
@@ -2019,13 +1997,13 @@ class JobService:
                             db, parent_lookup_name
                         )
                         dup_existing = next(
-                            (c for c in name_candidates if not c.is_duplicate),
+                            (c for c in name_candidates if c.parent_id is None),
                             name_candidates[0] if name_candidates else None
                         )
 
                     if dup_existing and dup_existing.entry_id:
                         dup_submitted_threshold = compound.similarity_threshold or 90
-                        dup_submitted_at = _normalize_activity_types(compound.activity_types)
+                        dup_submitted_at = _normalize_activity_types_list(compound.activity_types)
                         dup_config_match = _compute_config_match(dup_existing, dup_submitted_threshold, dup_submitted_at)
 
                         if dup_config_match == "identical":
@@ -2036,8 +2014,7 @@ class JobService:
                             )
                             continue
 
-                        job_params["is_duplicate"] = True
-                        job_params["duplicate_of"] = dup_existing.entry_id
+                        parent_id_for_new = str(dup_existing.entry_id)
                         marked_duplicate.append(compound_name)
                     else:
                         logger.warning(
@@ -2045,12 +2022,24 @@ class JobService:
                             f"processing as new compound"
                         )
 
+                # Resolve per-compound values with batch-level defaults
+                effective_author = getattr(compound, 'author_name', None) or request.author_name
+                effective_threshold = compound.similarity_threshold or request.similarity_threshold or 90
+                effective_activity_types = compound.activity_types or request.activity_types
+
                 job = self.create_job(
                     db,
                     JobType.BATCH,
-                    job_params,
+                    compound_name=compound.compound_name,
+                    smiles=compound.smiles,
+                    similarity_threshold=effective_threshold,
+                    activity_types=effective_activity_types,
                     session_id=session_id,
                     batch_id=batch_id,
+                    replace_entry_id=replace_entry_id,
+                    inherit_children_from=inherit_children_from,
+                    parent_id_for_new=parent_id_for_new,
+                    author_name=effective_author,
                 )
                 jobs.append(_job_to_response(job))
 
@@ -2066,7 +2055,7 @@ class JobService:
                 ))
 
         if jobs:
-            job_scheduler.trigger()
+            scheduler.trigger()
 
         total_skipped = len(skipped_existing) + len(skipped_processing) + len(skipped_internal_duplicates)
         from backend.core.auth import truncate_session_id
@@ -2093,23 +2082,22 @@ class JobService:
             failed_compounds=failed_compounds,
         )
 
-    def check_availability_batch_service(
+    async def check_availability_batch_service(
         self,
         db: Session,
         request: CheckAvailabilityBatchRequest,
     ) -> CheckAvailabilityBatchResponse:
-        """Batch availability check for multiple compounds.
+        """Batch availability check for multiple compounds (D-65: async with asyncio.gather).
 
         Probes ChEMBL for each compound at the requested threshold and all lower
         thresholds. Returns per-compound availability with existing compound matches.
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        from backend.modules.api_client import probe_all_thresholds
+        from backend.modules.api_client import probe_all_thresholds, quick_has_bioactivity
 
-        results: List[CompoundAvailability] = []
+        results: list[CompoundAvailability] = []
 
         # Pre-fetch all existing compounds by InChIKey in a single DB query
-        inchikey_map: Dict[tuple, str] = {}
+        inchikey_map: dict[tuple, str] = {}
         structure_keys: set = set()
         for compound in request.compounds:
             smiles = compound.smiles
@@ -2122,7 +2110,7 @@ class JobService:
                     if sk:
                         structure_keys.add(sk)
 
-        existing_by_structure: Dict[str, List[Compound]] = {}
+        existing_by_structure: dict[str, list[Compound]] = {}
         if structure_keys:
             all_existing = []
             for sk in structure_keys:
@@ -2132,13 +2120,14 @@ class JobService:
                 if sk:
                     existing_by_structure.setdefault(sk, []).append(comp)
 
-        submitted_at = _normalize_activity_types(request.activity_types)
+        submitted_at = _normalize_activity_types_list(request.activity_types)
 
-        def _probe_compound(compound_input) -> CompoundAvailability:
+        async def _probe_compound(compound_input) -> CompoundAvailability:
             smiles = compound_input.smiles
             name = compound_input.compound_name
+            compound_threshold = getattr(compound_input, 'threshold', None) or request.similarity_threshold
 
-            thresholds = probe_all_thresholds(smiles, request.similarity_threshold)
+            thresholds = await probe_all_thresholds(smiles, compound_threshold)
             threshold_items = [
                 ThresholdAvailability(threshold=t["threshold"], count=t["count"])
                 for t in thresholds
@@ -2146,14 +2135,20 @@ class JobService:
 
             count_at_threshold = 0
             for t in thresholds:
-                if t["threshold"] == request.similarity_threshold:
+                if t["threshold"] == compound_threshold:
                     count_at_threshold = t["count"]
                     break
 
-            available = count_at_threshold > 0
+            # Verify bioactivity exists (not just similar compounds)
+            if count_at_threshold > 0:
+                available = await quick_has_bioactivity(
+                    smiles, compound_threshold, request.activity_types
+                )
+            else:
+                available = False
             has_any_data = any(t["count"] > 0 for t in thresholds)
 
-            existing_compounds: List[ExistingCompoundAtThreshold] = []
+            existing_compounds: list[ExistingCompoundAtThreshold] = []
             ik = inchikey_map.get((name, smiles))
             if ik:
                 sk = _inchikey_structure_key(ik)
@@ -2173,24 +2168,29 @@ class JobService:
                 has_any_data=has_any_data,
             )
 
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = {
-                executor.submit(_probe_compound, c): c
-                for c in request.compounds
-            }
-            for future in as_completed(futures):
-                try:
-                    results.append(future.result())
-                except Exception as e:
-                    compound = futures[future]
-                    logger.warning(f"Availability probe failed for {compound.compound_name}: {e}")
-                    results.append(CompoundAvailability(
-                        compound_name=compound.compound_name,
-                        smiles=compound.smiles,
-                        available=False,
-                        count_at_threshold=0,
-                        has_any_data=False,
-                    ))
+        # D-65: asyncio.gather with Semaphore(10) replaces ThreadPoolExecutor
+        sem = asyncio.Semaphore(10)
+
+        async def _bounded_probe(compound_input):
+            async with sem:
+                return await _probe_compound(compound_input)
+
+        tasks = [_bounded_probe(c) for c in request.compounds]
+        gather_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for i, result in enumerate(gather_results):
+            if isinstance(result, Exception):
+                compound = request.compounds[i]
+                logger.warning(f"Availability probe failed for {compound.compound_name}: {result}")
+                results.append(CompoundAvailability(
+                    compound_name=compound.compound_name,
+                    smiles=compound.smiles,
+                    available=False,
+                    count_at_threshold=0,
+                    has_any_data=False,
+                ))
+            else:
+                results.append(result)
 
         available_count = sum(1 for r in results if r.available)
         no_data_count = sum(1 for r in results if not r.has_any_data)
@@ -2203,60 +2203,99 @@ class JobService:
             no_data_count=no_data_count,
         )
 
+    def recover_pending_uploads(self, db: Session) -> dict:
+        """Reconcile PENDING_UPLOAD jobs on startup (per D-45).
+
+        - ZIP exists locally -> leave as PENDING_UPLOAD (upload worker picks up)
+        - ZIP missing + requeue_count < 3 -> delete compound, requeue -> PENDING
+        - ZIP missing + requeue_count >= 3 -> mark FAILED permanently
+        """
+        stats = {"left_pending": 0, "requeued": 0, "failed": 0}
+        pending_upload_jobs = job_repo.get_by_status(db, JobStatus.PENDING_UPLOAD)
+
+        for job in pending_upload_jobs:
+            entry_id = (job.result_summary or {}).get("entry_id")
+            if not entry_id:
+                continue
+            zip_path = settings.RESULTS_DIR / entry_id[:2] / f"{entry_id}.zip"
+            if zip_path.exists():
+                stats["left_pending"] += 1  # Upload worker picks up
+            elif job.requeue_count < 3:
+                # ZIP missing -- delete compound entry and requeue
+                try:
+                    compound_repo.delete_by_entry_id(db, uuid.UUID(entry_id))
+                except Exception:
+                    pass
+                job.status = JobStatus.PENDING
+                job.requeue_count += 1
+                job.upload_attempts = 0
+                job.started_at = None
+                job.current_step = f"Queued (requeued on startup, ZIP missing, attempt {job.requeue_count}/3)"
+                db.commit()
+                stats["requeued"] += 1
+            else:
+                job.status = JobStatus.FAILED
+                job.error_message = "Job failed permanently: upload failed after 3 full processing cycles"
+                job.completed_at = datetime.now(timezone.utc)
+                db.commit()
+                stats["failed"] += 1
+
+        if any(v > 0 for v in stats.values()):
+            logger.info(f"PENDING_UPLOAD recovery: {stats}")
+        return stats
+
     def recover_on_startup(self, db: Session, scheduler_trigger) -> dict:
         """Recover stalled jobs on startup using state machine validators.
 
-        Resets PROCESSING -> PENDING (if valid transition), identifies SYNC_PENDING
-        jobs for retry, and triggers the scheduler if there's work to do.
+        Resets PROCESSING -> PENDING (if valid transition) and triggers the
+        scheduler if there's work to do.
 
-        Uses VALID_TRANSITIONS to validate status changes instead of direct
-        ORM attribute assignment (ARCH-12).
+        Uses VALID_TRANSITIONS to validate status changes.
 
         Args:
             db: Database session
-            scheduler_trigger: Callable to trigger the job scheduler (e.g., job_scheduler.trigger)
+            scheduler_trigger: Callable to trigger the job scheduler
 
         Returns:
-            Dict with recovery stats: {recovered, pending, sync_pending}
+            Dict with recovery stats: {recovered, pending}
         """
         stalled = job_repo.get_by_status(db, JobStatus.PROCESSING)
         pending_count = job_repo.count_by_status(db, [JobStatus.PENDING])
-        sync_pending = job_repo.get_by_status(db, JobStatus.SYNC_PENDING)
 
         recovered = 0
         for job in stalled:
-            original_status = job.status
-            valid_next = VALID_TRANSITIONS.get(original_status, set())
-            if JobStatus.PENDING in valid_next:
-                job.status = JobStatus.PENDING
-                job.current_step = "Queued (recovered)"
-                recovered += 1
-                logger.info(f"Recovered stalled job {job.id} from {original_status}")
-            else:
-                logger.warning(
-                    f"Cannot recover job {job.id}: status {original_status} "
-                    f"has no valid transition to PENDING (valid: {valid_next})"
-                )
+            try:
+                original_status = job.status
+                valid_next = VALID_TRANSITIONS.get(original_status, set())
+                if JobStatus.PENDING in valid_next:
+                    job.status = JobStatus.PENDING
+                    job.current_step = "Queued (recovered)"
+                    db.commit()
+                    recovered += 1
+                    logger.info(f"Recovered stalled job {job.id} from {original_status}")
+                else:
+                    logger.warning(
+                        f"Cannot recover job {job.id}: status {original_status} "
+                        f"has no valid transition to PENDING (valid: {valid_next})"
+                    )
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Failed to recover job {job.id}: {e}")
 
         if recovered:
-            db.commit()
             logger.info(f"Startup recovery complete: {recovered} jobs recovered")
 
-        if sync_pending:
-            logger.info(f"Found {len(sync_pending)} SYNC_PENDING jobs for Azure retry")
-
         # Trigger scheduler if there's any work
-        if stalled or pending_count > 0 or sync_pending:
+        if stalled or pending_count > 0:
             scheduler_trigger()
             logger.info(
                 f"Scheduler triggered on startup "
-                f"(recovered={recovered}, pending={pending_count}, sync_pending={len(sync_pending)})"
+                f"(recovered={recovered}, pending={pending_count})"
             )
 
         return {
             "recovered": recovered,
             "pending": pending_count,
-            "sync_pending": len(sync_pending),
         }
 
 

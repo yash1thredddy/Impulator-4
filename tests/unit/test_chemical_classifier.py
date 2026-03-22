@@ -1,484 +1,498 @@
 """
-Unit tests for Chemical Classification Module.
+Unit tests for Chemical Classification Module (async rewrite).
 
 Tests ClassyFire and NPClassifier integration including:
-- ClassyFire API classification
-- NPClassifier API classification
-- Complete classification combination
-- Compound type inference
-- Error handling
+- ClassyFire API classification (async)
+- NPClassifier API classification (async)
+- Complete classification combination (parallel asyncio.gather)
+- Circuit breaker behavior (D-31/D-33/D-34)
+- Compound type inference (sync)
+- Error handling and graceful degradation
+- No threading artifacts
+
+asyncio_mode = auto in pytest.ini -- no @pytest.mark.asyncio needed.
 """
-from unittest.mock import patch, MagicMock
+
+import inspect
+import time
+
+import httpx
+import pytest
+from unittest.mock import AsyncMock, MagicMock
+
+from backend.modules.chemical_classifier import (
+    _circuits,
+    _get_circuit,
+    _is_circuit_open,
+    _record_failure,
+    _record_success,
+    classify_compound_type,
+    create_classifier_client,
+    extract_classyfire_fields,
+    get_classyfire_classification,
+    get_classification_summary,
+    get_complete_classification,
+    get_npclassifier_classification,
+    shutdown_classifier,
+)
 
 
-class TestGetClassyFireClassification:
-    """Tests for get_classyfire_classification function."""
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-    def test_successful_classification(self):
-        """Test successful ClassyFire classification."""
-        from backend.modules.chemical_classifier import get_classyfire_classification
+def _mock_response(status_code=200, json_data=None, headers=None):
+    """Create a mock httpx.Response."""
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = status_code
+    resp.json.return_value = json_data or {}
+    resp.raise_for_status = MagicMock()
+    resp.headers = headers or {}
+    if status_code >= 400:
+        resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            f"HTTP {status_code}", request=MagicMock(), response=resp
+        )
+    return resp
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'kingdom': {'name': 'Organic compounds'},
-            'superclass': {'name': 'Phenylpropanoids and polyketides'},
-            'class': {'name': 'Flavonoids', 'chemont_id': 'CHEMONTID:0000001'},
-            'subclass': {'name': 'Flavones', 'chemont_id': 'CHEMONTID:0000002'},
-            'direct_parent': {'name': 'Hydroxyflavones'},
-            'molecular_framework': 'Aromatic homomonocyclic compounds',
-            'description': 'A flavonoid compound'
-        }
 
-        mock_session = MagicMock()
-        mock_session.get.return_value = mock_response
+# ---------------------------------------------------------------------------
+# Circuit breaker importability
+# ---------------------------------------------------------------------------
 
-        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
-            result = get_classyfire_classification('REFJWTPEDVJJIY-UHFFFAOYSA-N')
 
+class TestCircuitBreakerImportability:
+    """Verify circuit breaker state is accessible for test manipulation (W4)."""
+
+    def test_circuits_dict_importable(self):
+        assert isinstance(_circuits, dict)
+
+    def test_get_circuit_importable(self):
+        circuit = _get_circuit("test_classifier_cb")
+        assert "failures" in circuit
+        assert "open_until" in circuit
+        assert "threshold" in circuit
+        _circuits.pop("test_classifier_cb", None)
+
+    def test_circuit_breaker_helpers_work(self):
+        circuit = _get_circuit("test_classifier_helpers")
+        assert not _is_circuit_open(circuit)
+        _record_failure(circuit)
+        assert circuit["failures"] == 1
+        _record_success(circuit)
+        assert circuit["failures"] == 0
+        _circuits.pop("test_classifier_helpers", None)
+
+    def test_classyfire_circuit_pre_created(self):
+        """ClassyFire circuit is pre-created with threshold=5 (D-34)."""
+        circuit = _get_circuit("classyfire")
+        assert circuit["threshold"] == 5
+
+    def test_npclassifier_circuit_pre_created(self):
+        """NPClassifier circuit is pre-created with threshold=5 (D-34)."""
+        circuit = _get_circuit("npclassifier")
+        assert circuit["threshold"] == 5
+
+
+# ---------------------------------------------------------------------------
+# get_classyfire_classification
+# ---------------------------------------------------------------------------
+
+
+class TestGetClassyfireClassification:
+    """Tests for get_classyfire_classification (async)."""
+
+    async def test_success(self):
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.get.return_value = _mock_response(200, {
+            "kingdom": {"name": "Organic compounds"},
+            "superclass": {"name": "Phenylpropanoids and polyketides"},
+            "class": {"name": "Flavonoids", "chemont_id": "CHEMONTID:0000001"},
+            "subclass": {"name": "Flavones", "chemont_id": "CHEMONTID:0000002"},
+            "direct_parent": {"name": "Hydroxyflavones"},
+            "molecular_framework": "Aromatic homomonocyclic compounds",
+            "description": "A flavonoid compound",
+        })
+        result = await get_classyfire_classification(client, "REFJWTPEDVJJIY-UHFFFAOYSA-N")
         assert result is not None
-        assert result['kingdom']['name'] == 'Organic compounds'
-        assert result['class']['name'] == 'Flavonoids'
+        assert result["kingdom"]["name"] == "Organic compounds"
+        assert result["class"]["name"] == "Flavonoids"
 
-    def test_not_found(self):
-        """Test ClassyFire returns None for unknown InChIKey."""
-        from backend.modules.chemical_classifier import get_classyfire_classification
-
-        mock_response = MagicMock()
-        mock_response.status_code = 404
-
-        mock_session = MagicMock()
-        mock_session.get.return_value = mock_response
-
-        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
-            result = get_classyfire_classification('UNKNOWN-INCHIKEY')
-
+    async def test_404_returns_none(self):
+        client = AsyncMock(spec=httpx.AsyncClient)
+        resp = _mock_response(404)
+        resp.raise_for_status = MagicMock()  # 4xx doesn't trip retry
+        client.get.return_value = resp
+        result = await get_classyfire_classification(client, "UNKNOWN-INCHIKEY")
         assert result is None
 
-    def test_timeout_handling(self):
-        """Test ClassyFire handles timeout gracefully."""
-        from backend.modules.chemical_classifier import get_classyfire_classification
-        import requests
-
-        mock_session = MagicMock()
-        mock_session.get.side_effect = requests.exceptions.Timeout()
-
-        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
-            result = get_classyfire_classification('REFJWTPEDVJJIY-UHFFFAOYSA-N')
-
+    async def test_timeout_returns_none(self):
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.get.side_effect = httpx.ReadTimeout("timeout")
+        result = await get_classyfire_classification(client, "REFJWTPEDVJJIY-UHFFFAOYSA-N")
         assert result is None
 
-    def test_error_handling(self):
-        """Test ClassyFire handles general errors gracefully."""
-        from backend.modules.chemical_classifier import get_classyfire_classification
-        import requests
+    async def test_circuit_open_returns_none(self):
+        circuit = _get_circuit("classyfire")
+        old_failures = circuit["failures"]
+        old_open = circuit["open_until"]
+        circuit["failures"] = 10
+        circuit["open_until"] = time.monotonic() + 300
+        try:
+            client = AsyncMock(spec=httpx.AsyncClient)
+            result = await get_classyfire_classification(client, "REFJWTPEDVJJIY-UHFFFAOYSA-N")
+            assert result is None
+        finally:
+            circuit["failures"] = old_failures
+            circuit["open_until"] = old_open
 
-        mock_session = MagicMock()
-        mock_session.get.side_effect = requests.exceptions.RequestException("Network error")
 
-        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
-            result = get_classyfire_classification('REFJWTPEDVJJIY-UHFFFAOYSA-N')
+# ---------------------------------------------------------------------------
+# get_npclassifier_classification
+# ---------------------------------------------------------------------------
 
+
+class TestGetNpclassifierClassification:
+    """Tests for get_npclassifier_classification (async)."""
+
+    async def test_success(self):
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.get.return_value = _mock_response(200, {
+            "pathway_results": ["Shikimates and Phenylpropanoids"],
+            "superclass_results": ["Flavonoids"],
+            "class_results": ["Flavones"],
+            "isglycoside": False,
+        })
+        result = await get_npclassifier_classification(client, "c1ccc(cc1)O")
+        assert result is not None
+        assert result["NP_Pathway"] == "Shikimates and Phenylpropanoids"
+        assert result["NP_Superclass"] == "Flavonoids"
+        assert result["NP_Class"] == "Flavones"
+        assert not result["NP_isglycoside"]
+
+    async def test_glycoside_detection(self):
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.get.return_value = _mock_response(200, {
+            "pathway_results": ["Carbohydrates"],
+            "superclass_results": ["Glycosides"],
+            "class_results": ["O-glycosides"],
+            "isglycoside": True,
+        })
+        result = await get_npclassifier_classification(client, "glycoside_smiles")
+        assert result is not None
+        assert result["NP_isglycoside"]
+
+    async def test_empty_results(self):
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.get.return_value = _mock_response(200, {
+            "pathway_results": [],
+            "superclass_results": [],
+            "class_results": [],
+            "isglycoside": False,
+        })
+        result = await get_npclassifier_classification(client, "CCO")
+        assert result is not None
+        assert result["NP_Pathway"] is None
+        assert result["NP_Superclass"] is None
+
+    async def test_timeout_returns_none(self):
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.get.side_effect = httpx.ReadTimeout("timeout")
+        result = await get_npclassifier_classification(client, "c1ccc(cc1)O")
         assert result is None
 
-
-class TestGetNPClassifierClassification:
-    """Tests for get_npclassifier_classification function."""
-
-    def test_successful_classification(self):
-        """Test successful NPClassifier classification."""
-        from backend.modules.chemical_classifier import get_npclassifier_classification
-
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'pathway_results': ['Shikimates and Phenylpropanoids'],
-            'superclass_results': ['Flavonoids'],
-            'class_results': ['Flavones'],
-            'isglycoside': False
-        }
-
-        mock_session = MagicMock()
-        mock_session.get.return_value = mock_response
-
-        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
-            result = get_npclassifier_classification('c1ccc(cc1)O')
-
-        assert result is not None
-        assert result['NP_Pathway'] == 'Shikimates and Phenylpropanoids'
-        assert result['NP_Superclass'] == 'Flavonoids'
-        assert result['NP_Class'] == 'Flavones'
-        assert not result['NP_isglycoside']
-
-    def test_glycoside_detection(self):
-        """Test NPClassifier detects glycosides."""
-        from backend.modules.chemical_classifier import get_npclassifier_classification
-
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'pathway_results': ['Carbohydrates'],
-            'superclass_results': ['Glycosides'],
-            'class_results': ['O-glycosides'],
-            'isglycoside': True
-        }
-
-        mock_session = MagicMock()
-        mock_session.get.return_value = mock_response
-
-        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
-            result = get_npclassifier_classification('glycoside_smiles')
-
-        assert result is not None
-        assert result['NP_isglycoside']
-
-    def test_empty_results(self):
-        """Test NPClassifier handles empty results."""
-        from backend.modules.chemical_classifier import get_npclassifier_classification
-
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'pathway_results': [],
-            'superclass_results': [],
-            'class_results': [],
-            'isglycoside': False
-        }
-
-        mock_session = MagicMock()
-        mock_session.get.return_value = mock_response
-
-        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
-            result = get_npclassifier_classification('CCO')
-
-        assert result is not None
-        assert result['NP_Pathway'] is None
-        assert result['NP_Superclass'] is None
-
-    def test_timeout_handling(self):
-        """Test NPClassifier handles timeout gracefully."""
-        from backend.modules.chemical_classifier import get_npclassifier_classification
-        import requests
-
-        mock_session = MagicMock()
-        mock_session.get.side_effect = requests.exceptions.Timeout()
-
-        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
-            result = get_npclassifier_classification('c1ccc(cc1)O')
-
-        assert result is None
+    async def test_circuit_open_returns_none(self):
+        circuit = _get_circuit("npclassifier")
+        old_failures = circuit["failures"]
+        old_open = circuit["open_until"]
+        circuit["failures"] = 10
+        circuit["open_until"] = time.monotonic() + 300
+        try:
+            client = AsyncMock(spec=httpx.AsyncClient)
+            result = await get_npclassifier_classification(client, "CCO")
+            assert result is None
+        finally:
+            circuit["failures"] = old_failures
+            circuit["open_until"] = old_open
 
 
-class TestExtractClassyFireFields:
-    """Tests for extract_classyfire_fields function."""
-
-    def test_full_extraction(self):
-        """Test extraction of all ClassyFire fields."""
-        from backend.modules.chemical_classifier import extract_classyfire_fields
-
-        cf_data = {
-            'kingdom': {'name': 'Organic compounds'},
-            'superclass': {'name': 'Phenylpropanoids'},
-            'class': {'name': 'Flavonoids', 'chemont_id': 'CHEMONTID:0000001'},
-            'subclass': {'name': 'Flavones', 'chemont_id': 'CHEMONTID:0000002'},
-            'direct_parent': {'name': 'Hydroxyflavones'},
-            'molecular_framework': 'Aromatic',
-            'description': 'A flavonoid'
-        }
-
-        result = extract_classyfire_fields(cf_data)
-
-        assert result['Kingdom'] == 'Organic compounds'
-        assert result['Superclass'] == 'Phenylpropanoids'
-        assert result['Class'] == 'Flavonoids'
-        assert result['Subclass'] == 'Flavones'
-        assert result['Direct_Parent'] == 'Hydroxyflavones'
-        assert result['Molecular_Framework'] == 'Aromatic'
-        assert result['Description'] == 'A flavonoid'
-        assert result['ChEMONT_ID_Class'] == 'CHEMONTID:0000001'
-        assert result['ChEMONT_ID_Subclass'] == 'CHEMONTID:0000002'
-
-    def test_none_input(self):
-        """Test extraction with None input returns empty fields."""
-        from backend.modules.chemical_classifier import extract_classyfire_fields
-
-        result = extract_classyfire_fields(None)
-
-        assert result['Kingdom'] == ''
-        assert result['Class'] == ''
-        assert len(result) == 9  # All 9 fields present
-
-    def test_partial_data(self):
-        """Test extraction with partial data."""
-        from backend.modules.chemical_classifier import extract_classyfire_fields
-
-        cf_data = {
-            'kingdom': {'name': 'Organic compounds'},
-            'class': {'name': 'Flavonoids'}
-            # Missing superclass, subclass, etc.
-        }
-
-        result = extract_classyfire_fields(cf_data)
-
-        assert result['Kingdom'] == 'Organic compounds'
-        assert result['Class'] == 'Flavonoids'
-        assert result['Superclass'] == ''
+# ---------------------------------------------------------------------------
+# get_complete_classification
+# ---------------------------------------------------------------------------
 
 
 class TestGetCompleteClassification:
-    """Tests for get_complete_classification function."""
+    """Tests for get_complete_classification (parallel asyncio.gather)."""
 
-    def test_combined_classification(self):
-        """Test complete classification combines both sources."""
-        from backend.modules.chemical_classifier import get_complete_classification
+    async def test_both_succeed(self):
+        """ClassyFire and NPClassifier called in parallel via asyncio.gather."""
+        client = AsyncMock(spec=httpx.AsyncClient)
+        cf_resp = _mock_response(200, {
+            "kingdom": {"name": "Organic compounds"},
+            "class": {"name": "Flavonoids", "chemont_id": "CHEMONTID:0001"},
+        })
+        np_resp = _mock_response(200, {
+            "pathway_results": ["Shikimates"],
+            "superclass_results": ["Flavonoids"],
+            "class_results": ["Flavones"],
+            "isglycoside": False,
+        })
+        client.get.side_effect = [cf_resp, np_resp]
+        result = await get_complete_classification(
+            client, "c1ccc(cc1)O", "REFJWTPEDVJJIY-UHFFFAOYSA-N",
+        )
+        assert result["Kingdom"] == "Organic compounds"
+        assert result["Class"] == "Flavonoids"
+        assert result["NP_Pathway"] == "Shikimates"
+        assert result["classification_available"] is True
 
-        cf_response = MagicMock()
-        cf_response.status_code = 200
-        cf_response.json.return_value = {
-            'kingdom': {'name': 'Organic compounds'},
-            'class': {'name': 'Flavonoids', 'chemont_id': 'CHEMONTID:0001'}
+    async def test_classyfire_fails_gracefully(self):
+        """If ClassyFire fails, NPClassifier result still returned (D-34)."""
+        client = AsyncMock(spec=httpx.AsyncClient)
+        np_resp = _mock_response(200, {
+            "pathway_results": ["Shikimates"],
+            "superclass_results": ["Flavonoids"],
+            "class_results": ["Flavones"],
+            "isglycoside": False,
+        })
+        # ClassyFire times out, NPClassifier succeeds
+        client.get.side_effect = [httpx.ReadTimeout("timeout"), np_resp]
+        result = await get_complete_classification(
+            client, "CCO", "LFQSCWFLJHTTHZ-UHFFFAOYSA-N",
+        )
+        assert result["NP_Pathway"] == "Shikimates"
+        assert result["classification_available"] is True
+
+    async def test_npclassifier_fails_gracefully(self):
+        """If NPClassifier fails, ClassyFire result still returned (D-34)."""
+        client = AsyncMock(spec=httpx.AsyncClient)
+        cf_resp = _mock_response(200, {
+            "kingdom": {"name": "Organic compounds"},
+            "class": {"name": "Alkanes"},
+        })
+        # ClassyFire succeeds, NPClassifier times out
+        client.get.side_effect = [cf_resp, httpx.ReadTimeout("timeout")]
+        result = await get_complete_classification(
+            client, "CCCC", "IJDNQMDRQITEOD-UHFFFAOYSA-N",
+        )
+        assert result["Kingdom"] == "Organic compounds"
+        assert result["Class"] == "Alkanes"
+        assert result["NP_Pathway"] == ""
+        assert result["classification_available"] is True
+
+    async def test_both_fail_gracefully(self):
+        """If both fail, returns dict with empty strings (D-34)."""
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.get.side_effect = httpx.ReadTimeout("timeout")
+        result = await get_complete_classification(
+            client, "CCCC", "UNKNOWN",
+        )
+        assert result["Kingdom"] == ""
+        assert result["Class"] == ""
+        assert result["NP_Pathway"] == ""
+        assert result["classification_available"] is False
+
+    async def test_parallel_gather_both_endpoints_called(self):
+        """Verify ClassyFire and NPClassifier are called concurrently."""
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.get.return_value = _mock_response(200, {})
+        result = await get_complete_classification(
+            client, "CCO", "LFQSCWFLJHTTHZ-UHFFFAOYSA-N",
+        )
+        # Both endpoints should be called
+        assert client.get.call_count >= 2
+
+
+# ---------------------------------------------------------------------------
+# extract_classyfire_fields (sync pure function)
+# ---------------------------------------------------------------------------
+
+
+class TestExtractClassyfireFields:
+    """Tests for extract_classyfire_fields."""
+
+    def test_full_extraction(self):
+        cf_data = {
+            "kingdom": {"name": "Organic compounds"},
+            "superclass": {"name": "Phenylpropanoids"},
+            "class": {"name": "Flavonoids", "chemont_id": "CHEMONTID:0000001"},
+            "subclass": {"name": "Flavones", "chemont_id": "CHEMONTID:0000002"},
+            "direct_parent": {"name": "Hydroxyflavones"},
+            "molecular_framework": "Aromatic",
+            "description": "A flavonoid",
         }
+        result = extract_classyfire_fields(cf_data)
+        assert result["Kingdom"] == "Organic compounds"
+        assert result["Superclass"] == "Phenylpropanoids"
+        assert result["Class"] == "Flavonoids"
+        assert result["Subclass"] == "Flavones"
+        assert result["Direct_Parent"] == "Hydroxyflavones"
+        assert result["Molecular_Framework"] == "Aromatic"
+        assert result["Description"] == "A flavonoid"
+        assert result["ChEMONT_ID_Class"] == "CHEMONTID:0000001"
+        assert result["ChEMONT_ID_Subclass"] == "CHEMONTID:0000002"
 
-        np_response = MagicMock()
-        np_response.status_code = 200
-        np_response.json.return_value = {
-            'pathway_results': ['Shikimates'],
-            'superclass_results': ['Flavonoids'],
-            'class_results': ['Flavones'],
-            'isglycoside': False
+    def test_none_input(self):
+        result = extract_classyfire_fields(None)
+        assert result["Kingdom"] == ""
+        assert result["Class"] == ""
+        assert len(result) == 9
+
+    def test_partial_data(self):
+        cf_data = {
+            "kingdom": {"name": "Organic compounds"},
+            "class": {"name": "Flavonoids"},
         }
+        result = extract_classyfire_fields(cf_data)
+        assert result["Kingdom"] == "Organic compounds"
+        assert result["Class"] == "Flavonoids"
+        assert result["Superclass"] == ""
 
-        mock_session = MagicMock()
-        mock_session.get.side_effect = [cf_response, np_response]
 
-        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
-            result = get_complete_classification(
-                smiles='c1ccc(cc1)O',
-                inchikey='REFJWTPEDVJJIY-UHFFFAOYSA-N'
-            )
-
-        # ClassyFire fields
-        assert result['Kingdom'] == 'Organic compounds'
-        assert result['Class'] == 'Flavonoids'
-
-        # NPClassifier fields
-        assert result['NP_Pathway'] == 'Shikimates'
-        assert result['NP_Class'] == 'Flavones'
-
-    def test_classyfire_only(self):
-        """Test classification when only ClassyFire succeeds."""
-        from backend.modules.chemical_classifier import get_complete_classification
-
-        cf_response = MagicMock()
-        cf_response.status_code = 200
-        cf_response.json.return_value = {
-            'kingdom': {'name': 'Organic compounds'},
-            'class': {'name': 'Alkanes'}
-        }
-
-        np_response = MagicMock()
-        np_response.status_code = 500
-
-        mock_session = MagicMock()
-        # ClassyFire gets 200, NPClassifier gets 500 (retry adapter retries on 500)
-        mock_session.get.side_effect = [cf_response, np_response, np_response, np_response]
-
-        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
-            result = get_complete_classification('CCCC', 'IJDNQMDRQITEOD-UHFFFAOYSA-N')
-
-        assert result['Class'] == 'Alkanes'
-        assert result['NP_Pathway'] == ''  # Empty from NPClassifier failure
-
-    def test_neither_source(self):
-        """Test classification when both sources fail."""
-        from backend.modules.chemical_classifier import get_complete_classification
-
-        mock_response = MagicMock()
-        mock_response.status_code = 500
-
-        mock_session = MagicMock()
-        # All calls return 500 (retry adapter retries on 500)
-        mock_session.get.return_value = mock_response
-
-        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
-            result = get_complete_classification('CCCC', 'UNKNOWN')
-
-        assert result['Kingdom'] == ''
-        assert result['Class'] == ''
-        assert result['NP_Pathway'] == ''
+# ---------------------------------------------------------------------------
+# classify_compound_type (sync pure function)
+# ---------------------------------------------------------------------------
 
 
 class TestClassifyCompoundType:
-    """Tests for classify_compound_type function."""
+    """Tests for classify_compound_type."""
 
     def test_natural_product_by_np_pathway(self):
-        """Test natural product detection via NPClassifier pathway."""
-        from backend.modules.chemical_classifier import classify_compound_type
-
-        classification = {
-            'NP_Pathway': 'Terpenoids',
-            'Class': 'Organic compounds'
-        }
-
-        result = classify_compound_type(classification)
-
-        assert result == "Natural Product"
+        classification = {"NP_Pathway": "Terpenoids", "Class": "Organic compounds"}
+        assert classify_compound_type(classification) == "Natural Product"
 
     def test_natural_product_by_classyfire(self):
-        """Test natural product detection via ClassyFire keywords."""
-        from backend.modules.chemical_classifier import classify_compound_type
-
-        classification = {
-            'NP_Pathway': '',
-            'Class': 'Flavonoids'
-        }
-
-        result = classify_compound_type(classification)
-
-        assert result == "Natural Product"
+        classification = {"NP_Pathway": "", "Class": "Flavonoids"}
+        assert classify_compound_type(classification) == "Natural Product"
 
     def test_natural_product_alkaloid(self):
-        """Test natural product detection for alkaloids."""
-        from backend.modules.chemical_classifier import classify_compound_type
-
-        classification = {
-            'NP_Pathway': '',
-            'Superclass': 'Alkaloids and derivatives'
-        }
-
-        result = classify_compound_type(classification)
-
-        assert result == "Natural Product"
+        classification = {"NP_Pathway": "", "Superclass": "Alkaloids and derivatives"}
+        assert classify_compound_type(classification) == "Natural Product"
 
     def test_synthetic_compound(self):
-        """Test synthetic compound detection."""
-        from backend.modules.chemical_classifier import classify_compound_type
-
         classification = {
-            'NP_Pathway': '',
-            'Class': 'Organic acids',
-            'Superclass': 'Organic acids and derivatives',
-            'Subclass': 'Carboxylic acids'
+            "NP_Pathway": "",
+            "Class": "Organic acids",
+            "Superclass": "Organic acids and derivatives",
+            "Subclass": "Carboxylic acids",
         }
-
-        result = classify_compound_type(classification)
-
-        assert result == "Synthetic"
+        assert classify_compound_type(classification) == "Synthetic"
 
     def test_empty_classification(self):
-        """Test compound type with empty classification."""
-        from backend.modules.chemical_classifier import classify_compound_type
-
-        classification = {
-            'NP_Pathway': '',
-            'Class': '',
-            'Superclass': '',
-            'Subclass': ''
-        }
-
-        result = classify_compound_type(classification)
-
-        assert result == "Synthetic"  # Default to synthetic
+        classification = {"NP_Pathway": "", "Class": "", "Superclass": "", "Subclass": ""}
+        assert classify_compound_type(classification) == "Synthetic"
 
     def test_none_values_handled(self):
-        """Test that None values in classification are handled."""
-        from backend.modules.chemical_classifier import classify_compound_type
+        classification = {"NP_Pathway": None, "Class": None, "Superclass": None, "Subclass": None}
+        assert classify_compound_type(classification) == "Synthetic"
 
-        classification = {
-            'NP_Pathway': None,
-            'Class': None,
-            'Superclass': None,
-            'Subclass': None
-        }
 
-        result = classify_compound_type(classification)
-
-        assert result == "Synthetic"
+# ---------------------------------------------------------------------------
+# get_classification_summary (sync pure function)
+# ---------------------------------------------------------------------------
 
 
 class TestGetClassificationSummary:
-    """Tests for get_classification_summary function."""
+    """Tests for get_classification_summary."""
 
     def test_summary_with_full_data(self):
-        """Test summary generation with complete data."""
-        from backend.modules.chemical_classifier import get_classification_summary
-
         classification = {
-            'Kingdom': 'Organic compounds',
-            'Superclass': 'Phenylpropanoids',
-            'Class': 'Flavonoids',
-            'Subclass': 'Flavones',
-            'NP_Pathway': 'Shikimates',
-            'NP_Superclass': 'Flavonoids',
-            'NP_Class': 'Flavones',
-            'NP_isglycoside': False,
-            'Molecular_Framework': 'Aromatic'
+            "Kingdom": "Organic compounds",
+            "Superclass": "Phenylpropanoids",
+            "Class": "Flavonoids",
+            "Subclass": "Flavones",
+            "NP_Pathway": "Shikimates",
+            "NP_Superclass": "Flavonoids",
+            "NP_Class": "Flavones",
+            "NP_isglycoside": False,
+            "Molecular_Framework": "Aromatic",
         }
-
         summary = get_classification_summary(classification)
-
-        assert 'Chemical Classification Summary' in summary
-        assert 'Flavonoids' in summary
-        assert 'Shikimates' in summary
-        assert 'Natural Product' in summary
+        assert "Chemical Classification Summary" in summary
+        assert "Flavonoids" in summary
+        assert "Shikimates" in summary
+        assert "Natural Product" in summary
 
     def test_summary_with_glycoside(self):
-        """Test summary shows glycoside information."""
-        from backend.modules.chemical_classifier import get_classification_summary
-
         classification = {
-            'Kingdom': '',
-            'Superclass': '',
-            'Class': '',
-            'Subclass': '',
-            'NP_Pathway': 'Carbohydrates',
-            'NP_Superclass': 'Glycosides',
-            'NP_Class': 'O-glycosides',
-            'NP_isglycoside': True,
-            'Molecular_Framework': ''
+            "Kingdom": "",
+            "Superclass": "",
+            "Class": "",
+            "Subclass": "",
+            "NP_Pathway": "Carbohydrates",
+            "NP_Superclass": "Glycosides",
+            "NP_Class": "O-glycosides",
+            "NP_isglycoside": True,
+            "Molecular_Framework": "",
         }
-
         summary = get_classification_summary(classification)
-
-        assert 'glycoside moiety' in summary
+        assert "glycoside moiety" in summary
 
     def test_summary_no_classification(self):
-        """Test summary when no classification available."""
-        from backend.modules.chemical_classifier import get_classification_summary
-
         classification = {
-            'Kingdom': '',
-            'Superclass': '',
-            'Class': '',
-            'Subclass': '',
-            'NP_Pathway': '',
-            'NP_Superclass': '',
-            'NP_Class': '',
-            'NP_isglycoside': False,
-            'Molecular_Framework': ''
+            "Kingdom": "",
+            "Superclass": "",
+            "Class": "",
+            "Subclass": "",
+            "NP_Pathway": "",
+            "NP_Superclass": "",
+            "NP_Class": "",
+            "NP_isglycoside": False,
+            "Molecular_Framework": "",
         }
-
         summary = get_classification_summary(classification)
+        assert "No classification available" in summary
 
-        assert 'No classification available' in summary
+
+# ---------------------------------------------------------------------------
+# Structural verification
+# ---------------------------------------------------------------------------
 
 
-class TestLegacyGetClassification:
-    """Tests for legacy get_classification function."""
+class TestNoThreadingArtifacts:
+    """Verify removed sync infrastructure."""
 
-    def test_legacy_function(self):
-        """Test legacy function returns same as classyfire function."""
-        from backend.modules.chemical_classifier import get_classification
+    def test_no_threading_local(self):
+        import backend.modules.chemical_classifier as m
+        source = inspect.getsource(m)
+        assert "threading.local()" not in source
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {'class': {'name': 'Test'}}
+    def test_no_import_requests(self):
+        import backend.modules.chemical_classifier as m
+        source = inspect.getsource(m)
+        assert "import requests" not in source
 
-        mock_session = MagicMock()
-        mock_session.get.return_value = mock_response
+    def test_no_import_threading(self):
+        import backend.modules.chemical_classifier as m
+        source = inspect.getsource(m)
+        assert "import threading" not in source
 
-        with patch('backend.modules.chemical_classifier._get_thread_session', return_value=mock_session):
-            result = get_classification('TEST-INCHIKEY')
+    def test_no_create_session(self):
+        import backend.modules.chemical_classifier as m
+        source = inspect.getsource(m)
+        assert "def _create_session(" not in source
 
-        assert result is not None
-        assert result['class']['name'] == 'Test'
+    def test_no_get_classification_dead_function(self):
+        """Legacy get_classification function should be removed."""
+        import backend.modules.chemical_classifier as m
+        source = inspect.getsource(m)
+        assert "def get_classification(" not in source
+
+
+# ---------------------------------------------------------------------------
+# Misc
+# ---------------------------------------------------------------------------
+
+
+class TestCreateClassifierClient:
+    """Tests for create_classifier_client factory."""
+
+    def test_returns_async_client(self):
+        client = create_classifier_client()
+        assert isinstance(client, httpx.AsyncClient)
+
+
+class TestShutdownClassifier:
+    """Tests for shutdown_classifier."""
+
+    def test_shutdown_no_error(self):
+        shutdown_classifier()

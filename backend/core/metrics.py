@@ -23,7 +23,6 @@ Usage:
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
 from threading import RLock
 
 _logger = logging.getLogger(__name__)
@@ -50,12 +49,8 @@ class Metrics:
     azure_upload_failed_permanently: int = 0
     azure_upload_retried: int = 0
 
-    # Gauges (current values)
-    active_jobs: int = 0
-    pending_jobs: int = 0
-
     # Histograms (simplified - store recent samples)
-    api_latencies: Dict[str, List[float]] = field(default_factory=dict)
+    api_latencies: dict[str, list[float]] = field(default_factory=dict)
     _max_latency_samples: int = field(default=1000, repr=False)
 
     # Start time for uptime calculation
@@ -67,7 +62,6 @@ class Metrics:
             'api_calls_total', 'api_calls_failed',
             'cache_hits', 'cache_misses',
             'rate_limit_exceeded',
-            'active_jobs', 'pending_jobs',
             'azure_upload_failed_permanently', 'azure_upload_retried',
         }),
         repr=False,
@@ -127,7 +121,7 @@ class Metrics:
             if len(self.api_latencies[api]) > self._max_latency_samples:
                 self.api_latencies[api] = self.api_latencies[api][-self._max_latency_samples:]
 
-    def get_latency_stats(self, api: str) -> Dict[str, Optional[float]]:
+    def get_latency_stats(self, api: str) -> dict[str, float | None]:
         """Get latency statistics for an API.
 
         Args:
@@ -205,10 +199,6 @@ class Metrics:
                 'azure_upload_failed_permanently': self.azure_upload_failed_permanently,
                 'azure_upload_retried': self.azure_upload_retried,
 
-                # Gauges
-                'active_jobs': self.active_jobs,
-                'pending_jobs': self.pending_jobs,
-
                 # Computed metrics
                 'cache_hit_rate': self.cache_hit_rate,
                 'job_success_rate': self.job_success_rate,
@@ -235,8 +225,6 @@ class Metrics:
             self.rate_limit_exceeded = 0
             self.azure_upload_failed_permanently = 0
             self.azure_upload_retried = 0
-            self.active_jobs = 0
-            self.pending_jobs = 0
             self.api_latencies.clear()
             self._start_time = time.time()
 

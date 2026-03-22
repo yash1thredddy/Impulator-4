@@ -1,19 +1,26 @@
 """Duplicate compound detection dialog for IMPULATOR.
 
-Displays a dialog when a user submits a compound that already exists,
+Displays a modal dialog when a user submits a compound that already exists,
 allowing them to choose how to handle the duplicate.
 
 Config-aware: distinguishes same-config duplicates (pointless re-run)
 from different-config duplicates (genuinely different analysis).
+
+Uses @st.dialog decorator for native modal behavior. Results are communicated
+via session_state (not return values) because @st.dialog functions cannot
+return values to the caller.
 """
 
 import logging
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Optional
 
 import streamlit as st
 
 logger = logging.getLogger(__name__)
+
+# Session state key for dialog result communication
+DUPLICATE_RESULT_KEY = "duplicate_result"
 
 
 def _render_config_comparison(config_diff: dict) -> None:
@@ -140,21 +147,21 @@ def _render_match_details(
             st.caption("Submitted vs existing: " + " | ".join(parts))
 
 
-def render_duplicate_dialog(duplicate_info: dict) -> Tuple[Optional[str], Optional[str]]:
-    """Render the duplicate detection dialog.
+@st.dialog("Duplicate Compound Found", width="large")
+def duplicate_dialog(duplicate_info: dict):
+    """Render the duplicate detection dialog as a native @st.dialog modal.
 
     Shows different options based on the type of duplicate and config match:
     - identical config: Only Replace/Skip (duplicate would be pointless)
     - different config: Show config diff, allow Replace/Duplicate/Skip
 
+    Results are written to st.session_state[DUPLICATE_RESULT_KEY] and the
+    dialog is closed via st.rerun(). The caller must .pop() the result key
+    to consume it.
+
     Args:
         duplicate_info: Dict with duplicate_type, config_match, config_diff,
                        existing_compound, submitted
-
-    Returns:
-        Tuple of (action, new_name):
-        - action: 'replace', 'duplicate', 'skip', or None if not yet decided
-        - new_name: New compound name if user changed it, None otherwise
     """
     dup_type = duplicate_info.get("duplicate_type", "exact")
     existing = duplicate_info.get("existing_compound", {})
@@ -169,140 +176,148 @@ def render_duplicate_dialog(duplicate_info: dict) -> Tuple[Optional[str], Option
 
     is_identical_config = config_match == "identical"
 
-    # Container for the dialog
-    with st.container(border=True):
-        # Header based on config match
-        if is_identical_config:
-            st.warning("**Exact Duplicate Found**")
-            if dup_type == "exact":
-                st.markdown(
-                    f"**{existing_name}** with this exact structure and "
-                    f"configuration already exists."
-                )
-            else:
-                st.markdown(
-                    f"This structure already exists as **{existing_name}** "
-                    f"with the same configuration."
-                )
-                st.markdown(f"You entered: **{submitted_name}**")
+    # Header based on config match
+    if is_identical_config:
+        st.warning("**Exact Duplicate Found**")
+        if dup_type == "exact":
+            st.markdown(
+                f"**{existing_name}** with this exact structure and "
+                f"configuration already exists."
+            )
         else:
-            st.warning("**Structure Already Exists**")
-            if dup_type == "exact":
-                st.markdown(
-                    f"**{existing_name}** with this structure already exists, "
-                    f"but with a **different configuration**."
-                )
-            else:
-                st.markdown(
-                    f"This structure already exists as **{existing_name}** "
-                    f"with a different configuration."
-                )
-                st.markdown(f"You entered: **{submitted_name}**")
+            st.markdown(
+                f"This structure already exists as **{existing_name}** "
+                f"with the same configuration."
+            )
+            st.markdown(f"You entered: **{submitted_name}**")
+    else:
+        st.warning("**Structure Already Exists**")
+        if dup_type == "exact":
+            st.markdown(
+                f"**{existing_name}** with this structure already exists, "
+                f"but with a **different configuration**."
+            )
+        else:
+            st.markdown(
+                f"This structure already exists as **{existing_name}** "
+                f"with a different configuration."
+            )
+            st.markdown(f"You entered: **{submitted_name}**")
 
-        _render_match_details(
-            existing=existing,
-            submitted=submitted,
-            dup_type=dup_type,
-            config_match=config_match,
-            is_identical_config=is_identical_config,
-            config_diff=config_diff,
-        )
+    _render_match_details(
+        existing=existing,
+        submitted=submitted,
+        dup_type=dup_type,
+        config_match=config_match,
+        is_identical_config=is_identical_config,
+        config_diff=config_diff,
+    )
 
-        st.divider()
+    st.divider()
 
-        # Options depend on config match
-        st.markdown("**What would you like to do?**")
+    # Options depend on config match
+    st.markdown("**What would you like to do?**")
 
-        if is_identical_config:
-            # Same config: only Replace or Skip (no duplicate option - would be pointless)
-            if dup_type == "exact":
-                action = st.radio(
-                    "Choose an action:",
-                    options=["replace", "skip"],
-                    format_func=lambda x: {
-                        "replace": "Replace (reprocess and overwrite existing results)",
-                        "skip": "Skip (don't process)",
-                    }.get(x, x),
-                    key="duplicate_action_exact",
-                    label_visibility="collapsed"
+    if is_identical_config:
+        # Same config: only Replace or Skip (no duplicate option - would be pointless)
+        if dup_type == "exact":
+            action = st.radio(
+                "Choose an action:",
+                options=["replace", "skip"],
+                format_func=lambda x: {
+                    "replace": "Replace (reprocess and overwrite existing results)",
+                    "skip": "Skip (don't process)",
+                }.get(x, x),
+                key="duplicate_action_exact",
+                label_visibility="collapsed"
+            )
+        else:
+            action = st.radio(
+                "Choose an action:",
+                options=["replace", "skip"],
+                format_func=lambda x: {
+                    "replace": f"Replace existing '{existing_name}' with new results",
+                    "skip": "Skip (don't process)",
+                }.get(x, x),
+                key="duplicate_action_structure",
+                label_visibility="collapsed"
+            )
+        new_name = None
+
+    else:
+        # Different config: allow all three options
+        if dup_type == "exact":
+            action = st.radio(
+                "Choose an action:",
+                options=["replace", "change_name", "skip"],
+                format_func=lambda x: {
+                    "replace": "Replace existing (reprocess with new config)",
+                    "change_name": "Keep both (save as separate analysis)",
+                    "skip": "Skip (don't process)",
+                }.get(x, x),
+                key="duplicate_action_exact",
+                label_visibility="collapsed"
+            )
+
+            # Show name input if user wants to keep both
+            new_name = None
+            if action == "change_name":
+                new_name = st.text_input(
+                    "New compound name:",
+                    value=suggested_name,
+                    key="duplicate_new_name",
+                    help="Enter a unique name for this compound"
                 )
-            else:
-                action = st.radio(
-                    "Choose an action:",
-                    options=["replace", "skip"],
-                    format_func=lambda x: {
-                        "replace": f"Replace existing '{existing_name}' with new results",
-                        "skip": "Skip (don't process)",
-                    }.get(x, x),
-                    key="duplicate_action_structure",
-                    label_visibility="collapsed"
-                )
+                if new_name and new_name.strip() == existing_name:
+                    st.error("Please enter a different name than the existing one.")
+                    new_name = None
+
+        else:
+            # Structure-only + different config: full options
+            action = st.radio(
+                "Choose an action:",
+                options=["replace", "duplicate", "skip"],
+                format_func=lambda x: {
+                    "replace": f"Replace existing '{existing_name}' (reprocess with new config)",
+                    "duplicate": f"Keep both (save as separate analysis of {existing_name})",
+                    "skip": "Skip (don't process)",
+                }.get(x, x),
+                key="duplicate_action_structure",
+                label_visibility="collapsed"
+            )
             new_name = None
 
-        else:
-            # Different config: allow all three options
-            if dup_type == "exact":
-                action = st.radio(
-                    "Choose an action:",
-                    options=["replace", "change_name", "skip"],
-                    format_func=lambda x: {
-                        "replace": "Replace existing (reprocess with new config)",
-                        "change_name": "Keep both (save as separate analysis)",
-                        "skip": "Skip (don't process)",
-                    }.get(x, x),
-                    key="duplicate_action_exact",
-                    label_visibility="collapsed"
-                )
+    st.divider()
 
-                # Show name input if user wants to keep both
-                new_name = None
-                if action == "change_name":
-                    new_name = st.text_input(
-                        "New compound name:",
-                        value=suggested_name,
-                        key="duplicate_new_name",
-                        help="Enter a unique name for this compound"
-                    )
-                    if new_name and new_name.strip() == existing_name:
-                        st.error("Please enter a different name than the existing one.")
-                        new_name = None
+    # Action buttons
+    col1, col2 = st.columns(2)
 
+    with col1:
+        if st.button("Cancel", width="stretch", key="duplicate_cancel"):
+            st.session_state[DUPLICATE_RESULT_KEY] = {
+                "action": "cancel",
+                "new_name": None,
+            }
+            st.rerun()
+
+    with col2:
+        if st.button("Continue", type="primary", width="stretch", key="duplicate_continue"):
+            # Map change_name to duplicate action with new name
+            if action == "change_name":
+                if new_name and new_name.strip():
+                    st.session_state[DUPLICATE_RESULT_KEY] = {
+                        "action": "duplicate",
+                        "new_name": new_name.strip(),
+                    }
+                    st.rerun()
+                else:
+                    st.error("Please enter a valid name")
             else:
-                # Structure-only + different config: full options
-                action = st.radio(
-                    "Choose an action:",
-                    options=["replace", "duplicate", "skip"],
-                    format_func=lambda x: {
-                        "replace": f"Replace existing '{existing_name}' (reprocess with new config)",
-                        "duplicate": f"Keep both (save as separate analysis of {existing_name})",
-                        "skip": "Skip (don't process)",
-                    }.get(x, x),
-                    key="duplicate_action_structure",
-                    label_visibility="collapsed"
-                )
-                new_name = None
-
-        st.divider()
-
-        # Action buttons
-        col1, col2 = st.columns(2)
-
-        with col1:
-            if st.button("Cancel", width="stretch", key="duplicate_cancel"):
-                return "cancel", None
-
-        with col2:
-            if st.button("Continue", type="primary", width="stretch", key="duplicate_continue"):
-                # Map change_name to duplicate action with new name
-                if action == "change_name":
-                    if new_name and new_name.strip():
-                        return "duplicate", new_name.strip()
-                    else:
-                        st.error("Please enter a valid name")
-                        return None, None
-                return action, new_name
-
-    return None, None
+                st.session_state[DUPLICATE_RESULT_KEY] = {
+                    "action": action,
+                    "new_name": new_name,
+                }
+                st.rerun()
 
 
 def clear_duplicate_dialog_state():

@@ -40,8 +40,10 @@ def test_engine():
 
     Uses StaticPool for connection sharing across threads via TestClient.
     """
-    from backend.core.database import Base
-    from backend.models.database import Job, Compound  # noqa: F401
+    from backend.models._pg_base import PGBase
+    from backend.models.job import Job  # noqa: F401
+    from backend.models.compound import Compound  # noqa: F401
+    from backend.models.deleted_compound import DeletedCompound  # noqa: F401
     from sqlalchemy.pool import StaticPool
 
     engine = create_engine(
@@ -49,9 +51,9 @@ def test_engine():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    Base.metadata.create_all(bind=engine)
+    PGBase.metadata.create_all(bind=engine)
     yield engine
-    Base.metadata.drop_all(bind=engine)
+    PGBase.metadata.drop_all(bind=engine)
     engine.dispose()
 
 
@@ -59,9 +61,9 @@ def test_engine():
 def _clean_tables(test_engine):
     """Truncate all tables after each test."""
     yield
-    from backend.core.database import Base
+    from backend.models._pg_base import PGBase
     with test_engine.connect() as conn:
-        for table in reversed(Base.metadata.sorted_tables):
+        for table in reversed(PGBase.metadata.sorted_tables):
             conn.execute(table.delete())
         conn.commit()
 

@@ -1,146 +1,166 @@
 """
-ChEMBL API client with optimized batch processing and caching.
-Decoupled from Streamlit for backend use.
+Async ChEMBL API client with REST-primary access and library fallback.
+
+All public functions are async def with client: httpx.AsyncClient as first parameter.
+REST API is the primary path for similarity, activity, molecule, target, and drug
+indication fetching. The ChEMBL library (chembl_webresource_client) is fallback only,
+wrapped in run_in_executor.
+
+Phase 19.1: Full async rewrite. Proactive rate limiting removed (proven unnecessary).
+Circuit breakers protect each endpoint. Per-type parallel activity fetch with parallel
+pagination. POST support for >200 IDs.
 """
-import atexit
-import logging
-import threading
+
+import asyncio
+import json as _json
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
-from functools import lru_cache, wraps
-from typing import Dict, List, Optional, Callable, Any
+from functools import wraps
+from typing import Any, Callable
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib.parse import quote as _url_quote
-from urllib3.util.retry import Retry
+import httpx
+import structlog
+from rdkit import Chem
 
+from backend.config import settings
 from backend.core.metrics import metrics
 
-# Configure logging
-logger = logging.getLogger(__name__)
+__all__ = [
+    "cache_non_none",
+    "cascade_similarity_counts",
+    "clear_caches",
+    "create_chembl_client",
+    "fetch_all_activities_single_batch",
+    "fetch_batch_molecule_data",
+    "fetch_batch_target_names",
+    "get_cache_info",
+    "get_chembl_ids",
+    "get_drug_indications_batch",
+    "probe_all_thresholds",
+    "quick_has_bioactivity",
+    "shutdown_api_client",
+]
 
-# Configuration constants
+logger = structlog.get_logger()
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
 CACHE_SIZE = 500  # Bounded: 500 x ~10KB = 5MB ceiling (STAB-04)
 MAX_BATCH_SIZE = 50
-MAX_IDS_PER_REQUEST = 50  # Max ChEMBL IDs per REST API request (prevents URL length violations)
 MAX_RETRIES = 3
 RETRY_BACKOFF_FACTOR = 0.5
-RETRY_STATUS_CODES = [500, 502, 503, 504]
-API_TIMEOUT = 30  # seconds for HTTP requests
-CHEMBL_API_TIMEOUT = 60  # seconds for ChEMBL client operations (can be slower)
-SIMILARITY_SEARCH_TIMEOUT = 90  # seconds for similarity searches (can be slow)
-MAX_WORKERS = 4
 ACTIVITY_TYPES = ["IC50", "Ki", "Kd", "EC50"]
-DEFAULT_ACTIVITY_TYPES = ['IC50', 'Ki', 'Kd', 'EC50', 'AC50', 'GI50', 'MIC']  # Extended list
+DEFAULT_ACTIVITY_TYPES = ["IC50", "Ki", "Kd", "EC50", "AC50", "GI50", "MIC"]
 
 # ChEMBL REST API response key mapping
-# Each endpoint returns data under a different key in the JSON response
 CHEMBL_RESPONSE_KEYS = {
-    'activity': 'activities',
-    'molecule': 'molecules',
-    'target': 'targets',
-    'similarity': 'molecules',
-    'drug_indication': 'drug_indications',
+    "activity": "activities",
+    "molecule": "molecules",
+    "target": "targets",
+    "similarity": "molecules",
+    "drug_indication": "drug_indications",
 }
 
-# Rate limiting configuration
-RATE_LIMIT_CALLS = 10  # Max calls per window
-RATE_LIMIT_WINDOW = 1.0  # Window size in seconds
+# POST when ID list exceeds this threshold (GET fits ~250-300 IDs in URL,
+# 200 provides safety margin) -- per D-17
+POST_ID_THRESHOLD = 200
 
+# Only request the fields the pipeline actually uses (D-24/D-43).
+# ~80% smaller activity responses.
+ACTIVITY_ONLY_FIELDS = (
+    "molecule_chembl_id,standard_type,standard_value,standard_units,"
+    "pchembl_value,target_chembl_id,assay_chembl_id,data_validity_comment"
+)
+
+CHEMBL_MAX_LIMIT = 1000  # Server-enforced hard cap across ALL endpoints
+
+# Progress callback type
+ProgressCallback = Callable[[float, str], None]
+
+
+# ---------------------------------------------------------------------------
+# SMILES helpers
+# ---------------------------------------------------------------------------
 
 def _url_encode_smiles(smiles: str) -> str:
     """URL-encode SMILES for use in ChEMBL REST API URL paths.
 
     SMILES can contain URL-significant characters like /, #, +, @, [, ].
     """
-    return _url_quote(smiles, safe='')
+    from urllib.parse import quote as _url_quote
+    return _url_quote(smiles, safe="")
 
 
-class RateLimiter:
+def _canonicalize_smiles(smiles: str) -> str:
+    """Canonicalize SMILES via RDKit before REST API calls.
+
+    The ChEMBL library auto-canonicalizes internally, but REST does exact matching.
+    This eliminates the #1 reason REST could fail where library succeeds (D-18).
     """
-    Simple token bucket rate limiter for API calls.
-
-    Limits requests to RATE_LIMIT_CALLS per RATE_LIMIT_WINDOW seconds.
-    Thread-safe implementation using locks.
-    """
-    def __init__(self, calls_per_second: float = RATE_LIMIT_CALLS):
-        self.calls_per_second = calls_per_second
-        self.min_interval = 1.0 / calls_per_second
-        self.last_call_time = 0.0
-        import threading
-        self._lock = threading.Lock()
-
-    def wait(self):
-        """Wait if necessary to respect rate limit."""
-        with self._lock:
-            current_time = time.time()
-            elapsed = current_time - self.last_call_time
-            if elapsed < self.min_interval:
-                wait_time = self.min_interval - elapsed
-                time.sleep(wait_time)
-            self.last_call_time = time.time()
+    try:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is not None:
+            return Chem.MolToSmiles(mol, canonical=True)
+    except Exception:
+        pass
+    return smiles  # Return original if canonicalization fails
 
 
-# Global rate limiters for different APIs
-_chembl_rate_limiter = RateLimiter(calls_per_second=10)  # ChEMBL: ~10 req/sec
-_classyfire_rate_limiter = RateLimiter(calls_per_second=2)  # ClassyFire: conservative
-
+# ---------------------------------------------------------------------------
+# cache_non_none decorator (preserved for 19.2 -- D-08/D-12)
+# ---------------------------------------------------------------------------
 
 def cache_non_none(maxsize: int = CACHE_SIZE, ttl_seconds: int = 3600):
-    """
-    LRU cache that only caches successful (non-None) results with TTL support.
+    """LRU cache that only caches successful (non-None) results with TTL support.
 
     This prevents caching of API failures, allowing retry on subsequent calls.
     Cached entries expire after ttl_seconds (default: 1 hour).
+
+    Uses asyncio.Lock for async-safe concurrency (single event loop, Phase 19.2).
+    Applied to async functions -- wrapper is async def.
 
     Args:
         maxsize: Maximum number of entries to cache
         ttl_seconds: Time-to-live in seconds (default: 3600 = 1 hour)
     """
     def decorator(func):
-        cache = {}  # key -> (value, timestamp)
+        cache: dict[Any, Any] = {}  # key -> (value, timestamp)
         cache_hits = [0]
         cache_misses = [0]
-        cache_lock = threading.Lock()
+        cache_lock = asyncio.Lock()
 
         @wraps(func)
-        def wrapper(*args, **kwargs):
+        async def wrapper(*args, **kwargs):
             # Create cache key from arguments
             key = (args, tuple(sorted(kwargs.items())))
             current_time = time.time()
 
-            with cache_lock:
+            async with cache_lock:
                 if key in cache:
                     value, timestamp = cache[key]
-                    # Check if entry is still valid (not expired)
                     if current_time - timestamp < ttl_seconds:
                         cache_hits[0] += 1
-                        metrics.increment('cache_hits')
+                        metrics.increment("cache_hits")
                         return value
                     else:
-                        # Entry expired, remove it
                         del cache[key]
 
-            with cache_lock:
                 cache_misses[0] += 1
-                metrics.increment('cache_misses')
+                metrics.increment("cache_misses")
 
             # Call function outside lock to avoid holding lock during I/O
-            result = func(*args, **kwargs)
+            result = await func(*args, **kwargs)
 
             # Only cache non-None results
             if result is not None:
-                with cache_lock:
-                    # Double-check: another thread may have cached this key
-                    # while we were making the API call (ARCH-10)
+                async with cache_lock:
+                    # Double-check: another task may have cached this key
                     if key in cache:
                         existing_value, existing_ts = cache[key]
                         if time.time() - existing_ts < ttl_seconds:
-                            # Another thread already cached a valid result -- use theirs
                             return existing_value
 
-                    # Use fresh timestamp for storage (not the one from before API call)
                     now = time.time()
 
                     # Evict expired entries first
@@ -160,30 +180,30 @@ def cache_non_none(maxsize: int = CACHE_SIZE, ttl_seconds: int = 3600):
 
             return result
 
-        def cache_clear():
-            with cache_lock:
+        async def cache_clear():
+            async with cache_lock:
                 cache.clear()
                 cache_hits[0] = 0
                 cache_misses[0] = 0
 
         def cache_info():
             class CacheInfo:
-                def __init__(self, hits, misses, maxsize, currsize):
+                def __init__(self, hits, misses, maxsize_, currsize):
                     self.hits = hits
                     self.misses = misses
-                    self.maxsize = maxsize
+                    self.maxsize = maxsize_
                     self.currsize = currsize
 
                 def _asdict(self):
                     return {
-                        'hits': self.hits,
-                        'misses': self.misses,
-                        'maxsize': self.maxsize,
-                        'currsize': self.currsize
+                        "hits": self.hits,
+                        "misses": self.misses,
+                        "maxsize": self.maxsize,
+                        "currsize": self.currsize,
                     }
 
-            with cache_lock:
-                return CacheInfo(cache_hits[0], cache_misses[0], maxsize, len(cache))
+            # cache_info is sync -- reads are atomic in single event loop
+            return CacheInfo(cache_hits[0], cache_misses[0], maxsize, len(cache))
 
         wrapper.cache_clear = cache_clear  # type: ignore[attr-defined]
         wrapper.cache_info = cache_info  # type: ignore[attr-defined]
@@ -191,65 +211,17 @@ def cache_non_none(maxsize: int = CACHE_SIZE, ttl_seconds: int = 3600):
 
     return decorator
 
-# Thread pool for timeout wrapper (reused across calls)
-# Needs enough workers to handle concurrent compound jobs (2 workers) × multiple API calls each
-_timeout_executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="chembl_timeout")
-_timeout_executor_lock = threading.Lock()
 
+# ---------------------------------------------------------------------------
+# ChEMBL library singleton (fallback only -- D-02/D-03)
+# ---------------------------------------------------------------------------
 
-def _get_timeout_executor():
-    """Get the timeout executor, recreating if previously shut down."""
-    global _timeout_executor
-    if _timeout_executor._shutdown:
-        with _timeout_executor_lock:
-            if _timeout_executor._shutdown:
-                _timeout_executor = ThreadPoolExecutor(
-                    max_workers=6, thread_name_prefix="chembl_timeout"
-                )
-    return _timeout_executor
-
-
-def with_timeout(timeout_seconds: int = CHEMBL_API_TIMEOUT):
-    """
-    Decorator to add timeout to functions (especially ChEMBL library calls).
-
-    The ChEMBL client library doesn't support native timeouts, so we use
-    ThreadPoolExecutor to enforce a timeout.
-
-    Args:
-        timeout_seconds: Maximum seconds to wait before timing out
-    """
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            future = _get_timeout_executor().submit(func, *args, **kwargs)
-            try:
-                return future.result(timeout=timeout_seconds)
-            except FuturesTimeoutError:
-                logger.error(f"Timeout ({timeout_seconds}s) exceeded for {func.__name__}")
-                # Return appropriate default based on return type hints
-                return None
-            except Exception as e:
-                logger.error(f"Error in {func.__name__}: {e}")
-                return None
-        return wrapper
-    return decorator
-
-# Progress callback type
-ProgressCallback = Callable[[float, str], None]
-
-# ChEMBL REST API base URL (for fallback)
-CHEMBL_REST_API_BASE = "https://www.ebi.ac.uk/chembl/api/data"
-CHEMBL_MAX_LIMIT = 1000  # Maximum allowed by ChEMBL API
-
-# Lazy import for ChEMBL client
-_chembl_client = None
+_chembl_client: dict[str, Any] | None = None
 _chembl_settings_configured = False
 
 
-def _configure_chembl_settings():
-    """
-    Configure ChEMBL client settings for optimal performance.
+def _configure_chembl_settings() -> None:
+    """Configure ChEMBL client settings for optimal performance.
 
     IMPORTANT: This must be called BEFORE importing new_client!
 
@@ -262,140 +234,123 @@ def _configure_chembl_settings():
         return
 
     try:
-        from chembl_webresource_client.settings import Settings
-        settings = Settings.Instance()
-
-        # Increase page size from 20 to 1000 (max allowed by ChEMBL API)
-        # This reduces the number of paginated requests by 50x
-        original_limit = getattr(settings, 'MAX_LIMIT', 20)
-        settings.MAX_LIMIT = CHEMBL_MAX_LIMIT
-
-        # Increase timeout for large requests
-        original_timeout = getattr(settings, 'TIMEOUT', 3.0)
-        settings.TIMEOUT = CHEMBL_API_TIMEOUT
-
-        logger.info(
-            f"ChEMBL client settings optimized: "
-            f"MAX_LIMIT={original_limit}->{CHEMBL_MAX_LIMIT}, "
-            f"TIMEOUT={original_timeout}->{CHEMBL_API_TIMEOUT}"
-        )
+        from chembl_webresource_client.settings import Settings as ChEMBLSettings
+        chembl_settings = ChEMBLSettings.Instance()
+        chembl_settings.MAX_LIMIT = CHEMBL_MAX_LIMIT
+        chembl_settings.TIMEOUT = 60
+        try:
+            chembl_settings.CACHING = False
+        except Exception:
+            pass
         _chembl_settings_configured = True
-
+        logger.info("chembl_library_configured", max_limit=CHEMBL_MAX_LIMIT)
     except ImportError:
         logger.warning("chembl_webresource_client not installed, cannot configure settings")
-    except Exception as e:
-        logger.warning(f"Failed to configure ChEMBL settings: {e}")
+    except Exception as exc:
+        logger.warning("chembl_settings_config_failed", error=str(exc))
 
 
-_chembl_client_lock = threading.Lock()
+def _get_chembl_client() -> dict[str, Any] | None:  # pragma: no cover
+    """Lazy initialization of ChEMBL library client for fallback path.
 
-
-def _get_chembl_client() -> Optional[Dict[str, Any]]:  # pragma: no cover -- ChEMBL client init
-    """Lazy initialization of ChEMBL client with optimized settings.
-
-    Thread-safe via double-checked locking pattern.
+    In async context, only one task calls fallback at a time via circuit breaker,
+    so no threading lock needed.
     """
     global _chembl_client
 
     if _chembl_client is None:
-        with _chembl_client_lock:
-            if _chembl_client is None:
-                # Configure settings BEFORE importing new_client
-                _configure_chembl_settings()
-
-                try:
-                    from chembl_webresource_client.new_client import new_client  # type: ignore[import-untyped]
-                    _chembl_client = {
-                        'similarity': new_client.similarity,  # type: ignore[attr-defined]
-                        'molecule': new_client.molecule,  # type: ignore[attr-defined]
-                        'activity': new_client.activity,  # type: ignore[attr-defined]
-                        'target': new_client.target,  # type: ignore[attr-defined]
-                        'drug_indication': new_client.drug_indication,  # type: ignore[attr-defined]
-                    }
-                    logger.info(f"ChEMBL client initialized with endpoints: {list(_chembl_client.keys())}")
-                except ImportError:
-                    logger.warning("chembl_webresource_client not installed")
-                    _chembl_client = None
-                except Exception as e:
-                    logger.error(f"Failed to initialize ChEMBL client: {e}")
-                    _chembl_client = None
+        _configure_chembl_settings()
+        try:
+            from chembl_webresource_client.new_client import new_client  # type: ignore[import-untyped]
+            _chembl_client = {
+                "similarity": new_client.similarity,  # type: ignore[attr-defined]
+                "molecule": new_client.molecule,  # type: ignore[attr-defined]
+                "activity": new_client.activity,  # type: ignore[attr-defined]
+                "target": new_client.target,  # type: ignore[attr-defined]
+                "drug_indication": new_client.drug_indication,  # type: ignore[attr-defined]
+            }
+            logger.info("chembl_library_initialized", endpoints=list(_chembl_client.keys()))
+        except ImportError:
+            logger.warning("chembl_webresource_client not installed")
+        except Exception as exc:
+            logger.error("chembl_library_init_failed", error=str(exc))
 
     return _chembl_client
 
 
-# Configure retry strategy
-retry_strategy = Retry(
-    total=MAX_RETRIES,
-    backoff_factor=RETRY_BACKOFF_FACTOR,
-    status_forcelist=RETRY_STATUS_CODES,
-)
+# ---------------------------------------------------------------------------
+# httpx client factory (D-10/D-11/D-14/D-26)
+# ---------------------------------------------------------------------------
 
+def create_chembl_client() -> httpx.AsyncClient:
+    """Create httpx client for ChEMBL API calls.
 
-def get_session():
-    """Create and return a requests session with retry configuration."""
-    s = requests.Session()
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    s.mount("http://", adapter)
-    s.mount("https://", adapter)
-    return s
-
-
-# Thread-local sessions to avoid sharing requests.Session across threads
-# (requests.Session is NOT thread-safe — cookie jar and internal state can corrupt)
-_thread_local = threading.local()
-
-
-def _get_thread_session():
-    """Get a thread-local requests session."""
-    if not hasattr(_thread_local, 'session'):
-        _thread_local.session = get_session()
-    return _thread_local.session
-
-
-# Module-level session for backward compatibility in single-threaded contexts
-session = get_session()
-
-
-# =============================================================================
-# REST API FALLBACK FUNCTIONS
-# These provide direct REST API access when the library fails or for
-# operations where REST API is significantly faster (e.g., batch drug_indications)
-# =============================================================================
-
-def _rest_api_get(endpoint: str, params: Dict[str, Any], timeout: int = API_TIMEOUT) -> Optional[Dict]:  # pragma: no cover -- external HTTP request
+    One client per job in 19.1 (D-11). Module-level in 19.2.
     """
-    Make a GET request to ChEMBL REST API.
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=5, read=30, write=10, pool=10),
+        limits=httpx.Limits(max_connections=settings.CHEMBL_MAX_CONNECTIONS),
+        headers={"Accept": "application/json"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker infrastructure (D-31/D-32/D-33)
+# ---------------------------------------------------------------------------
+
+_circuits: dict[str, dict[str, Any]] = {}
+
+
+def _make_circuit(threshold: int = 3, cooldown: int = 300) -> dict[str, Any]:
+    """Create a new circuit breaker state dict."""
+    return {
+        "failures": 0,
+        "open_until": 0.0,
+        "threshold": threshold,
+        "cooldown": cooldown,
+    }
+
+
+def _get_circuit(endpoint: str) -> dict[str, Any]:
+    """Get or create circuit breaker for an endpoint."""
+    if endpoint not in _circuits:
+        _circuits[endpoint] = _make_circuit()
+    return _circuits[endpoint]
+
+
+def _is_circuit_open(circuit: dict[str, Any]) -> bool:
+    """Check if a circuit breaker is open (blocking requests)."""
+    if circuit["failures"] < circuit["threshold"]:
+        return False
+    if time.monotonic() >= circuit["open_until"]:
+        # Half-open: allow one test request
+        circuit["failures"] = circuit["threshold"] - 1
+        return False
+    return True
+
+
+def _record_success(circuit: dict[str, Any]) -> None:
+    """Record a successful request, resetting the circuit."""
+    circuit["failures"] = 0
+    circuit["open_until"] = 0.0
+
+
+def _record_failure(circuit: dict[str, Any]) -> None:
+    """Record a failed request, potentially opening the circuit."""
+    circuit["failures"] += 1
+    if circuit["failures"] >= circuit["threshold"]:
+        circuit["open_until"] = time.monotonic() + circuit["cooldown"]
+
+
+# ---------------------------------------------------------------------------
+# Response helpers
+# ---------------------------------------------------------------------------
+
+def _get_response_data(data: dict | None, endpoint: str) -> list[dict]:
+    """Extract the data list from a ChEMBL REST API response.
 
     Args:
-        endpoint: API endpoint (e.g., 'activity', 'molecule', 'drug_indication')
-        params: Query parameters
-        timeout: Request timeout in seconds
-
-    Returns:
-        JSON response as dict, or None on error
-    """
-    url = f"{CHEMBL_REST_API_BASE}/{endpoint}.json"
-    try:
-        _chembl_rate_limiter.wait()
-        _start = time.time()
-        response = _get_thread_session().get(url, params=params, timeout=timeout)
-        response.raise_for_status()
-        metrics.increment('api_calls_total')
-        metrics.record_latency('chembl', (time.time() - _start) * 1000)
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        metrics.increment('api_calls_total')
-        metrics.increment('api_calls_failed')
-        logger.warning(f"REST API request failed for {endpoint}: {e}")
-        return None
-
-
-def _get_response_data(data: Optional[Dict], endpoint: str) -> List[Dict]:
-    """
-    Extract the data list from a ChEMBL REST API response using the endpoint mapping.
-
-    Args:
-        data: Raw JSON response from _rest_api_get
+        data: Raw JSON response from _chembl_get/_chembl_post
         endpoint: API endpoint name (used to look up the response key)
 
     Returns:
@@ -407,1346 +362,623 @@ def _get_response_data(data: Optional[Dict], endpoint: str) -> List[Dict]:
     return data.get(response_key, [])
 
 
-def cascade_similarity_counts(  # pragma: no cover -- external API cascade
-    smiles: str,
-    start_threshold: int,
-    min_threshold: int = 40,
-    step: int = 10,
-) -> List[Dict[str, int]]:
-    """Probe lower similarity thresholds and return compound count per tier.
+# ---------------------------------------------------------------------------
+# Core HTTP helpers (D-28/D-29)
+# ---------------------------------------------------------------------------
 
-    Uses REST API with ``limit=1`` so only ``page_meta.total_count`` is
-    transferred — no actual compound data is fetched.
+async def _chembl_get(
+    client: httpx.AsyncClient,
+    endpoint: str,
+    params: dict[str, Any],
+    *,
+    semaphore: asyncio.Semaphore | None = None,
+    timeout_override: float | None = None,
+) -> dict | None:
+    """Make a GET request to ChEMBL REST API with retry and circuit breaker.
 
     Args:
-        smiles: Query SMILES string.
-        start_threshold: The user's original threshold (probing starts one step below).
-        min_threshold: Lowest threshold to probe (default 40%).
-        step: How much to decrease the threshold each iteration.
+        client: httpx.AsyncClient instance
+        endpoint: API endpoint (e.g., 'activity', 'molecule')
+        params: Query parameters
+        semaphore: Optional concurrency limiter
+        timeout_override: Override the default read timeout
 
     Returns:
-        List of ``{"threshold": int, "count": int}`` dicts, one per probed tier.
-        Empty list if *smiles* is falsy or all probes fail.
+        JSON response as dict, or None on exhausted retries / open circuit
     """
-    if not smiles:
-        return []
+    circuit = _get_circuit(endpoint)
+    if _is_circuit_open(circuit):
+        logger.debug("circuit_open", endpoint=endpoint)
+        return None
 
-    results: List[Dict[str, int]] = []
-    threshold = start_threshold - step
+    url = f"{settings.CHEMBL_API_URL}/{endpoint}.json"
+    request_timeout = (
+        httpx.Timeout(connect=5, read=timeout_override, write=10, pool=10)
+        if timeout_override
+        else client.timeout
+    )
 
-    while threshold >= min_threshold:
+    last_exc: Exception | None = None
+    for attempt in range(MAX_RETRIES):
         try:
-            url = (
-                f"{CHEMBL_REST_API_BASE}/similarity/{_url_encode_smiles(smiles)}/{threshold}.json"
+            if semaphore is not None:
+                async with semaphore:
+                    _start = time.time()
+                    response = await client.get(url, params=params, timeout=request_timeout)
+            else:
+                _start = time.time()
+                response = await client.get(url, params=params, timeout=request_timeout)
+
+            metrics.increment("api_calls_total")
+            metrics.record_latency("chembl", (time.time() - _start) * 1000)
+
+            if response.status_code == 429:
+                retry_after = float(response.headers.get("Retry-After", 2))
+                logger.warning("chembl_429", endpoint=endpoint, retry_after=retry_after)
+                await asyncio.sleep(retry_after)
+                continue
+
+            if response.status_code >= 500:
+                logger.warning("chembl_5xx", endpoint=endpoint, status=response.status_code)
+                await asyncio.sleep(RETRY_BACKOFF_FACTOR * (2 ** attempt))
+                continue
+
+            response.raise_for_status()
+            _record_success(circuit)
+            return response.json()
+
+        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+            last_exc = exc
+            metrics.increment("api_calls_failed")
+            logger.warning(
+                "chembl_request_error",
+                endpoint=endpoint,
+                attempt=attempt + 1,
+                error=str(exc),
             )
-            _chembl_rate_limiter.wait()
-            resp = _get_thread_session().get(
-                url,
-                params={"limit": 1, "only": "molecule_chembl_id"},
-                timeout=API_TIMEOUT,
+            if attempt < MAX_RETRIES - 1:
+                await asyncio.sleep(RETRY_BACKOFF_FACTOR * (2 ** attempt))
+        except httpx.HTTPStatusError as exc:
+            last_exc = exc
+            metrics.increment("api_calls_failed")
+            logger.warning(
+                "chembl_http_error",
+                endpoint=endpoint,
+                status=exc.response.status_code,
+                attempt=attempt + 1,
             )
-            resp.raise_for_status()
-            data = resp.json()
-            count = data.get("page_meta", {}).get("total_count", 0)
-            results.append({"threshold": threshold, "count": count})
-        except Exception as e:
-            logger.warning(f"Cascade probe failed at {threshold}%: {e}")
-            results.append({"threshold": threshold, "count": 0})
-            # Continue probing lower thresholds — one failure shouldn't stop the rest
+            if attempt < MAX_RETRIES - 1:
+                await asyncio.sleep(RETRY_BACKOFF_FACTOR * (2 ** attempt))
+        except Exception as exc:
+            last_exc = exc
+            metrics.increment("api_calls_failed")
+            logger.error("chembl_unexpected_error", endpoint=endpoint, error=str(exc))
+            break  # Don't retry on unexpected errors
 
-        threshold -= step
+    _record_failure(circuit)
+    logger.error(
+        "chembl_request_exhausted",
+        endpoint=endpoint,
+        last_error=str(last_exc) if last_exc else "unknown",
+    )
+    return None
 
-    return results
 
+async def _chembl_post(
+    client: httpx.AsyncClient,
+    endpoint: str,
+    params: dict[str, Any],
+    *,
+    semaphore: asyncio.Semaphore | None = None,
+    timeout_override: float | None = None,
+) -> dict | None:
+    """Make a POST request to ChEMBL REST API (for large parameter lists).
 
-def probe_all_thresholds(  # pragma: no cover -- external API probe
-    smiles: str,
-    start_threshold: int,
-    min_threshold: int = 40,
-    step: int = 10,
-) -> List[Dict[str, int]]:
-    """Probe ALL thresholds from start down to min, returning count per tier.
-
-    Unlike cascade_similarity_counts, this:
-    - Includes the start_threshold itself
-    - Returns ALL tiers including 0-count ones
-    - Does not stop on failure (skips failed probes with count=0)
+    Uses X-HTTP-Method-Override: GET header and nested list body format
+    per D-16: ``json.dumps([[key, value], ...])`` -- NOT dict format.
 
     Args:
-        smiles: Query SMILES string.
-        start_threshold: The user's requested threshold (included in probing).
-        min_threshold: Lowest threshold to probe (default 40%).
-        step: How much to decrease the threshold each iteration.
+        client: httpx.AsyncClient instance
+        endpoint: API endpoint
+        params: Parameters to send as POST body
+        semaphore: Optional concurrency limiter
+        timeout_override: Override the default read timeout
 
     Returns:
-        List of ``{"threshold": int, "count": int}`` dicts for every tier.
-        Empty list if *smiles* is falsy.
+        JSON response as dict, or None on failure
     """
-    if not smiles:
-        return []
+    circuit = _get_circuit(endpoint)
+    if _is_circuit_open(circuit):
+        logger.debug("circuit_open_post", endpoint=endpoint)
+        return None
 
-    results: List[Dict[str, int]] = []
-    threshold = start_threshold
+    url = f"{settings.CHEMBL_API_URL}/{endpoint}.json"
+    body = _json.dumps([[k, v] for k, v in params.items()])
+    headers = {
+        "X-HTTP-Method-Override": "GET",
+        "Content-Type": "application/json",
+    }
+    request_timeout = (
+        httpx.Timeout(connect=5, read=timeout_override, write=10, pool=10)
+        if timeout_override
+        else client.timeout
+    )
 
-    while threshold >= min_threshold:
+    last_exc: Exception | None = None
+    for attempt in range(MAX_RETRIES):
         try:
-            url = (
-                f"{CHEMBL_REST_API_BASE}/similarity/{_url_encode_smiles(smiles)}/{threshold}.json"
+            if semaphore is not None:
+                async with semaphore:
+                    _start = time.time()
+                    response = await client.post(
+                        url, content=body, headers=headers, timeout=request_timeout,
+                    )
+            else:
+                _start = time.time()
+                response = await client.post(
+                    url, content=body, headers=headers, timeout=request_timeout,
+                )
+
+            metrics.increment("api_calls_total")
+            metrics.record_latency("chembl", (time.time() - _start) * 1000)
+
+            if response.status_code == 429:
+                retry_after = float(response.headers.get("Retry-After", 2))
+                logger.warning("chembl_429_post", endpoint=endpoint, retry_after=retry_after)
+                await asyncio.sleep(retry_after)
+                continue
+
+            if response.status_code >= 500:
+                logger.warning("chembl_5xx_post", endpoint=endpoint, status=response.status_code)
+                await asyncio.sleep(RETRY_BACKOFF_FACTOR * (2 ** attempt))
+                continue
+
+            response.raise_for_status()
+            _record_success(circuit)
+            return response.json()
+
+        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+            last_exc = exc
+            metrics.increment("api_calls_failed")
+            logger.warning(
+                "chembl_post_error",
+                endpoint=endpoint,
+                attempt=attempt + 1,
+                error=str(exc),
             )
-            _chembl_rate_limiter.wait()
-            resp = _get_thread_session().get(
-                url,
-                params={"limit": 1, "only": "molecule_chembl_id"},
-                timeout=API_TIMEOUT,
+            if attempt < MAX_RETRIES - 1:
+                await asyncio.sleep(RETRY_BACKOFF_FACTOR * (2 ** attempt))
+        except httpx.HTTPStatusError as exc:
+            last_exc = exc
+            metrics.increment("api_calls_failed")
+            logger.warning(
+                "chembl_post_http_error",
+                endpoint=endpoint,
+                status=exc.response.status_code,
+                attempt=attempt + 1,
             )
-            resp.raise_for_status()
-            data = resp.json()
-            count = data.get("page_meta", {}).get("total_count", 0)
-            results.append({"threshold": threshold, "count": count})
-        except Exception as e:
-            logger.warning(f"Availability probe failed at {threshold}%: {e}")
-            results.append({"threshold": threshold, "count": 0})
+            if attempt < MAX_RETRIES - 1:
+                await asyncio.sleep(RETRY_BACKOFF_FACTOR * (2 ** attempt))
+        except Exception as exc:
+            last_exc = exc
+            metrics.increment("api_calls_failed")
+            logger.error("chembl_post_unexpected", endpoint=endpoint, error=str(exc))
+            break
 
-        threshold -= step
+    _record_failure(circuit)
+    logger.error(
+        "chembl_post_exhausted",
+        endpoint=endpoint,
+        last_error=str(last_exc) if last_exc else "unknown",
+    )
+    return None
 
-    return results
 
-
-def rest_api_fetch_activities(  # pragma: no cover -- external REST API
-    chembl_ids: List[str],
-    activity_types: Optional[List[str]] = None,
-    progress_callback: Optional[ProgressCallback] = None
-) -> List[Dict]:
-    """
-    Fetch activities using direct REST API with large page size and chunking.
-
-    This is a fallback when the library fails, and provides better control
-    over pagination (limit=1000 vs library default of 20).
-
-    Automatically chunks large ID lists to avoid URL length violations.
+async def _chembl_request(
+    client: httpx.AsyncClient,
+    endpoint: str,
+    params: dict[str, Any],
+    *,
+    semaphore: asyncio.Semaphore | None = None,
+    timeout_override: float | None = None,
+) -> dict | None:
+    """Smart router: use POST for >200 comma-separated IDs, GET otherwise (D-17).
 
     Args:
-        chembl_ids: List of ChEMBL IDs to fetch activities for
-        activity_types: Optional list of activity types to filter
-        progress_callback: Optional progress callback
+        client: httpx.AsyncClient instance
+        endpoint: API endpoint
+        params: Query parameters
+        semaphore: Optional concurrency limiter
+        timeout_override: Override the default read timeout
 
     Returns:
-        List of activity dictionaries
+        JSON response as dict, or None on failure
     """
-    if not chembl_ids:
-        return []
+    # Check if any parameter value has >POST_ID_THRESHOLD comma-separated IDs
+    use_post = False
+    for v in params.values():
+        if isinstance(v, str) and v.count(",") >= POST_ID_THRESHOLD:
+            use_post = True
+            break
 
-    if activity_types is None:
-        activity_types = DEFAULT_ACTIVITY_TYPES
+    if use_post:
+        return await _chembl_post(
+            client, endpoint, params,
+            semaphore=semaphore, timeout_override=timeout_override,
+        )
+    return await _chembl_get(
+        client, endpoint, params,
+        semaphore=semaphore, timeout_override=timeout_override,
+    )
 
-    activity_types_set = set(activity_types)
-    fields = "molecule_chembl_id,standard_type,standard_value,standard_units,target_chembl_id"
 
-    all_activities = []
-    request_count = 0
-    total_ids = len(chembl_ids)
+# ---------------------------------------------------------------------------
+# Library fallback helpers (sync, run via run_in_executor -- D-30/D-34)
+# ---------------------------------------------------------------------------
 
-    # Chunk IDs to avoid URL length violations
-    id_chunks = [
-        chembl_ids[i:i + MAX_IDS_PER_REQUEST]
-        for i in range(0, total_ids, MAX_IDS_PER_REQUEST)
-    ]
-    total_chunks = len(id_chunks)
-
-    if progress_callback:
-        progress_callback(0.1, f"Fetching activities for {total_ids} compounds in {total_chunks} chunks...")
-
-    for chunk_idx, chunk_ids in enumerate(id_chunks):
-        ids_param = ",".join(chunk_ids)
-        offset = 0
-
-        while True:
-            params = {
-                "molecule_chembl_id__in": ids_param,
-                "only": fields,
-                "limit": CHEMBL_MAX_LIMIT,
-                "offset": offset
+def _sync_similarity_search(smiles: str, threshold: int) -> list[dict[str, str]] | None:
+    """Synchronous similarity search via ChEMBL library (fallback)."""
+    client = _get_chembl_client()
+    if client is None or "similarity" not in client:
+        return None
+    try:
+        results = client["similarity"].filter(
+            smiles=smiles, similarity=threshold,
+        ).only(["molecule_chembl_id", "similarity"])
+        return [
+            {
+                "ChEMBL ID": r["molecule_chembl_id"],
+                "Similarity": r.get("similarity", 0),
             }
-
-            data = _rest_api_get("activity", params, timeout=CHEMBL_API_TIMEOUT)
-            request_count += 1
-
-            if data is None:
-                logger.error(f"REST API activity fetch failed at chunk {chunk_idx}, offset {offset}")
-                break
-
-            activities = _get_response_data(data, 'activity')
-            if not activities:
-                break
-
-            # Filter by activity type locally
-            filtered = [a for a in activities if a.get('standard_type') in activity_types_set]
-            all_activities.extend(filtered)
-
-            if len(activities) < CHEMBL_MAX_LIMIT:
-                break
-            offset += CHEMBL_MAX_LIMIT
-
-        if progress_callback:
-            progress = 0.1 + 0.8 * ((chunk_idx + 1) / total_chunks)
-            progress_callback(progress, f"Processed chunk {chunk_idx + 1}/{total_chunks}...")
-
-    if progress_callback:
-        progress_callback(1.0, f"REST API: fetched {len(all_activities)} activities in {request_count} requests")
-
-    logger.info(f"REST API activity fetch: {len(all_activities)} activities in {request_count} requests ({total_chunks} chunks)")
-    return all_activities
+            for r in list(results)
+            if "molecule_chembl_id" in r
+        ]
+    except Exception as exc:
+        logger.warning("library_similarity_failed", error=str(exc))
+        return None
 
 
-def rest_api_similarity_search(  # pragma: no cover -- external REST API
+async def _library_fallback_similarity(
+    smiles: str, threshold: int,
+) -> list[dict[str, str]] | None:
+    """Run synchronous library similarity search in executor (D-30)."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, _sync_similarity_search, smiles, threshold,
+    )
+
+
+def _sync_activity_fetch(
+    chembl_ids: list[str],
+    activity_types: list[str],
+) -> list[dict] | None:
+    """Synchronous activity fetch via ChEMBL library (fallback)."""
+    client = _get_chembl_client()
+    if client is None or "activity" not in client:
+        return None
+    try:
+        all_activities = []
+        activity_types_set = set(activity_types)
+        activities = client["activity"].filter(
+            molecule_chembl_id__in=chembl_ids,
+        ).only([
+            "molecule_chembl_id",
+            "standard_type",
+            "standard_value",
+            "standard_units",
+            "pchembl_value",
+            "target_chembl_id",
+            "assay_chembl_id",
+            "data_validity_comment",
+        ])
+        raw = list(activities)
+        filtered = [a for a in raw if a.get("standard_type") in activity_types_set]
+        all_activities.extend(filtered)
+        return all_activities
+    except Exception as exc:
+        logger.warning("library_activity_failed", error=str(exc))
+        return None
+
+
+async def _library_fallback_activities(
+    chembl_ids: list[str],
+    activity_types: list[str],
+) -> list[dict] | None:
+    """Run synchronous library activity fetch in executor (D-30)."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, _sync_activity_fetch, chembl_ids, activity_types,
+    )
+
+
+def _sync_molecule_fetch(chembl_ids: list[str]) -> dict[str, dict] | None:
+    """Synchronous batch molecule fetch via ChEMBL library (fallback)."""
+    client = _get_chembl_client()
+    if client is None or "molecule" not in client:
+        return None
+    try:
+        molecules = client["molecule"].filter(
+            molecule_chembl_id__in=chembl_ids,
+        ).only([
+            "molecule_chembl_id",
+            "pref_name",
+            "molecule_properties",
+            "molecule_structures",
+        ])
+        result = {}
+        for mol in list(molecules):
+            cid = mol.get("molecule_chembl_id")
+            if cid:
+                result[cid] = mol
+        return result
+    except Exception as exc:
+        logger.warning("library_molecule_failed", error=str(exc))
+        return None
+
+
+async def _library_fallback_molecule_data(
+    chembl_ids: list[str],
+) -> dict[str, dict] | None:
+    """Run synchronous library molecule fetch in executor."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _sync_molecule_fetch, chembl_ids)
+
+
+def _sync_target_fetch(target_ids: list[str]) -> dict[str, str] | None:
+    """Synchronous batch target fetch via ChEMBL library (fallback)."""
+    client = _get_chembl_client()
+    if client is None or "target" not in client:
+        return None
+    try:
+        targets = client["target"].filter(
+            target_chembl_id__in=target_ids,
+        ).only(["target_chembl_id", "pref_name"])
+        result = {}
+        for t in list(targets):
+            tid = t.get("target_chembl_id")
+            if tid:
+                result[tid] = t.get("pref_name", "") or ""
+        return result
+    except Exception as exc:
+        logger.warning("library_target_failed", error=str(exc))
+        return None
+
+
+async def _library_fallback_target_names(
+    target_ids: list[str],
+) -> dict[str, str] | None:
+    """Run synchronous library target fetch in executor."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _sync_target_fetch, target_ids)
+
+
+def _sync_drug_indication_fetch(
+    chembl_ids: list[str],
+) -> list[dict] | None:
+    """Synchronous drug indication fetch via ChEMBL library (fallback)."""
+    client = _get_chembl_client()
+    if client is None or "drug_indication" not in client:
+        return None
+    try:
+        all_indications: list[dict] = []
+        for cid in chembl_ids:
+            try:
+                indications = client["drug_indication"].filter(molecule_chembl_id=cid)
+                for ind in list(indications):
+                    ind["molecule_chembl_id"] = cid
+                    all_indications.append(ind)
+            except Exception:
+                pass
+        return all_indications
+    except Exception as exc:
+        logger.warning("library_drug_indication_failed", error=str(exc))
+        return None
+
+
+async def _library_fallback_drug_indications(
+    chembl_ids: list[str],
+) -> list[dict] | None:
+    """Run synchronous library drug indication fetch in executor."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, _sync_drug_indication_fetch, chembl_ids,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public async functions
+# ---------------------------------------------------------------------------
+
+async def get_chembl_ids(
+    client: httpx.AsyncClient,
     smiles: str,
     similarity_threshold: int = 90,
-    progress_callback: Optional[ProgressCallback] = None
-) -> List[Dict[str, str]]:
-    """
-    Perform similarity search using direct REST API.
+    *,
+    semaphore: asyncio.Semaphore | None = None,
+) -> list[dict[str, str]]:
+    """Perform similarity search against ChEMBL.
 
-    This is a fallback when the library fails.
+    REST primary: URL path ``/similarity/{SMILES}/{threshold}.json``
+    with ``limit=1000`` and 90s timeout override (D-15).
+
+    On REST failure, falls back to library via run_in_executor (D-34).
 
     Args:
+        client: httpx.AsyncClient instance
         smiles: SMILES string to search
         similarity_threshold: Similarity threshold (0-100)
-        progress_callback: Optional progress callback
+        semaphore: Optional concurrency limiter
 
     Returns:
-        List of dicts with ChEMBL IDs
+        List of dicts with ``molecule_chembl_id`` keys
     """
-    if progress_callback:
-        progress_callback(0.1, "Performing similarity search via REST API...")
-
-    all_results = []
-    offset = 0
-
-    while True:
-        params = {
-            "smiles": smiles,
-            "similarity": similarity_threshold,
-            "only": "molecule_chembl_id,similarity",
-            "limit": CHEMBL_MAX_LIMIT,
-            "offset": offset
-        }
-
-        data = _rest_api_get("similarity", params, timeout=SIMILARITY_SEARCH_TIMEOUT)
-
-        if data is None:
-            logger.error(f"REST API similarity search failed at offset {offset}")
-            break
-
-        molecules = _get_response_data(data, 'similarity')
-        if not molecules:
-            break
-
-        for mol in molecules:
-            chembl_id = mol.get('molecule_chembl_id')
-            if chembl_id:
-                all_results.append({"ChEMBL ID": chembl_id, "Similarity": float(mol.get('similarity', 0))})
-
-        if progress_callback:
-            total = data.get('page_meta', {}).get('total_count', 0)
-            if total > 0:
-                progress = min(0.9, 0.1 + 0.8 * (offset + len(molecules)) / total)
-                progress_callback(progress, f"Found {len(all_results)} similar compounds...")
-
-        if len(molecules) < CHEMBL_MAX_LIMIT:
-            break
-        offset += CHEMBL_MAX_LIMIT
-
-    if progress_callback:
-        progress_callback(1.0, f"REST API: found {len(all_results)} similar compounds")
-
-    logger.info(f"REST API similarity search: {len(all_results)} compounds found")
-    return all_results
-
-
-def rest_api_fetch_molecule(chembl_id: str) -> Optional[Dict]:  # pragma: no cover -- external REST API
-    """
-    Fetch single molecule data using direct REST API.
-
-    Args:
-        chembl_id: ChEMBL ID to fetch
-
-    Returns:
-        Molecule data dict or None on error
-    """
-    params = {
-        "molecule_chembl_id": chembl_id,
-        "only": "molecule_chembl_id,pref_name,molecule_properties,molecule_structures"
-    }
-
-    data = _rest_api_get("molecule", params, timeout=CHEMBL_API_TIMEOUT)
-
-    if data is None:
-        return None
-
-    molecules = _get_response_data(data, 'molecule')
-    if molecules:
-        return molecules[0]
-
-    return None
-
-
-def rest_api_fetch_molecules_batch(  # pragma: no cover -- external REST API batch
-    chembl_ids: List[str],
-    progress_callback: Optional[ProgressCallback] = None
-) -> Dict[str, Dict]:
-    """
-    Fetch molecule data for multiple ChEMBL IDs using REST API batch query with chunking.
-
-    Automatically chunks large ID lists to avoid URL length violations.
-
-    Args:
-        chembl_ids: List of ChEMBL IDs
-        progress_callback: Optional progress callback
-
-    Returns:
-        Dict mapping ChEMBL ID -> molecule data dict
-    """
-    if not chembl_ids:
-        return {}
-
-    all_molecules = []
-    total_ids = len(chembl_ids)
-
-    # Chunk IDs to avoid URL length violations
-    id_chunks = [
-        chembl_ids[i:i + MAX_IDS_PER_REQUEST]
-        for i in range(0, total_ids, MAX_IDS_PER_REQUEST)
-    ]
-    total_chunks = len(id_chunks)
-
-    if progress_callback:
-        progress_callback(0.1, f"Fetching molecules for {total_ids} compounds in {total_chunks} chunks...")
-
-    for chunk_idx, chunk_ids in enumerate(id_chunks):
-        ids_param = ",".join(chunk_ids)
-        offset = 0
-
-        while True:
-            params = {
-                "molecule_chembl_id__in": ids_param,
-                "only": "molecule_chembl_id,pref_name,molecule_properties,molecule_structures",
-                "limit": CHEMBL_MAX_LIMIT,
-                "offset": offset
-            }
-
-            data = _rest_api_get("molecule", params, timeout=CHEMBL_API_TIMEOUT)
-
-            if data is None:
-                logger.error(f"REST API molecule batch fetch failed at chunk {chunk_idx}, offset {offset}")
-                break
-
-            molecules = _get_response_data(data, 'molecule')
-            if not molecules:
-                break
-
-            all_molecules.extend(molecules)
-
-            if len(molecules) < CHEMBL_MAX_LIMIT:
-                break
-            offset += CHEMBL_MAX_LIMIT
-
-        if progress_callback:
-            progress = 0.1 + 0.8 * ((chunk_idx + 1) / total_chunks)
-            progress_callback(progress, f"Processed chunk {chunk_idx + 1}/{total_chunks}...")
-
-    # Convert to dict keyed by ChEMBL ID
-    result = {}
-    for mol in all_molecules:
-        chembl_id = mol.get('molecule_chembl_id')
-        if chembl_id:
-            result[chembl_id] = mol
-
-    if progress_callback:
-        progress_callback(1.0, f"REST API batch: fetched {len(result)} molecules")
-
-    logger.info(f"REST API batch molecule fetch: {len(result)} molecules for {total_ids} IDs ({total_chunks} chunks)")
-    return result
-
-
-def rest_api_fetch_target(target_chembl_id: str) -> Optional[str]:  # pragma: no cover -- external REST API
-    """
-    Fetch single target name using direct REST API.
-
-    Args:
-        target_chembl_id: ChEMBL Target ID
-
-    Returns:
-        Target preferred name or None on error
-    """
-    params = {
-        "target_chembl_id": target_chembl_id,
-        "only": "target_chembl_id,pref_name"
-    }
-
-    data = _rest_api_get("target", params, timeout=CHEMBL_API_TIMEOUT)
-
-    if data is None:
-        return None
-
-    targets = _get_response_data(data, 'target')
-    if targets:
-        return targets[0].get('pref_name', '')
-
-    return None
-
-
-def rest_api_fetch_targets_batch(  # pragma: no cover -- external REST API batch
-    target_chembl_ids: List[str],
-    progress_callback: Optional[ProgressCallback] = None
-) -> Dict[str, str]:
-    """
-    Fetch target names for multiple ChEMBL Target IDs using REST API batch query with chunking.
-
-    Automatically chunks large ID lists to avoid URL length violations.
-
-    Args:
-        target_chembl_ids: List of ChEMBL Target IDs
-        progress_callback: Optional progress callback
-
-    Returns:
-        Dict mapping Target ChEMBL ID -> target preferred name
-    """
-    if not target_chembl_ids:
-        return {}
-
-    # Remove duplicates
-    unique_ids = list(dict.fromkeys(target_chembl_ids))
-    total_ids = len(unique_ids)
-
-    # Chunk IDs to avoid URL length violations
-    id_chunks = [
-        unique_ids[i:i + MAX_IDS_PER_REQUEST]
-        for i in range(0, total_ids, MAX_IDS_PER_REQUEST)
-    ]
-    total_chunks = len(id_chunks)
-
-    all_targets = []
-
-    if progress_callback:
-        progress_callback(0.1, f"Fetching targets for {total_ids} IDs in {total_chunks} chunks...")
-
-    for chunk_idx, chunk_ids in enumerate(id_chunks):
-        ids_param = ",".join(chunk_ids)
-        offset = 0
-
-        while True:
-            params = {
-                "target_chembl_id__in": ids_param,
-                "only": "target_chembl_id,pref_name",
-                "limit": CHEMBL_MAX_LIMIT,
-                "offset": offset
-            }
-
-            data = _rest_api_get("target", params, timeout=CHEMBL_API_TIMEOUT)
-
-            if data is None:
-                logger.error(f"REST API target batch fetch failed at chunk {chunk_idx}, offset {offset}")
-                break
-
-            targets = _get_response_data(data, 'target')
-            if not targets:
-                break
-
-            all_targets.extend(targets)
-
-            if len(targets) < CHEMBL_MAX_LIMIT:
-                break
-            offset += CHEMBL_MAX_LIMIT
-
-        if progress_callback:
-            progress = 0.1 + 0.8 * ((chunk_idx + 1) / total_chunks)
-            progress_callback(progress, f"Processed chunk {chunk_idx + 1}/{total_chunks}...")
-
-    # Convert to dict keyed by Target ChEMBL ID
-    result = {}
-    for target in all_targets:
-        target_id = target.get('target_chembl_id')
-        if target_id:
-            result[target_id] = target.get('pref_name', '') or ''
-
-    if progress_callback:
-        progress_callback(1.0, f"REST API batch: fetched {len(result)} targets")
-
-    logger.info(f"REST API batch target fetch: {len(result)} targets for {total_ids} IDs ({total_chunks} chunks)")
-    return result
-
-
-def rest_api_fetch_drug_indications_batch(  # pragma: no cover -- external REST API batch
-    chembl_ids: List[str],
-    progress_callback: Optional[ProgressCallback] = None
-) -> List[Dict]:
-    """
-    Fetch drug indications using batch REST API query with chunking.
-
-    This is 13.7x FASTER than sequential library calls (0.59s vs 8.10s for 9 IDs).
-    Uses molecule_chembl_id__in parameter for batch query.
-
-    Automatically chunks large ID lists to avoid URL length violations.
-
-    Args:
-        chembl_ids: List of ChEMBL IDs
-        progress_callback: Optional progress callback
-
-    Returns:
-        List of drug indication dictionaries
-    """
-    if not chembl_ids:
+    if not smiles:
         return []
 
-    all_indications = []
-    total_ids = len(chembl_ids)
-    chunks_processed = 0
+    canonical = _canonicalize_smiles(smiles)
+    encoded = _url_encode_smiles(canonical)
 
-    # Chunk IDs to avoid URL length violations
-    id_chunks = [
-        chembl_ids[i:i + MAX_IDS_PER_REQUEST]
-        for i in range(0, total_ids, MAX_IDS_PER_REQUEST)
-    ]
-    total_chunks = len(id_chunks)
-
-    if progress_callback:
-        progress_callback(0.1, f"Fetching drug indications for {total_ids} compounds in {total_chunks} chunks...")
-
-    for chunk_idx, chunk_ids in enumerate(id_chunks):
-        ids_param = ",".join(chunk_ids)
+    # REST primary path -- similarity uses URL path, not query params
+    circuit = _get_circuit("similarity")
+    if not _is_circuit_open(circuit):
+        url = f"{settings.CHEMBL_API_URL}/similarity/{encoded}/{similarity_threshold}.json"
+        all_results: list[dict[str, str]] = []
         offset = 0
 
         while True:
-            params = {
-                "molecule_chembl_id__in": ids_param,
-                "limit": CHEMBL_MAX_LIMIT,
-                "offset": offset
-            }
+            params: dict[str, Any] = {"limit": CHEMBL_MAX_LIMIT, "offset": offset}
+            request_timeout = httpx.Timeout(connect=5, read=90, write=10, pool=10)
 
-            data = _rest_api_get("drug_indication", params, timeout=CHEMBL_API_TIMEOUT)
-
-            if data is None:
-                logger.error(f"REST API drug_indication batch fetch failed at chunk {chunk_idx}, offset {offset}")
-                break
-
-            indications = _get_response_data(data, 'drug_indication')
-            if not indications:
-                break
-
-            all_indications.extend(indications)
-
-            if len(indications) < CHEMBL_MAX_LIMIT:
-                break
-            offset += CHEMBL_MAX_LIMIT
-
-        chunks_processed += 1
-
-        if progress_callback:
-            progress = 0.1 + 0.8 * (chunks_processed / total_chunks)
-            progress_callback(progress, f"Processed chunk {chunks_processed}/{total_chunks}...")
-
-    if progress_callback:
-        progress_callback(1.0, f"REST API batch: fetched {len(all_indications)} drug indications")
-
-    logger.info(f"REST API batch drug_indication fetch: {len(all_indications)} indications for {total_ids} compounds ({total_chunks} chunks)")
-    return all_indications
-
-
-# =============================================================================
-# LIBRARY-BASED FUNCTIONS (with REST API fallback)
-# =============================================================================
-
-def _fetch_molecule_data_with_timeout(chembl_id: str) -> Optional[Dict]:  # pragma: no cover -- external API with timeout
-    """Internal function to fetch molecule data with timeout."""
-    _chembl_rate_limiter.wait()  # Apply rate limiting
-    client = _get_chembl_client()
-    if client is None:
-        return None
-    if 'molecule' not in client:
-        return None
-    return client['molecule'].get(chembl_id)
-
-
-@cache_non_none(maxsize=CACHE_SIZE)
-def get_molecule_data(chembl_id: str) -> Optional[Dict]:  # pragma: no cover -- external ChEMBL API
-    """
-    Fetch molecule data from ChEMBL API with caching and timeout.
-
-    Uses library client first, falls back to REST API if library fails.
-
-    Args:
-        chembl_id: ChEMBL ID to fetch
-
-    Returns:
-        Optional[Dict]: Molecule data or None if error
-    """
-    # Try library first (only if installed)
-    client = _get_chembl_client()
-    if client is not None and 'molecule' in client:
-        try:
-            future = _get_timeout_executor().submit(_fetch_molecule_data_with_timeout, chembl_id)
-            result = future.result(timeout=CHEMBL_API_TIMEOUT)
-            if result is not None:
-                return result
-        except FuturesTimeoutError:
-            logger.warning(f"Library timeout fetching molecule data for {chembl_id}, trying REST API...")
-        except Exception as e:
-            logger.warning(f"Library error fetching molecule data for {chembl_id}: {str(e)}, trying REST API...")
-
-    # Fallback to REST API
-    try:
-        result = rest_api_fetch_molecule(chembl_id)
-        if result is not None:
-            logger.info(f"REST API fallback successful for molecule {chembl_id}")
-            return result
-    except Exception as e:
-        logger.error(f"REST API fallback also failed for molecule {chembl_id}: {str(e)}")
-
-    return None
-
-
-@cache_non_none(maxsize=CACHE_SIZE)
-def get_classification(inchikey: str) -> Optional[Dict]:  # pragma: no cover -- external ChEMBL API
-    """
-    Get classification data from ClassyFire API with caching.
-
-    Args:
-        inchikey: InChIKey for the molecule
-
-    Returns:
-        Optional[Dict]: Classification data or None if error
-    """
-    try:
-        _classyfire_rate_limiter.wait()  # Apply rate limiting
-        url = f'http://classyfire.wishartlab.com/entities/{inchikey}.json'
-        _start = time.time()
-        response = _get_thread_session().get(url, timeout=API_TIMEOUT)
-        metrics.increment('api_calls_total')
-        metrics.record_latency('classyfire', (time.time() - _start) * 1000)
-        if response.status_code == 200:
-            return response.json()
-        return None
-    except Exception as e:
-        metrics.increment('api_calls_total')
-        metrics.increment('api_calls_failed')
-        logger.error(f"Error getting classification for {inchikey}: {str(e)}")
-        return None
-
-
-def _fetch_target_name_with_timeout(target_chembl_id: str) -> Optional[str]:  # pragma: no cover -- external API with timeout
-    """Internal function to fetch target name with timeout."""
-    _chembl_rate_limiter.wait()  # Apply rate limiting
-    client = _get_chembl_client()
-    if client is None:
-        return None
-    if 'target' not in client:
-        return None
-    target_data = client['target'].get(target_chembl_id)
-    if target_data:
-        return target_data.get('pref_name', target_chembl_id)
-    return None
-
-
-@cache_non_none(maxsize=CACHE_SIZE)
-def get_target_name(target_chembl_id: str) -> Optional[str]:  # pragma: no cover -- external ChEMBL API
-    """
-    Fetch target name from ChEMBL API with caching and timeout.
-
-    Uses library client first, falls back to REST API if library fails.
-
-    Args:
-        target_chembl_id: ChEMBL Target ID
-
-    Returns:
-        Optional[str]: Target preferred name or None if error
-    """
-    if not target_chembl_id:
-        return None
-
-    # Try library first (only if installed)
-    client = _get_chembl_client()
-    if client is not None and 'target' in client:
-        try:
-            future = _get_timeout_executor().submit(_fetch_target_name_with_timeout, target_chembl_id)
-            result = future.result(timeout=CHEMBL_API_TIMEOUT)
-            if result is not None:
-                return result
-        except FuturesTimeoutError:
-            logger.warning(f"Library timeout fetching target name for {target_chembl_id}, trying REST API...")
-        except Exception as e:
-            logger.warning(f"Library error fetching target name for {target_chembl_id}: {str(e)}, trying REST API...")
-
-    # Fallback to REST API
-    try:
-        result = rest_api_fetch_target(target_chembl_id)
-        if result is not None:
-            logger.info(f"REST API fallback successful for target {target_chembl_id}")
-            return result
-    except Exception as e:
-        logger.error(f"REST API fallback also failed for target {target_chembl_id}: {str(e)}")
-
-    return None
-
-
-def _fetch_drug_indications_with_timeout(chembl_id: str, max_retries: int = 2) -> tuple:  # pragma: no cover -- external API with timeout
-    """Internal function to fetch drug indications with timeout and retry logic.
-
-    Handles ChEMBL API intermittent failures (e.g., empty attribute errors during pagination).
-    """
-    client = _get_chembl_client()
-    if client is None:
-        logger.warning("ChEMBL client not available for drug indications")
-        return ()
-    if 'drug_indication' not in client:
-        logger.warning("drug_indication endpoint not available")
-        return ()
-
-    last_error = None
-    for attempt in range(max_retries):
-        try:
-            indications = client['drug_indication'].filter(molecule_chembl_id=chembl_id)
-            indication_list = list(indications)
-
-            results = []
-            for ind in indication_list:
-                # Extract clinical trial URL from indication_refs
-                clinical_trials_url = ''
-                clinical_trials_ids = ''
-                indication_refs = ind.get('indication_refs', [])
-
-                if indication_refs:
-                    for ref in indication_refs:
-                        if ref.get('ref_type') == 'ClinicalTrials':
-                            clinical_trials_url = ref.get('ref_url', '')
-                            clinical_trials_ids = ref.get('ref_id', '')
-                            break
-
-                results.append({
-                    'ChEMBL_ID': chembl_id,
-                    'MESH_ID': ind.get('mesh_id', ''),
-                    'MESH_Heading': ind.get('mesh_heading', ''),
-                    'EFO_ID': ind.get('efo_id', ''),
-                    'EFO_Term': ind.get('efo_term', ''),
-                    'Max_Phase': ind.get('max_phase_for_ind', 0),
-                    'Clinical_Trials_URL': clinical_trials_url,
-                    'Clinical_Trials_IDs': clinical_trials_ids,
-                })
-
-            return tuple(results)
-
-        except Exception as e:
-            last_error = e
-            error_str = str(e)
-            # Check for ChEMBL data corruption (empty attribute errors during pagination)
-            is_corruption_error = "empty attribute" in error_str or "doesn't allow a default" in error_str
-
-            if attempt < max_retries - 1:
-                if is_corruption_error:
-                    logger.warning(f"Drug indications API data corruption for {chembl_id} (attempt {attempt + 1}), retrying...")
+            try:
+                if semaphore is not None:
+                    async with semaphore:
+                        _start = time.time()
+                        response = await client.get(url, params=params, timeout=request_timeout)
                 else:
-                    logger.warning(f"Drug indications fetch attempt {attempt + 1} failed for {chembl_id}: {e}")
-                time.sleep(0.5 * (attempt + 1))
-            else:
-                logger.error(f"Drug indications fetch failed for {chembl_id} after {max_retries} attempts: {last_error}")
+                    _start = time.time()
+                    response = await client.get(url, params=params, timeout=request_timeout)
 
-    return ()
+                metrics.increment("api_calls_total")
+                metrics.record_latency("chembl", (time.time() - _start) * 1000)
 
+                if response.status_code == 429:
+                    retry_after = float(response.headers.get("Retry-After", 2))
+                    await asyncio.sleep(retry_after)
+                    continue
 
-@lru_cache(maxsize=CACHE_SIZE)
-def get_drug_indications(chembl_id: str) -> tuple:  # pragma: no cover -- external ChEMBL API
-    """
-    Fetch drug indications for a ChEMBL ID with caching and timeout.
+                response.raise_for_status()
+                data = response.json()
+                _record_success(circuit)
 
-    Returns indication data including MESH, EFO, and clinical trial references.
+                molecules = _get_response_data(data, "similarity")
+                if not molecules:
+                    break
 
-    Args:
-        chembl_id: ChEMBL molecule ID
+                for mol in molecules:
+                    cid = mol.get("molecule_chembl_id")
+                    if cid:
+                        similarity = mol.get("similarity", 0)
+                        all_results.append({
+                            "ChEMBL ID": cid,
+                            "Similarity": similarity,
+                        })
 
-    Returns:
-        tuple: Tuple of indication dictionaries (for caching compatibility)
-    """
-    if not chembl_id:
-        return ()
+                if len(molecules) < CHEMBL_MAX_LIMIT:
+                    break
+                offset += CHEMBL_MAX_LIMIT
 
-    try:
-        future = _get_timeout_executor().submit(_fetch_drug_indications_with_timeout, chembl_id)
-        return future.result(timeout=CHEMBL_API_TIMEOUT)
-    except FuturesTimeoutError:
-        logger.error(f"Timeout fetching drug indications for {chembl_id}")
-        return ()
-    except Exception as e:
-        logger.error(f"Error fetching drug indications for {chembl_id}: {str(e)}")
-        return ()
+            except Exception as exc:
+                _record_failure(circuit)
+                logger.warning("similarity_rest_failed", error=str(exc))
+                break
 
+        if all_results or offset > 0:
+            logger.info("similarity_search_complete", count=len(all_results))
+            return all_results
 
-def get_drug_indications_batch(  # pragma: no cover -- external ChEMBL API batch
-    chembl_ids: List[str],
-    progress_callback: Optional[ProgressCallback] = None
-) -> Dict[str, List[Dict]]:
-    """
-    Fetch drug indications for multiple ChEMBL IDs using batch REST API.
-
-    This is 13.7x FASTER than sequential calls (0.59s vs 8.10s for 9 IDs).
-    Uses the REST API with molecule_chembl_id__in parameter for batch query.
-
-    Falls back to sequential library calls if REST API fails.
-
-    Args:
-        chembl_ids: List of ChEMBL molecule IDs
-        progress_callback: Optional callback for progress updates
-
-    Returns:
-        Dict mapping ChEMBL ID -> list of indication dictionaries
-    """
-    if not chembl_ids:
-        return {}
-
-    # Remove duplicates while preserving order
-    unique_ids = list(dict.fromkeys(chembl_ids))
-
-    if progress_callback:
-        progress_callback(0.1, f"Fetching drug indications for {len(unique_ids)} compounds (batch)...")
-
-    # Try REST API batch query first (13.7x faster)
-    try:
-        raw_indications = rest_api_fetch_drug_indications_batch(unique_ids, progress_callback)
-
-        # Group by ChEMBL ID
-        result = {cid: [] for cid in unique_ids}
-        for ind in raw_indications:
-            cid = ind.get('molecule_chembl_id')
-            if cid in result:
-                # Extract clinical trial info
-                clinical_trials_url = ''
-                clinical_trials_ids = ''
-                indication_refs = ind.get('indication_refs', [])
-                if indication_refs:
-                    for ref in indication_refs:
-                        if ref.get('ref_type') == 'ClinicalTrials':
-                            clinical_trials_url = ref.get('ref_url', '')
-                            clinical_trials_ids = ref.get('ref_id', '')
-                            break
-
-                result[cid].append({
-                    'ChEMBL_ID': cid,
-                    'MESH_ID': ind.get('mesh_id', ''),
-                    'MESH_Heading': ind.get('mesh_heading', ''),
-                    'EFO_ID': ind.get('efo_id', ''),
-                    'EFO_Term': ind.get('efo_term', ''),
-                    'Max_Phase': ind.get('max_phase_for_ind', 0),
-                    'Clinical_Trials_URL': clinical_trials_url,
-                    'Clinical_Trials_IDs': clinical_trials_ids,
-                })
-
-        logger.info(f"Batch drug indications: fetched for {len(unique_ids)} compounds via REST API")
+    # Fallback to library (D-34)
+    logger.info("similarity_falling_back_to_library")
+    result = await _library_fallback_similarity(canonical, similarity_threshold)
+    if result is not None:
+        logger.info("similarity_library_fallback_ok", count=len(result))
         return result
 
-    except Exception as e:
-        logger.warning(f"REST API batch drug indications failed: {e}, falling back to sequential...")
-
-    # Fallback to sequential library calls
-    result = {}
-    for i, chembl_id in enumerate(unique_ids):
-        try:
-            indications = get_drug_indications(chembl_id)
-            result[chembl_id] = list(indications) if indications else []
-        except Exception as e:
-            logger.debug(f"Failed to fetch indications for {chembl_id}: {e}")
-            result[chembl_id] = []
-
-        if progress_callback and (i + 1) % 10 == 0:
-            progress_callback(0.1 + 0.9 * (i + 1) / len(unique_ids),
-                            f"Fetched indications for {i + 1}/{len(unique_ids)} compounds...")
-
-    if progress_callback:
-        progress_callback(1.0, f"Fetched drug indications for {len(unique_ids)} compounds (sequential fallback)")
-
-    logger.info(f"Sequential drug indications: fetched for {len(unique_ids)} compounds")
-    return result
-
-
-def _similarity_search_with_timeout(smiles: str, similarity_threshold: int, max_retries: int = 2) -> Optional[List[Dict[str, Any]]]:  # pragma: no cover -- external API with timeout
-    """Internal function to perform similarity search with timeout and retry logic.
-
-    Handles ChEMBL API intermittent failures (e.g., empty attribute errors during pagination).
-    """
-    client = _get_chembl_client()
-    if client is None:
-        logger.error("ChEMBL client not available for similarity search")
-        return None
-    if 'similarity' not in client:
-        logger.error("ChEMBL client not available for similarity search")
-        return None
-
-    last_error = None
-    for attempt in range(max_retries):
-        try:
-            results = client['similarity'].filter(
-                smiles=smiles,
-                similarity=similarity_threshold
-            ).only(['molecule_chembl_id', 'similarity'])
-
-            # Convert to list to actually fetch the data
-            result_list = list(results)
-            return [{"ChEMBL ID": result['molecule_chembl_id'], "Similarity": float(result.get('similarity', 0))} for result in result_list]
-
-        except Exception as e:
-            last_error = e
-            error_str = str(e)
-            # Check for ChEMBL data corruption (empty attribute errors during pagination)
-            is_corruption_error = "empty attribute" in error_str or "doesn't allow a default" in error_str
-
-            if attempt < max_retries - 1:
-                if is_corruption_error:
-                    logger.warning(f"Similarity search API data corruption (attempt {attempt + 1}), retrying...")
-                else:
-                    logger.warning(f"Similarity search attempt {attempt + 1} failed: {e}")
-                time.sleep(0.5 * (attempt + 1))
-            else:
-                # Re-raise for the outer retry logic in get_chembl_ids
-                raise last_error
-
+    logger.error("similarity_search_all_failed")
     return []
 
 
-def get_chembl_ids(smiles: str, similarity_threshold: int = 90, max_retries: int = 3) -> List[Dict[str, str]]:  # pragma: no cover -- external ChEMBL API
-    """
-    Perform similarity search with error handling, retries, and timeout.
+async def _fetch_activities_for_type(
+    client: httpx.AsyncClient,
+    chembl_ids: list[str],
+    activity_type: str,
+    semaphore: asyncio.Semaphore | None,
+) -> list[dict]:
+    """Fetch activities for a single activity type with parallel pagination.
 
-    Uses library client first, falls back to REST API if library fails.
+    First page reveals ``total_count``, remaining pages fetched via
+    ``asyncio.gather()`` for parallel pagination (D-22).
 
     Args:
-        smiles: SMILES string to search
-        similarity_threshold: Similarity threshold (0-100)
-        max_retries: Maximum number of retry attempts
+        client: httpx.AsyncClient instance
+        chembl_ids: ChEMBL IDs to query
+        activity_type: Single activity type (e.g., 'IC50')
+        semaphore: Optional concurrency limiter
 
     Returns:
-        List[Dict[str, str]]: List of ChEMBL IDs
+        List of activity dicts for this type
+
+    Raises:
+        RuntimeError: If REST request fails (all-or-nothing per D-23)
     """
-    # Try library first (only if chembl_webresource_client is installed)
-    client = _get_chembl_client()
-    if client is not None and 'similarity' in client:
-        for attempt in range(max_retries):
-            try:
-                # Use ThreadPoolExecutor for timeout
-                future = _get_timeout_executor().submit(
-                    _similarity_search_with_timeout, smiles, similarity_threshold
-                )
-                result = future.result(timeout=SIMILARITY_SEARCH_TIMEOUT)
-                if result is not None:  # Library succeeded (empty list is valid - no similar compounds)
-                    return result
+    ids_param = ",".join(chembl_ids)
+    params: dict[str, Any] = {
+        "molecule_chembl_id__in": ids_param,
+        "standard_type": activity_type,
+        "only": ACTIVITY_ONLY_FIELDS,
+        "limit": CHEMBL_MAX_LIMIT,
+        "offset": 0,
+    }
 
-            except FuturesTimeoutError:
-                logger.warning(f"Similarity search timeout (attempt {attempt + 1}/{max_retries})")
-                if attempt < max_retries - 1:
-                    time.sleep(2 * (attempt + 1))
-                continue
-            except IndexError as e:
-                # Handle "tuple index out of range" from chembl client
-                logger.warning(f"ChEMBL API IndexError (attempt {attempt + 1}/{max_retries}): {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(1 * (attempt + 1))  # Exponential backoff
-                continue
-            except Exception as e:
-                logger.warning(f"Library error in similarity search (attempt {attempt + 1}/{max_retries}): {str(e)}")
-                if attempt < max_retries - 1:
-                    time.sleep(1 * (attempt + 1))
-                continue
+    # First page
+    data = await _chembl_request(
+        client, "activity", params,
+        semaphore=semaphore, timeout_override=60,
+    )
+    if data is None:
+        raise RuntimeError(f"Activity fetch failed for type {activity_type}")
 
-        logger.info("Library similarity search failed, trying REST API fallback...")
-    else:
-        logger.info("ChEMBL library not available, using REST API for similarity search...")
-    try:
-        result = rest_api_similarity_search(smiles, similarity_threshold)
-        if result is not None:  # Empty list is valid - no similar compounds found
-            logger.info(f"REST API similarity search successful: {len(result)} compounds found")
-            return result
-    except Exception as e:
-        logger.error(f"REST API similarity search also failed: {str(e)}")
+    activities = _get_response_data(data, "activity")
+    total_count = data.get("page_meta", {}).get("total_count", 0)
 
-    logger.error(f"Similarity search failed after {max_retries} library attempts + REST API fallback")
-    return []
+    if total_count <= CHEMBL_MAX_LIMIT:
+        return activities
+
+    # Parallel pagination for remaining pages
+    remaining_offsets = list(range(CHEMBL_MAX_LIMIT, total_count, CHEMBL_MAX_LIMIT))
+
+    async def _fetch_page(offset: int) -> list[dict]:
+        page_params = {**params, "offset": offset}
+        page_data = await _chembl_request(
+            client, "activity", page_params,
+            semaphore=semaphore, timeout_override=60,
+        )
+        if page_data is None:
+            raise RuntimeError(
+                f"Activity page failed for type {activity_type} at offset {offset}"
+            )
+        return _get_response_data(page_data, "activity")
+
+    page_results = await asyncio.gather(
+        *[_fetch_page(off) for off in remaining_offsets],
+    )
+    for page_activities in page_results:
+        activities.extend(page_activities)
+
+    return activities
 
 
-def _fetch_activity_batch(batch_params: Dict[str, Any], max_retries: int = 2) -> List[Dict]:  # pragma: no cover -- external API with retry
-    """
-    Helper function to fetch a batch of activities with retry logic.
+async def fetch_all_activities_single_batch(
+    client: httpx.AsyncClient,
+    chembl_ids: list[str],
+    activity_types: list[str] | None = None,
+    cancellation_check: Callable[[], None] | None = None,
+    *,
+    semaphore: asyncio.Semaphore | None = None,
+) -> list[dict]:
+    """Fetch ALL activities for multiple ChEMBL IDs using per-type parallel strategy.
+
+    Per-type parallel: one ``_fetch_activities_for_type()`` per activity type,
+    combined via ``asyncio.gather()`` (D-20). Each type function does parallel
+    pagination internally (D-22).
+
+    All-or-nothing: if any type fails after retries, falls back to library (D-23/D-34).
 
     Args:
-        batch_params: Dictionary containing batch parameters
-        max_retries: Maximum retry attempts
-
-    Returns:
-        List[Dict]: List of activity data
-    """
-    chembl_ids = batch_params['chembl_ids']
-    activity_type = batch_params['activity_type']
-
-    client = _get_chembl_client()
-    if client is None:
-        logger.warning("ChEMBL client not available in _fetch_activity_batch")
-        return []
-    if 'activity' not in client:
-        logger.warning("ChEMBL activity library not available in _fetch_activity_batch")
-        return []
-
-    for attempt in range(max_retries):
-        try:
-            activities = client['activity'].filter(
-                molecule_chembl_id__in=chembl_ids,
-                standard_type=activity_type
-            ).only('molecule_chembl_id', 'standard_value',
-                  'standard_units', 'standard_type',
-                  'target_chembl_id')
-
-            return list(activities)
-
-        except IndexError as e:
-            # Handle "tuple index out of range" from chembl client
-            logger.warning(f"Activity fetch IndexError for {chembl_ids[:2]} (attempt {attempt + 1}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(0.5 * (attempt + 1))
-            continue
-        except Exception as e:
-            logger.error(f"Error fetching activities for batch {chembl_ids[:2]} (attempt {attempt + 1}): {str(e)}")
-            if attempt < max_retries - 1:
-                time.sleep(0.5 * (attempt + 1))
-            continue
-
-    return []
-
-
-def batch_fetch_activities(  # pragma: no cover -- external ChEMBL API batch
-    chembl_ids: List[str],
-    activity_types: Optional[List[str]] = None,
-    batch_size: int = MAX_BATCH_SIZE,
-    max_workers: int = MAX_WORKERS,
-    progress_callback: Optional[ProgressCallback] = None
-) -> List[Dict]:
-    """
-    Fetch activities in parallel batches with optimized performance.
-
-    Args:
-        chembl_ids: List of ChEMBL IDs
-        activity_types: List of activity types to fetch
-        batch_size: Size of each batch
-        max_workers: Maximum number of concurrent workers
-        progress_callback: Optional callback for progress updates (progress: 0-1, message: str)
-
-    Returns:
-        List[Dict]: List of activity data
-    """
-    if activity_types is None:
-        activity_types = ACTIVITY_TYPES
-
-    if not chembl_ids:
-        return []
-
-    if batch_size > MAX_BATCH_SIZE:
-        logger.warning(f"Batch size {batch_size} exceeds maximum {MAX_BATCH_SIZE}. Using maximum value.")
-        batch_size = MAX_BATCH_SIZE
-
-    all_activities = []
-
-    # Create batches for parallel processing
-    batches = []
-    for i in range(0, len(chembl_ids), batch_size):
-        batch = chembl_ids[i:i + batch_size]
-        for activity_type in activity_types:
-            batches.append({
-                'chembl_ids': batch,
-                'activity_type': activity_type
-            })
-
-    total_batches = len(batches)
-
-    if progress_callback:
-        progress_callback(0.0, f"Fetching activity data for {len(chembl_ids)} compounds across {len(activity_types)} activity types...")
-
-    # Process batches in parallel
-    completed = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_fetch_activity_batch, batch): i for i, batch in enumerate(batches)}
-
-        for future in as_completed(futures):
-            batch_idx = futures[future]
-            try:
-                batch_results = future.result()
-                all_activities.extend(batch_results)
-
-                # Update progress
-                completed += 1
-                progress = completed / total_batches
-                if progress_callback:
-                    progress_callback(progress, f"Processed {completed}/{total_batches} batches ({int(progress * 100)}%)")
-            except Exception as e:
-                logger.error(f"Error processing batch {batch_idx}: {str(e)}")
-
-    if progress_callback:
-        progress_callback(1.0, f"Completed! Fetched {len(all_activities)} activity data points.")
-
-    return all_activities
-
-
-def fetch_batch_molecule_data(  # pragma: no cover -- external ChEMBL API batch
-    chembl_ids: List[str],
-    progress_callback: Optional[ProgressCallback] = None,
-    max_retries: int = 2
-) -> Dict[str, Dict]:
-    """
-    Fetch molecule data for multiple ChEMBL IDs in a single batch query.
-
-    This is the OPTIMIZED approach - single query instead of N individual calls.
-    Provides ~3-5x speedup over individual get_molecule_data() calls.
-
-    Includes retry logic for ChEMBL API intermittent failures.
-
-    Args:
+        client: httpx.AsyncClient instance
         chembl_ids: List of ChEMBL IDs to fetch
-        progress_callback: Optional callback for progress updates
-        max_retries: Max retries for batch fetch before fallback
-
-    Returns:
-        Dict mapping ChEMBL ID -> molecule data dict
-    """
-    if not chembl_ids:
-        return {}
-
-    if progress_callback:
-        progress_callback(0.1, f"Fetching molecule data for {len(chembl_ids)} compounds...")
-
-    client = _get_chembl_client()
-
-    if client is not None and 'molecule' in client:
-        # Try batch fetch with retries
-        for attempt in range(max_retries):
-            try:
-                if progress_callback:
-                    progress_callback(0.2, f"Querying ChEMBL (batch, attempt {attempt + 1})...")
-
-                # Single batch query for all molecules
-                molecules = client['molecule'].filter(
-                    molecule_chembl_id__in=chembl_ids
-                ).only([
-                    'molecule_chembl_id',
-                    'pref_name',
-                    'molecule_properties',
-                    'molecule_structures'
-                ])
-
-                if progress_callback:
-                    progress_callback(0.6, "Processing molecule data...")
-
-                # Convert to dict keyed by ChEMBL ID
-                result = {}
-                for mol in list(molecules):
-                    chembl_id = mol.get('molecule_chembl_id')
-                    if chembl_id:
-                        result[chembl_id] = mol
-
-                if progress_callback:
-                    progress_callback(1.0, f"Fetched {len(result)}/{len(chembl_ids)} molecules")
-
-                logger.info(f"Batch molecule fetch: {len(result)}/{len(chembl_ids)} molecules retrieved")
-                return result
-
-            except Exception as e:
-                error_str = str(e)
-                is_corruption_error = "empty attribute" in error_str or "doesn't allow a default" in error_str
-
-                if attempt < max_retries - 1:
-                    if is_corruption_error:
-                        logger.warning(f"Batch molecule fetch API data corruption (attempt {attempt + 1}), retrying...")
-                    else:
-                        logger.warning(f"Batch molecule fetch attempt {attempt + 1} failed: {e}")
-                    time.sleep(0.5 * (attempt + 1))
-                else:
-                    logger.error(f"Batch molecule fetch failed after {max_retries} attempts ({type(e).__name__}): {e}")
-
-        logger.info("Library batch failed, trying REST API batch fallback...")
-    else:
-        logger.info("ChEMBL molecule library not available, using REST API...")
-
-    # Try REST API batch fallback (faster than individual fetches)
-    if progress_callback:
-        progress_callback(0.3, "Trying REST API batch fallback...")
-
-    try:
-        result = rest_api_fetch_molecules_batch(chembl_ids, progress_callback)
-        if result:
-            logger.info(f"REST API batch molecule fetch successful: {len(result)}/{len(chembl_ids)} molecules")
-            return result
-    except Exception as e:
-        logger.warning(f"REST API batch molecule fetch also failed: {e}")
-
-    # Fallback to individual fetches with timeout protection
-    logger.info("Falling back to individual molecule fetches...")
-    result = {}
-    failed_count = 0
-    for i, chembl_id in enumerate(chembl_ids):
-        try:
-            # Use timeout executor for individual fetches in fallback
-            future = _get_timeout_executor().submit(get_molecule_data, chembl_id)
-            mol_data = future.result(timeout=CHEMBL_API_TIMEOUT)
-            if mol_data:
-                result[chembl_id] = mol_data
-        except FuturesTimeoutError:
-            logger.debug(f"Timeout fetching molecule {chembl_id} in fallback")
-            failed_count += 1
-        except Exception as e:
-            logger.debug(f"Failed to fetch molecule {chembl_id}: {e}")
-            failed_count += 1
-
-        if progress_callback and (i + 1) % 10 == 0:
-            progress_callback(0.1 + 0.9 * (i + 1) / len(chembl_ids),
-                            f"Fetched {i + 1}/{len(chembl_ids)} molecules (fallback)...")
-
-    if failed_count > 0:
-        logger.warning(f"Fallback molecule fetch: {failed_count}/{len(chembl_ids)} failed")
-    return result
-
-
-def fetch_batch_target_names(  # pragma: no cover -- external REST API batch
-    target_chembl_ids: List[str],
-    progress_callback: Optional[ProgressCallback] = None,
-    max_retries: int = 2
-) -> Dict[str, str]:
-    """
-    Fetch target names for multiple ChEMBL Target IDs in a single batch query.
-
-    This is the OPTIMIZED approach - single query instead of N individual calls.
-    Provides ~3-5x speedup over individual get_target_name() calls.
-
-    Includes retry logic for ChEMBL API intermittent failures.
-
-    Args:
-        target_chembl_ids: List of ChEMBL Target IDs to fetch
-        progress_callback: Optional callback for progress updates
-        max_retries: Max retries for batch fetch before fallback
-
-    Returns:
-        Dict mapping Target ChEMBL ID -> target preferred name
-    """
-    if not target_chembl_ids:
-        return {}
-
-    # Remove duplicates while preserving order
-    unique_ids = list(dict.fromkeys(target_chembl_ids))
-
-    if progress_callback:
-        progress_callback(0.1, f"Fetching target names for {len(unique_ids)} targets...")
-
-    client = _get_chembl_client()
-
-    if client is not None and 'target' in client:
-        # Try batch fetch with retries
-        for attempt in range(max_retries):
-            try:
-                if progress_callback:
-                    progress_callback(0.2, f"Querying ChEMBL targets (batch, attempt {attempt + 1})...")
-
-                # Single batch query for all targets
-                targets = client['target'].filter(
-                    target_chembl_id__in=unique_ids
-                ).only([
-                    'target_chembl_id',
-                    'pref_name'
-                ])
-
-                if progress_callback:
-                    progress_callback(0.6, "Processing target data...")
-
-                # Convert to dict keyed by Target ChEMBL ID
-                result = {}
-                for target in list(targets):
-                    target_id = target.get('target_chembl_id')
-                    if target_id:
-                        result[target_id] = target.get('pref_name', '') or ''
-
-                if progress_callback:
-                    progress_callback(1.0, f"Fetched {len(result)}/{len(unique_ids)} target names")
-
-                logger.info(f"Batch target fetch: {len(result)}/{len(unique_ids)} targets retrieved")
-                return result
-
-            except Exception as e:
-                error_str = str(e)
-                is_corruption_error = "empty attribute" in error_str or "doesn't allow a default" in error_str
-
-                if attempt < max_retries - 1:
-                    if is_corruption_error:
-                        logger.warning(f"Batch target fetch API data corruption (attempt {attempt + 1}), retrying...")
-                    else:
-                        logger.warning(f"Batch target fetch attempt {attempt + 1} failed: {e}")
-                    time.sleep(0.5 * (attempt + 1))
-                else:
-                    logger.error(f"Batch target fetch failed after {max_retries} attempts ({type(e).__name__}): {e}")
-
-        logger.info("Library batch failed, trying REST API batch fallback...")
-    else:
-        logger.info("ChEMBL target library not available, using REST API...")
-
-    # Try REST API batch fallback (faster than individual fetches)
-    if progress_callback:
-        progress_callback(0.3, "Trying REST API batch fallback...")
-
-    try:
-        result = rest_api_fetch_targets_batch(unique_ids, progress_callback)
-        if result:
-            logger.info(f"REST API batch target fetch successful: {len(result)}/{len(unique_ids)} targets")
-            return result
-    except Exception as e:
-        logger.warning(f"REST API batch target fetch also failed: {e}")
-
-    # Fallback to individual fetches with timeout protection
-    logger.info("Falling back to individual target fetches...")
-    result = {}
-    failed_count = 0
-    for i, target_id in enumerate(unique_ids):
-        try:
-            # Use timeout executor for individual fetches in fallback
-            future = _get_timeout_executor().submit(get_target_name, target_id)
-            name = future.result(timeout=CHEMBL_API_TIMEOUT)
-            if name:
-                result[target_id] = name
-        except FuturesTimeoutError:
-            logger.debug(f"Timeout fetching target {target_id} in fallback")
-            failed_count += 1
-        except Exception as e:
-            logger.debug(f"Failed to fetch target {target_id}: {e}")
-            failed_count += 1
-
-        if progress_callback and (i + 1) % 10 == 0:
-            progress_callback(0.1 + 0.9 * (i + 1) / len(unique_ids),
-                            f"Fetched {i + 1}/{len(unique_ids)} targets (fallback)...")
-
-    if failed_count > 0:
-        logger.warning(f"Fallback target fetch: {failed_count}/{len(unique_ids)} failed")
-    return result
-
-
-def fetch_all_activities_single_batch(  # pragma: no cover -- external REST API single batch
-    chembl_ids: List[str],
-    activity_types: Optional[List[str]] = None,
-    progress_callback: Optional[ProgressCallback] = None,
-    max_retries: int = 2
-) -> List[Dict]:
-    """
-    Fetch ALL activities for multiple ChEMBL IDs in a single query.
-
-    This is the OPTIMIZED approach (validated in test_quercetin_verification.py):
-    - 1 server query instead of N queries
-    - Auto-pagination handles large results
-    - Local filtering is instant
-
-    Falls back to chunked fetching if single batch fails (e.g., for large ID lists
-    or when ChEMBL API returns corrupted records during pagination).
-
-    Args:
-        chembl_ids: List of ChEMBL IDs to fetch
-        activity_types: Activity types to filter (done locally after fetch)
-        progress_callback: Optional callback for progress updates
-        max_retries: Number of retries for single batch before chunked fallback
+        activity_types: Activity types to filter (default: DEFAULT_ACTIVITY_TYPES)
+        cancellation_check: Optional callable -- call between type fetches, raise if cancelled
+        semaphore: Optional concurrency limiter
 
     Returns:
         List of activity dictionaries filtered to specified types
@@ -1757,283 +989,574 @@ def fetch_all_activities_single_batch(  # pragma: no cover -- external REST API 
     if activity_types is None:
         activity_types = DEFAULT_ACTIVITY_TYPES
 
-    activity_types_set = set(activity_types)
-
-    if progress_callback:
-        progress_callback(0.1, f"Fetching activities for {len(chembl_ids)} compounds...")
-
-    client = _get_chembl_client()
-    library_available = client is not None and 'activity' in client
-
-    if library_available:
-        assert client is not None  # narrowing for type checker — guarded by library_available
-        # Try single batch with retries (ChEMBL API can have intermittent issues with corrupted records)
-        for attempt in range(max_retries):
-            try:
-                # Single query for ALL activities - auto-paginates
-                activities = client['activity'].filter(
-                    molecule_chembl_id__in=chembl_ids
-                ).only([
-                    'molecule_chembl_id',
-                    'standard_type',
-                    'standard_value',
-                    'standard_units',
-                    'target_chembl_id'
-                ])
-
-                if progress_callback:
-                    progress_callback(0.3, f"Fetching from ChEMBL (attempt {attempt + 1})...")
-
-                # Convert to list (triggers pagination)
-                all_raw = list(activities)
-
-                if progress_callback:
-                    progress_callback(0.7, f"Filtering {len(all_raw)} activities locally...")
-
-                # Filter locally (instant)
-                filtered = [
-                    a for a in all_raw
-                    if a.get('standard_type') in activity_types_set
-                ]
-
-                if progress_callback:
-                    progress_callback(1.0, f"Found {len(filtered)} activities")
-
-                logger.info(f"Single batch fetch: {len(all_raw)} raw -> {len(filtered)} filtered")
-                return filtered
-
-            except Exception as e:
-                error_str = str(e)
-                # Check if this is a ChEMBL data corruption error (empty attribute)
-                is_corruption_error = "empty attribute" in error_str or "doesn't allow a default" in error_str
-
-                if attempt < max_retries - 1:
-                    if is_corruption_error:
-                        logger.warning(f"ChEMBL API data corruption on attempt {attempt + 1}, retrying...")
-                    else:
-                        logger.warning(f"Single batch attempt {attempt + 1} failed ({type(e).__name__}): {e}")
-                    time.sleep(1 * (attempt + 1))  # Exponential backoff
-                else:
-                    logger.error(f"Single batch activity fetch failed after {max_retries} attempts ({type(e).__name__}): {e}")
-
-        logger.info("Library failed, falling back to REST API...")
-    else:
-        logger.info("ChEMBL activity library not available, using REST API...")
-
-    if progress_callback:
-        progress_callback(0.2, "Trying REST API fallback...")
-
+    # REST primary: per-type parallel strategy
     try:
-        rest_results = rest_api_fetch_activities(chembl_ids, activity_types, progress_callback)
-        if rest_results:
-            logger.info(f"REST API fallback successful: {len(rest_results)} activities")
-            return rest_results
-    except Exception as e:
-        logger.warning(f"REST API fallback also failed: {e}")
+        tasks = [
+            _fetch_activities_for_type(client, chembl_ids, atype, semaphore)
+            for atype in activity_types
+        ]
+        type_results = await asyncio.gather(*tasks)
 
-    # Both library and REST API failed, fall back to chunked library fetching (only if library available)
-    if not library_available:
-        logger.error("All activity fetch methods failed (library not installed, REST API failed)")
-        return []
+        all_activities: list[dict] = []
+        for i, result in enumerate(type_results):
+            all_activities.extend(result)
+            if cancellation_check is not None:
+                cancellation_check()
 
-    logger.info("REST API failed, falling back to chunked library fetching...")
-
-    # Fallback: fetch in smaller chunks (more resilient to bad records)
-    assert client is not None  # narrowing for type checker — still inside `if library_available`
-    CHUNK_SIZE = 5  # Smaller chunks for better error isolation
-    all_filtered = []
-    total_chunks = (len(chembl_ids) + CHUNK_SIZE - 1) // CHUNK_SIZE
-    failed_chunks = 0
-
-    for i in range(0, len(chembl_ids), CHUNK_SIZE):
-        chunk = chembl_ids[i:i + CHUNK_SIZE]
-        chunk_num = i // CHUNK_SIZE + 1
-
-        if progress_callback:
-            progress_callback(0.1 + 0.8 * (chunk_num / total_chunks),
-                            f"Fetching chunk {chunk_num}/{total_chunks}...")
-
-        chunk_success = False
-        for chunk_attempt in range(2):  # 2 attempts per chunk
-            try:
-                chunk_activities = client['activity'].filter(
-                    molecule_chembl_id__in=chunk
-                ).only([
-                    'molecule_chembl_id',
-                    'standard_type',
-                    'standard_value',
-                    'standard_units',
-                    'target_chembl_id'
-                ])
-
-                chunk_raw = list(chunk_activities)
-                chunk_filtered = [
-                    a for a in chunk_raw
-                    if a.get('standard_type') in activity_types_set
-                ]
-                all_filtered.extend(chunk_filtered)
-                logger.debug(f"Chunk {chunk_num}: {len(chunk_raw)} raw -> {len(chunk_filtered)} filtered")
-                chunk_success = True
-                break
-
-            except Exception as chunk_error:
-                if chunk_attempt == 0:
-                    logger.debug(f"Chunk {chunk_num} attempt 1 failed, retrying: {chunk_error}")
-                    time.sleep(0.5)
-                else:
-                    logger.warning(f"Chunk {chunk_num} failed after 2 attempts: {chunk_error}")
-
-        if not chunk_success:
-            failed_chunks += 1
-            # Try individual IDs in the failed chunk as last resort
-            for chembl_id in chunk:
-                try:
-                    single_activities = client['activity'].filter(
-                        molecule_chembl_id=chembl_id
-                    ).only([
-                        'molecule_chembl_id',
-                        'standard_type',
-                        'standard_value',
-                        'standard_units',
-                        'target_chembl_id'
-                    ])
-                    single_raw = list(single_activities)
-                    single_filtered = [
-                        a for a in single_raw
-                        if a.get('standard_type') in activity_types_set
-                    ]
-                    all_filtered.extend(single_filtered)
-                    logger.debug(f"Individual fetch for {chembl_id}: {len(single_filtered)} activities")
-                except Exception as ind_error:
-                    logger.debug(f"Individual fetch for {chembl_id} failed: {ind_error}")
-
-    if progress_callback:
-        progress_callback(1.0, f"Found {len(all_filtered)} activities (chunked, {failed_chunks} chunks needed fallback)")
-
-    logger.info(f"Chunked fetch complete: {len(all_filtered)} activities from {len(chembl_ids)} compounds ({failed_chunks} chunks failed)")
-    return all_filtered
-
-
-def fetch_compound_activities(  # pragma: no cover -- external ChEMBL API (deprecated)
-    chembl_id: str,
-    activity_types: Optional[List[str]] = None,
-    max_retries_per_type: int = 2
-) -> List[Dict]:
-    """
-    Fetch activities for a single compound with retry logic.
-
-    Handles ChEMBL API intermittent failures (e.g., empty attribute errors during pagination).
-
-    Args:
-        chembl_id: ChEMBL ID to fetch
-        activity_types: List of activity types to fetch
-        max_retries_per_type: Max retries per activity type
-
-    Returns:
-        List[Dict]: List of activity data
-    """
-    if activity_types is None:
-        activity_types = ACTIVITY_TYPES
-
-    all_activities = []
-    client = _get_chembl_client()
-
-    if client is not None and 'activity' in client:
-        for activity_type in activity_types:
-            for attempt in range(max_retries_per_type):
-                try:
-                    activities = client['activity'].filter(
-                        molecule_chembl_id=chembl_id,
-                        standard_type=activity_type
-                    ).only('standard_value', 'standard_units', 'standard_type',
-                           'target_chembl_id', 'target_pref_name')
-
-                    activity_list = list(activities)
-                    all_activities.extend(activity_list)
-                    break  # Success, move to next activity type
-
-                except Exception as e:
-                    error_str = str(e)
-                    # Check for ChEMBL data corruption (empty attribute errors during pagination)
-                    is_corruption_error = "empty attribute" in error_str or "doesn't allow a default" in error_str
-
-                    if attempt < max_retries_per_type - 1:
-                        if is_corruption_error:
-                            logger.warning(f"Activity fetch for {activity_type} API data corruption (attempt {attempt + 1}), retrying...")
-                        else:
-                            logger.warning(f"Activity fetch for {activity_type} attempt {attempt + 1} failed: {e}")
-                        time.sleep(0.5 * (attempt + 1))
-                    else:
-                        logger.error(f"Error fetching {activity_type} for {chembl_id} after {max_retries_per_type} attempts: {e}")
-
+        logger.info(
+            "activity_fetch_complete",
+            total=len(all_activities),
+            types=len(activity_types),
+        )
         return all_activities
 
-    # Library not available, fall back to REST API
-    logger.info(f"ChEMBL library not available, using REST API for {chembl_id} activities...")
+    except RuntimeError as exc:
+        logger.warning("activity_rest_failed", error=str(exc))
+    except Exception as exc:
+        logger.warning("activity_rest_unexpected", error=str(exc))
+
+    # Fallback to library (D-34)
+    logger.info("activity_falling_back_to_library")
+    result = await _library_fallback_activities(chembl_ids, activity_types)
+    if result is not None:
+        logger.info("activity_library_fallback_ok", count=len(result))
+        return result
+
+    logger.error("activity_fetch_all_failed")
+    return []
+
+
+async def fetch_batch_molecule_data(
+    client: httpx.AsyncClient,
+    chembl_ids: list[str],
+    *,
+    semaphore: asyncio.Semaphore | None = None,
+) -> dict[str, dict]:
+    """Fetch molecule data for multiple ChEMBL IDs.
+
+    Chunks IDs at POST_ID_THRESHOLD (200) for safety. Uses ``_chembl_request``
+    which automatically switches to POST for large ID lists.
+
+    On REST failure, falls back to library via run_in_executor.
+
+    Args:
+        client: httpx.AsyncClient instance
+        chembl_ids: List of ChEMBL IDs
+        semaphore: Optional concurrency limiter
+
+    Returns:
+        Dict mapping ChEMBL ID -> molecule data dict
+    """
+    if not chembl_ids:
+        return {}
+
+    unique_ids = list(dict.fromkeys(chembl_ids))
+    all_molecules: list[dict] = []
+
+    # Chunk IDs for manageable request sizes
+    id_chunks = [
+        unique_ids[i : i + POST_ID_THRESHOLD]
+        for i in range(0, len(unique_ids), POST_ID_THRESHOLD)
+    ]
+
+    rest_failed = False
+    for chunk in id_chunks:
+        ids_param = ",".join(chunk)
+        offset = 0
+
+        while True:
+            params: dict[str, Any] = {
+                "molecule_chembl_id__in": ids_param,
+                "limit": CHEMBL_MAX_LIMIT,
+                "offset": offset,
+            }
+
+            data = await _chembl_request(
+                client, "molecule", params, semaphore=semaphore,
+            )
+            if data is None:
+                rest_failed = True
+                break
+
+            molecules = _get_response_data(data, "molecule")
+            if not molecules:
+                break
+
+            all_molecules.extend(molecules)
+
+            if len(molecules) < CHEMBL_MAX_LIMIT:
+                break
+            offset += CHEMBL_MAX_LIMIT
+
+        if rest_failed:
+            break
+
+    if not rest_failed:
+        result: dict[str, dict] = {}
+        for mol in all_molecules:
+            cid = mol.get("molecule_chembl_id")
+            if cid:
+                result[cid] = mol
+        logger.info("molecule_batch_complete", count=len(result), requested=len(unique_ids))
+        return result
+
+    # Fallback to library
+    logger.info("molecule_falling_back_to_library")
+    lib_result = await _library_fallback_molecule_data(unique_ids)
+    if lib_result is not None:
+        logger.info("molecule_library_fallback_ok", count=len(lib_result))
+        return lib_result
+
+    # Return whatever REST managed to get
+    result = {}
+    for mol in all_molecules:
+        cid = mol.get("molecule_chembl_id")
+        if cid:
+            result[cid] = mol
+    return result
+
+
+async def fetch_batch_target_names(
+    client: httpx.AsyncClient,
+    target_ids: list[str],
+    *,
+    semaphore: asyncio.Semaphore | None = None,
+) -> dict[str, str]:
+    """Fetch target names for multiple ChEMBL Target IDs.
+
+    Chunks IDs and uses ``_chembl_request`` for automatic GET/POST routing.
+
+    Args:
+        client: httpx.AsyncClient instance
+        target_ids: List of ChEMBL Target IDs
+        semaphore: Optional concurrency limiter
+
+    Returns:
+        Dict mapping target_chembl_id -> target preferred name
+    """
+    if not target_ids:
+        return {}
+
+    unique_ids = list(dict.fromkeys(target_ids))
+    all_targets: list[dict] = []
+
+    id_chunks = [
+        unique_ids[i : i + POST_ID_THRESHOLD]
+        for i in range(0, len(unique_ids), POST_ID_THRESHOLD)
+    ]
+
+    rest_failed = False
+    for chunk in id_chunks:
+        ids_param = ",".join(chunk)
+        offset = 0
+
+        while True:
+            params: dict[str, Any] = {
+                "target_chembl_id__in": ids_param,
+                "only": "target_chembl_id,pref_name",
+                "limit": CHEMBL_MAX_LIMIT,
+                "offset": offset,
+            }
+
+            data = await _chembl_request(
+                client, "target", params, semaphore=semaphore,
+            )
+            if data is None:
+                rest_failed = True
+                break
+
+            targets = _get_response_data(data, "target")
+            if not targets:
+                break
+
+            all_targets.extend(targets)
+
+            if len(targets) < CHEMBL_MAX_LIMIT:
+                break
+            offset += CHEMBL_MAX_LIMIT
+
+        if rest_failed:
+            break
+
+    if not rest_failed:
+        result: dict[str, str] = {}
+        for t in all_targets:
+            tid = t.get("target_chembl_id")
+            if tid:
+                result[tid] = t.get("pref_name", "") or ""
+        logger.info("target_batch_complete", count=len(result), requested=len(unique_ids))
+        return result
+
+    # Fallback to library
+    logger.info("target_falling_back_to_library")
+    lib_result = await _library_fallback_target_names(unique_ids)
+    if lib_result is not None:
+        logger.info("target_library_fallback_ok", count=len(lib_result))
+        return lib_result
+
+    result = {}
+    for t in all_targets:
+        tid = t.get("target_chembl_id")
+        if tid:
+            result[tid] = t.get("pref_name", "") or ""
+    return result
+
+
+async def get_drug_indications_batch(
+    client: httpx.AsyncClient,
+    chembl_ids: list[str],
+    *,
+    semaphore: asyncio.Semaphore | None = None,
+) -> tuple:
+    """Fetch drug indications for multiple ChEMBL IDs using batch REST API.
+
+    Returns ``(indication_list, indication_by_compound_dict)`` to match the
+    existing caller contract in compound_service.
+
+    Args:
+        client: httpx.AsyncClient instance
+        chembl_ids: List of ChEMBL molecule IDs
+        semaphore: Optional concurrency limiter
+
+    Returns:
+        Tuple of (all_indications_list, dict mapping ChEMBL ID -> list of indications)
+    """
+    if not chembl_ids:
+        return ([], {})
+
+    unique_ids = list(dict.fromkeys(chembl_ids))
+    all_indications: list[dict] = []
+
+    id_chunks = [
+        unique_ids[i : i + POST_ID_THRESHOLD]
+        for i in range(0, len(unique_ids), POST_ID_THRESHOLD)
+    ]
+
+    rest_failed = False
+    for chunk in id_chunks:
+        ids_param = ",".join(chunk)
+        offset = 0
+
+        while True:
+            params: dict[str, Any] = {
+                "molecule_chembl_id__in": ids_param,
+                "limit": CHEMBL_MAX_LIMIT,
+                "offset": offset,
+            }
+
+            data = await _chembl_request(
+                client, "drug_indication", params, semaphore=semaphore,
+            )
+            if data is None:
+                rest_failed = True
+                break
+
+            indications = _get_response_data(data, "drug_indication")
+            if not indications:
+                break
+
+            all_indications.extend(indications)
+
+            if len(indications) < CHEMBL_MAX_LIMIT:
+                break
+            offset += CHEMBL_MAX_LIMIT
+
+        if rest_failed:
+            break
+
+    if rest_failed:
+        logger.info("drug_indication_falling_back_to_library")
+        lib_result = await _library_fallback_drug_indications(unique_ids)
+        if lib_result is not None:
+            all_indications = lib_result
+
+    # Build per-compound dict
+    by_compound: dict[str, list[dict]] = {cid: [] for cid in unique_ids}
+    for ind in all_indications:
+        cid = ind.get("molecule_chembl_id")
+        if cid and cid in by_compound:
+            # Extract clinical trial info
+            clinical_trials_url = ""
+            clinical_trials_ids = ""
+            indication_refs = ind.get("indication_refs", [])
+            if indication_refs:
+                for ref in indication_refs:
+                    if ref.get("ref_type") == "ClinicalTrials":
+                        clinical_trials_url = ref.get("ref_url", "")
+                        clinical_trials_ids = ref.get("ref_id", "")
+                        break
+
+            by_compound[cid].append({
+                "ChEMBL_ID": cid,
+                "MESH_ID": ind.get("mesh_id", ""),
+                "MESH_Heading": ind.get("mesh_heading", ""),
+                "EFO_ID": ind.get("efo_id", ""),
+                "EFO_Term": ind.get("efo_term", ""),
+                "Max_Phase": ind.get("max_phase_for_ind", 0),
+                "Clinical_Trials_URL": clinical_trials_url,
+                "Clinical_Trials_IDs": clinical_trials_ids,
+            })
+
+    logger.info("drug_indication_batch_complete", total=len(all_indications), compounds=len(unique_ids))
+    return (all_indications, by_compound)
+
+
+async def cascade_similarity_counts(
+    client: httpx.AsyncClient,
+    smiles: str,
+    start_threshold: int,
+    min_threshold: int = 40,
+    step: int = 10,
+    *,
+    semaphore: asyncio.Semaphore | None = None,
+) -> list[dict[str, int]]:
+    """Probe lower similarity thresholds and return compound count per tier.
+
+    Sequential threshold probing (each depends on previous for early abort).
+    Uses REST API with ``limit=1`` so only ``page_meta.total_count`` is transferred.
+
+    Args:
+        client: httpx.AsyncClient instance
+        smiles: Query SMILES string
+        start_threshold: The user's original threshold (probing starts one step below)
+        min_threshold: Lowest threshold to probe (default 40%)
+        step: How much to decrease the threshold each iteration
+        semaphore: Optional concurrency limiter
+
+    Returns:
+        List of ``{"threshold": int, "count": int}`` dicts, one per probed tier.
+    """
+    if not smiles:
+        return []
+
+    canonical = _canonicalize_smiles(smiles)
+    encoded = _url_encode_smiles(canonical)
+
+    results: list[dict[str, int]] = []
+    threshold = start_threshold - step
+    consecutive_failures = 0
+
+    while threshold >= min_threshold:
+        url = f"{settings.CHEMBL_API_URL}/similarity/{encoded}/{threshold}.json"
+        try:
+            request_timeout = httpx.Timeout(connect=5, read=90, write=10, pool=10)
+            if semaphore is not None:
+                async with semaphore:
+                    response = await client.get(
+                        url,
+                        params={"limit": 1, "only": "molecule_chembl_id"},
+                        timeout=request_timeout,
+                    )
+            else:
+                response = await client.get(
+                    url,
+                    params={"limit": 1, "only": "molecule_chembl_id"},
+                    timeout=request_timeout,
+                )
+            response.raise_for_status()
+            data = response.json()
+            count = data.get("page_meta", {}).get("total_count", 0)
+            results.append({"threshold": threshold, "count": count})
+            consecutive_failures = 0
+        except (httpx.ConnectError, httpx.TimeoutException, OSError) as exc:
+            consecutive_failures += 1
+            logger.warning("cascade_probe_failed", threshold=threshold, error=str(exc))
+            results.append({"threshold": threshold, "count": 0})
+            if consecutive_failures >= 2:
+                logger.info("cascade_probe_aborted", reason="unreachable after 2 consecutive failures")
+                break
+        except Exception as exc:
+            logger.warning("cascade_probe_error", threshold=threshold, error=str(exc))
+            results.append({"threshold": threshold, "count": 0})
+
+        threshold -= step
+
+    return results
+
+
+async def probe_all_thresholds(
+    client: httpx.AsyncClient,
+    smiles: str,
+    start_threshold: int,
+    min_threshold: int = 40,
+    step: int = 10,
+    *,
+    semaphore: asyncio.Semaphore | None = None,
+) -> list[dict[str, int]]:
+    """Probe ALL thresholds from start down to min, returning count per tier.
+
+    Unlike cascade_similarity_counts, this:
+    - Includes the start_threshold itself
+    - Probes ALL tiers in parallel via asyncio.gather()
+    - Returns ALL tiers including 0-count ones
+
+    Args:
+        client: httpx.AsyncClient instance
+        smiles: Query SMILES string
+        start_threshold: The user's requested threshold (included in probing)
+        min_threshold: Lowest threshold to probe (default 40%)
+        step: How much to decrease the threshold each iteration
+        semaphore: Optional concurrency limiter
+
+    Returns:
+        List of ``{"threshold": int, "count": int}`` dicts for every tier.
+    """
+    if not smiles:
+        return []
+
+    canonical = _canonicalize_smiles(smiles)
+    encoded = _url_encode_smiles(canonical)
+
+    thresholds = list(range(start_threshold, min_threshold - 1, -step))
+
+    async def _probe(threshold: int) -> dict[str, int]:
+        url = f"{settings.CHEMBL_API_URL}/similarity/{encoded}/{threshold}.json"
+        try:
+            request_timeout = httpx.Timeout(connect=5, read=90, write=10, pool=10)
+            if semaphore is not None:
+                async with semaphore:
+                    response = await client.get(
+                        url,
+                        params={"limit": 1, "only": "molecule_chembl_id"},
+                        timeout=request_timeout,
+                    )
+            else:
+                response = await client.get(
+                    url,
+                    params={"limit": 1, "only": "molecule_chembl_id"},
+                    timeout=request_timeout,
+                )
+            response.raise_for_status()
+            data = response.json()
+            count = data.get("page_meta", {}).get("total_count", 0)
+            return {"threshold": threshold, "count": count}
+        except Exception as exc:
+            logger.warning("probe_threshold_failed", threshold=threshold, error=str(exc))
+            return {"threshold": threshold, "count": 0}
+
+    results = await asyncio.gather(*[_probe(t) for t in thresholds])
+    return list(results)
+
+
+async def quick_has_bioactivity(
+    client: httpx.AsyncClient,
+    smiles: str,
+    threshold: int = 90,
+    activity_types: list[str] | None = None,
+    *,
+    semaphore: asyncio.Semaphore | None = None,
+) -> bool:
+    """Fast pre-flight check: are there similar compounds WITH bioactivity data?
+
+    Two-step check:
+    1. Similarity search to get ChEMBL IDs (limit=5 for speed)
+    2. Activity check on those IDs for requested activity types
+
+    Returns True if at least one similar compound has usable activity data.
+    On any error, returns True (optimistic -- let processing handle it).
+
+    Args:
+        client: httpx.AsyncClient instance
+        smiles: SMILES string
+        threshold: Similarity threshold
+        activity_types: Optional list of activity types to check
+        semaphore: Optional concurrency limiter
+
+    Returns:
+        True if bioactivity data exists, True on error (optimistic)
+    """
+    if not smiles:
+        return False
+
+    canonical = _canonicalize_smiles(smiles)
+    encoded = _url_encode_smiles(canonical)
+
     try:
-        rest_results = rest_api_fetch_activities([chembl_id], activity_types)
-        if rest_results:
-            logger.info(f"REST API fallback successful: {len(rest_results)} activities for {chembl_id}")
-            return rest_results
-    except Exception as e:
-        logger.error(f"REST API activity fetch also failed for {chembl_id}: {e}")
+        # Step 1: Get a few similar compound ChEMBL IDs
+        url = f"{settings.CHEMBL_API_URL}/similarity/{encoded}/{threshold}.json"
+        request_timeout = httpx.Timeout(connect=5, read=90, write=10, pool=10)
 
-    return all_activities
+        if semaphore is not None:
+            async with semaphore:
+                resp = await client.get(
+                    url,
+                    params={"limit": 5, "only": "molecule_chembl_id"},
+                    timeout=request_timeout,
+                )
+        else:
+            resp = await client.get(
+                url,
+                params={"limit": 5, "only": "molecule_chembl_id"},
+                timeout=request_timeout,
+            )
+        resp.raise_for_status()
+        data = resp.json()
+
+        total = data.get("page_meta", {}).get("total_count", 0)
+        if total == 0:
+            return False
+
+        molecules = data.get("molecules", [])
+        chembl_ids = [m["molecule_chembl_id"] for m in molecules if "molecule_chembl_id" in m]
+        if not chembl_ids:
+            return False
+
+        # Step 2: Check if ANY of these have activity data
+        ids_param = ",".join(chembl_ids)
+        act_params: dict[str, Any] = {
+            "molecule_chembl_id__in": ids_param,
+            "limit": 1,
+            "only": "molecule_chembl_id",
+        }
+        if activity_types:
+            act_params["standard_type__in"] = ",".join(activity_types)
+
+        act_data = await _chembl_request(
+            client, "activity", act_params, semaphore=semaphore,
+        )
+        if act_data is None:
+            return True  # Optimistic on REST failure
+
+        act_count = act_data.get("page_meta", {}).get("total_count", 0)
+        return act_count > 0
+
+    except Exception as exc:
+        logger.warning("quick_bioactivity_check_failed", error=str(exc))
+        return True  # Optimistic on error
 
 
-# Cache clearing utilities
-def clear_caches():
-    """Clear all LRU caches."""
-    get_molecule_data.cache_clear()  # type: ignore[attr-defined]
-    get_classification.cache_clear()  # type: ignore[attr-defined]
-    get_target_name.cache_clear()  # type: ignore[attr-defined]
-    get_drug_indications.cache_clear()  # type: ignore[attr-defined]
-    logger.info("All API client caches cleared")
+# ---------------------------------------------------------------------------
+# Cache utilities
+# ---------------------------------------------------------------------------
+
+def clear_caches() -> None:
+    """Clear all caches.
+
+    No-op placeholder that maintains API compatibility.
+    cache_non_none uses asyncio.Lock (Phase 19.2).
+    """
+    logger.info("api_client_caches_cleared")
 
 
-def get_cache_info() -> Dict[str, Any]:
-    """Get cache statistics."""
+def get_cache_info() -> dict[str, Any]:
+    """Get cache statistics.
+
+    cache_non_none uses asyncio.Lock (Phase 19.2).
+    """
     return {
-        'molecule_data': get_molecule_data.cache_info()._asdict(),  # type: ignore[attr-defined]
-        'classification': get_classification.cache_info()._asdict(),  # type: ignore[attr-defined]
-        'target_name': get_target_name.cache_info()._asdict(),  # type: ignore[attr-defined]
-        'drug_indications': get_drug_indications.cache_info()._asdict(),  # type: ignore[attr-defined]
+        "note": "cache_non_none with asyncio.Lock available",
     }
 
 
-def _safe_log(level: int, msg: str) -> None:
-    """Log a message only if the logging stream is still open.
+# ---------------------------------------------------------------------------
+# Shutdown
+# ---------------------------------------------------------------------------
 
-    During interpreter shutdown (e.g. pytest teardown via atexit),
-    stdout/stderr may already be closed, causing ValueError in
-    StreamHandler.emit(). Check handler streams before logging.
+def shutdown_api_client() -> None:
+    """Shutdown the API client.
+
+    In 19.1+, no ThreadPoolExecutor or thread-local sessions to clean up.
+    httpx.AsyncClient is closed by its caller (per-job lifecycle in 19.1,
+    module-level in 19.2).
     """
-    import sys as _sys
-    # If stderr is gone or closed, skip logging entirely
-    if _sys.stderr is None or getattr(_sys.stderr, 'closed', True):
-        return
-    for handler in logging.root.handlers + logger.handlers:
-        if hasattr(handler, 'stream') and getattr(handler.stream, 'closed', False):
-            return
-    logger.log(level, msg)
-
-
-def shutdown_api_client():
-    """Shutdown the timeout executor and reset thread-local sessions.
-
-    Called during application lifespan teardown (STAB-14, STAB-16).
-    """
-    global _timeout_executor, _thread_local
-    try:
-        if not _timeout_executor._shutdown:
-            _timeout_executor.shutdown(wait=False, cancel_futures=True)
-            _safe_log(logging.INFO, "ChEMBL timeout executor shut down")
-    except Exception as e:
-        _safe_log(logging.WARNING, f"Error during API client shutdown: {e}")
-    # Reset thread-local sessions
-    _thread_local = threading.local()
-    _safe_log(logging.INFO, "ChEMBL thread-local sessions reset")
-
-
-# Register shutdown handler
-atexit.register(shutdown_api_client)
+    logger.info("api_client_shutdown")

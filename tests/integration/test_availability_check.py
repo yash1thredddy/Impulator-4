@@ -115,7 +115,7 @@ class TestCheckAvailabilitySingle:
     @patch('backend.modules.api_client.probe_all_thresholds', side_effect=_mock_probe_data_available)
     def test_existing_compound_included_in_response(self, mock_probe, test_engine, client):
         """Existing compounds with same structure key should be in existing_compounds."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
         from backend.services.job_service import generate_inchikey, _inchikey_structure_key
 
         smiles = "CC(=O)OC1=CC=CC=C1C(=O)O"
@@ -130,7 +130,7 @@ class TestCheckAvailabilitySingle:
             inchikey=inchikey,
             inchikey_structure_key=_inchikey_structure_key(inchikey),
             similarity_threshold=90,
-            activity_types="IC50",
+            activity_types=["IC50"],
             processed_at=datetime.now(timezone.utc),
         ))
         session.commit()
@@ -280,7 +280,7 @@ class TestCheckAvailabilityBatch:
     @patch('backend.modules.api_client.probe_all_thresholds', side_effect=_mock_probe_data_available)
     def test_batch_existing_compounds_matched(self, mock_probe, test_engine, client):
         """Batch should find existing compounds by InChIKey for each input."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
         from backend.services.job_service import generate_inchikey, _inchikey_structure_key
 
         smiles = "CCO"
@@ -295,7 +295,7 @@ class TestCheckAvailabilityBatch:
             inchikey=inchikey,
             inchikey_structure_key=_inchikey_structure_key(inchikey),
             similarity_threshold=90,
-            activity_types="IC50",
+            activity_types=["IC50"],
             processed_at=datetime.now(timezone.utc),
         ))
         session.commit()

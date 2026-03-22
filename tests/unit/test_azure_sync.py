@@ -20,22 +20,6 @@ class TestAzureSync:
         expected = bool(settings.AZURE_CONNECTION_STRING)
         assert result == expected
 
-    def test_download_db_graceful(self):
-        """Test download_db_from_azure works gracefully."""
-        from backend.core.azure_sync import download_db_from_azure
-
-        # Should not raise, returns True
-        result = download_db_from_azure()
-        assert result is True
-
-    def test_sync_db_graceful(self):
-        """Test sync_db_to_azure works gracefully."""
-        from backend.core.azure_sync import sync_db_to_azure
-
-        # Should not raise, returns True or False depending on db existence
-        result = sync_db_to_azure()
-        assert isinstance(result, bool)
-
     def test_upload_result_graceful(self):
         """Test upload_result_to_azure_by_entry_id works gracefully."""
         from backend.core.azure_sync import upload_result_to_azure_by_entry_id
@@ -83,110 +67,6 @@ class TestAzureConnection:
         assert isinstance(results, list)
 
 
-class TestAzureSyncWithMockedClient:
-    """Tests with mocked Azure Blob client."""
-
-    def test_download_db_blob_exists(self):
-        """Test download when blob exists."""
-        mock_blob_client = MagicMock()
-        mock_blob_client.exists.return_value = True
-        mock_blob_client.download_blob.return_value.readall.return_value = b"test data"
-
-        with patch('backend.core.azure_sync.is_azure_configured', return_value=True), \
-             patch('backend.core.azure_sync._get_blob_client', return_value=mock_blob_client), \
-             patch('builtins.open', MagicMock()):
-            from backend.core.azure_sync import download_db_from_azure
-            result = download_db_from_azure()
-            assert result is True
-
-    def test_download_db_blob_not_exists(self):
-        """Test download when blob doesn't exist."""
-        mock_blob_client = MagicMock()
-        mock_blob_client.exists.return_value = False
-
-        with patch('backend.core.azure_sync.is_azure_configured', return_value=True), \
-             patch('backend.core.azure_sync._get_blob_client', return_value=mock_blob_client):
-            from backend.core.azure_sync import download_db_from_azure
-            result = download_db_from_azure()
-            assert result is True  # Still successful, just nothing to download
-
-
-class TestSyncDbToAzure:
-    """Tests for sync_db_to_azure with mocked Azure."""
-
-    def test_sync_not_configured(self):
-        """Test sync returns True when Azure not configured."""
-        with patch('backend.core.azure_sync.is_azure_configured', return_value=False):
-            from backend.core.azure_sync import sync_db_to_azure
-            assert sync_db_to_azure() is True
-
-    def test_sync_blob_client_none(self):
-        """Test sync returns False when blob client is None."""
-        with patch('backend.core.azure_sync.is_azure_configured', return_value=True), \
-             patch('backend.core.azure_sync._get_blob_client', return_value=None):
-            from backend.core.azure_sync import sync_db_to_azure
-            assert sync_db_to_azure() is False
-
-    def test_sync_db_not_found(self, tmp_path):
-        """Test sync returns False when DB file doesn't exist."""
-        mock_blob = MagicMock()
-        with patch('backend.core.azure_sync.is_azure_configured', return_value=True), \
-             patch('backend.core.azure_sync._get_blob_client', return_value=mock_blob), \
-             patch('backend.core.azure_sync.settings') as mock_settings:
-            mock_settings.DATA_DIR = tmp_path / "nonexistent"
-            from backend.core.azure_sync import sync_db_to_azure
-            assert sync_db_to_azure() is False
-
-    def test_sync_success(self, tmp_path):
-        """Test successful sync with mocked backup and upload."""
-        # Create a fake DB file
-        db_path = tmp_path / "impulator.db"
-        db_path.write_text("fake db content")
-        # Also create the temp sync file that the code will try to open
-        sync_path = tmp_path / "impulator.db.sync"
-
-        mock_blob = MagicMock()
-
-        def fake_connect(path, **kwargs):
-            """Fake sqlite3.connect that creates the sync file for backup."""
-            # The second connect creates the temp file
-            if str(path) == str(sync_path):
-                sync_path.write_text("backup content")
-            return MagicMock()
-
-        with patch('backend.core.azure_sync.is_azure_configured', return_value=True), \
-             patch('backend.core.azure_sync._get_blob_client', return_value=mock_blob), \
-             patch('backend.core.azure_sync.settings') as mock_settings, \
-             patch('sqlite3.connect', side_effect=fake_connect):
-            mock_settings.DATA_DIR = tmp_path
-
-            from backend.core.azure_sync import sync_db_to_azure
-            result = sync_db_to_azure()
-            assert result is True
-            mock_blob.upload_blob.assert_called_once()
-
-    def test_sync_exception_cleans_temp(self, tmp_path):
-        """Test sync cleans up temp file on exception."""
-        db_path = tmp_path / "impulator.db"
-        db_path.write_text("fake db")
-        sync_path = tmp_path / "impulator.db.sync"
-        sync_path.write_text("temp")
-
-        mock_blob = MagicMock()
-        mock_blob.upload_blob.side_effect = Exception("upload failed")
-
-        with patch('backend.core.azure_sync.is_azure_configured', return_value=True), \
-             patch('backend.core.azure_sync._get_blob_client', return_value=mock_blob), \
-             patch('backend.core.azure_sync.settings') as mock_settings, \
-             patch('sqlite3.connect') as mock_connect:
-            mock_settings.DATA_DIR = tmp_path
-            mock_src = MagicMock()
-            mock_dst = MagicMock()
-            mock_connect.side_effect = [mock_src, mock_dst]
-
-            from backend.core.azure_sync import sync_db_to_azure
-            result = sync_db_to_azure()
-            assert result is False
 
 
 class TestUploadResultToAzure:
@@ -406,32 +286,48 @@ class TestPendingMarkers:
 
 
 class TestReconcileOrphanedUploads:
-    """Tests for reconcile_orphaned_uploads."""
+    """Tests for reconcile_orphaned_uploads (time-based cleanup)."""
 
     def test_not_configured_returns_zero(self):
         """Test returns 0 when Azure not configured."""
         with patch('backend.core.azure_sync.is_azure_configured', return_value=False):
             from backend.core.azure_sync import reconcile_orphaned_uploads
-            assert reconcile_orphaned_uploads(set()) == 0
+            assert reconcile_orphaned_uploads() == 0
 
-    def test_no_pending_returns_zero(self):
-        """Test returns 0 when no pending markers exist."""
+    def test_no_container_returns_zero(self):
+        """Test returns 0 when container client is None."""
         with patch('backend.core.azure_sync.is_azure_configured', return_value=True), \
-             patch('backend.core.azure_sync.list_pending_markers', return_value=[]):
+             patch('backend.core.azure_sync._get_container_client', return_value=None):
             from backend.core.azure_sync import reconcile_orphaned_uploads
-            assert reconcile_orphaned_uploads(set()) == 0
+            assert reconcile_orphaned_uploads() == 0
 
-    def test_cleans_orphans(self):
-        """Test cleans up orphaned markers not in DB."""
+    def test_cleans_old_markers_skips_recent(self):
+        """Test cleans up old pending markers and skips recent ones."""
+        from datetime import datetime, timedelta, timezone
+
+        old_blob = MagicMock()
+        old_blob.name = "results/ab/.pending-orphan-old-id"
+        old_blob.last_modified = datetime.now(timezone.utc) - timedelta(hours=48)
+
+        recent_blob = MagicMock()
+        recent_blob.name = "results/cd/.pending-recent-id"
+        recent_blob.last_modified = datetime.now(timezone.utc) - timedelta(hours=1)
+
+        non_pending_blob = MagicMock()
+        non_pending_blob.name = "results/ab/some-file.zip"
+
+        container_mock = MagicMock()
+        container_mock.list_blobs.return_value = [old_blob, recent_blob, non_pending_blob]
+
         with patch('backend.core.azure_sync.is_azure_configured', return_value=True), \
-             patch('backend.core.azure_sync.list_pending_markers', return_value=["orphan-id", "valid-id"]), \
+             patch('backend.core.azure_sync._get_container_client', return_value=container_mock), \
              patch('backend.core.azure_sync.delete_pending_marker') as mock_del_marker, \
              patch('backend.core.azure_sync.delete_result_from_azure_by_entry_id') as mock_del_result:
             from backend.core.azure_sync import reconcile_orphaned_uploads
-            result = reconcile_orphaned_uploads({"valid-id"})
-            assert result == 1  # Only orphan-id cleaned
-            mock_del_marker.assert_called_once_with("orphan-id")
-            mock_del_result.assert_called_once_with("orphan-id")
+            result = reconcile_orphaned_uploads()
+            assert result == 1  # Only old marker cleaned
+            mock_del_marker.assert_called_once_with("orphan-old-id")
+            mock_del_result.assert_called_once_with("orphan-old-id")
 
 
 class TestCloseAzureClient:
@@ -709,14 +605,34 @@ class TestGetContainerClient:
 class TestReconcileOrphanedUploadsEdgeCases:
     """Additional tests for reconcile_orphaned_uploads."""
 
+    def test_empty_blob_list_returns_zero(self):
+        """Test returns 0 when no blobs found."""
+        container_mock = MagicMock()
+        container_mock.list_blobs.return_value = []
+
+        with patch('backend.core.azure_sync.is_azure_configured', return_value=True), \
+             patch('backend.core.azure_sync._get_container_client', return_value=container_mock):
+            from backend.core.azure_sync import reconcile_orphaned_uploads
+            result = reconcile_orphaned_uploads()
+            assert result == 0
+
     def test_orphan_zip_delete_exception(self):
         """Test handles exception when deleting orphaned ZIP."""
+        from datetime import datetime, timedelta, timezone
+
+        old_blob = MagicMock()
+        old_blob.name = "results/ab/.pending-orphan-id"
+        old_blob.last_modified = datetime.now(timezone.utc) - timedelta(hours=48)
+
+        container_mock = MagicMock()
+        container_mock.list_blobs.return_value = [old_blob]
+
         with patch('backend.core.azure_sync.is_azure_configured', return_value=True), \
-             patch('backend.core.azure_sync.list_pending_markers', return_value=["orphan-id"]), \
+             patch('backend.core.azure_sync._get_container_client', return_value=container_mock), \
              patch('backend.core.azure_sync.delete_pending_marker') as mock_del_marker, \
              patch('backend.core.azure_sync.delete_result_from_azure_by_entry_id',
                     side_effect=Exception("delete failed")):
             from backend.core.azure_sync import reconcile_orphaned_uploads
-            result = reconcile_orphaned_uploads(set())
+            result = reconcile_orphaned_uploads()
             assert result == 1  # Still counts as cleaned
             mock_del_marker.assert_called_once_with("orphan-id")

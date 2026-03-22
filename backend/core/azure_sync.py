@@ -1,17 +1,15 @@
 """
-Azure Blob Storage sync utilities.
-Handles database backup/restore and result uploads.
-Azure Blob serves as the single source of truth for data persistence.
+Azure Blob Storage utilities.
+Handles result ZIP storage and log archival in Azure Blob storage.
 """
 import gzip
 import os
 import re
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import List, Optional
 
 import structlog
 from tenacity import (
@@ -201,7 +199,10 @@ def _get_blob_service():
                     logger.warning("azure-storage-blob not installed, Azure sync disabled")
                     return None
                 except Exception as e:
-                    logger.error(f"Failed to initialize Azure client: {e}")
+                    logger.warning(
+                        "Azure Blob client init failed, uploads will be skipped "
+                        "-- check AZURE_CONNECTION_STRING: %s", e
+                    )
                     return None
 
     return _blob_service_client
@@ -210,14 +211,15 @@ def _get_blob_service():
 def close_azure_client():
     """Close the global Azure Blob client. Call on application shutdown."""
     global _blob_service_client
-    if _blob_service_client is not None:
-        try:
-            _blob_service_client.close()
-            logger.info("Azure Blob client closed")
-        except Exception as e:
-            logger.warning(f"Error closing Azure client: {e}")
-        finally:
-            _blob_service_client = None
+    with _blob_service_lock:
+        if _blob_service_client is not None:
+            try:
+                _blob_service_client.close()
+                logger.info("Azure Blob client closed")
+            except Exception as e:
+                logger.warning(f"Error closing Azure client: {e}")
+            finally:
+                _blob_service_client = None
 
 
 def _get_container_client():
@@ -252,97 +254,6 @@ def is_azure_configured() -> bool:
     return bool(settings.AZURE_CONNECTION_STRING)
 
 
-def download_db_from_azure() -> bool:
-    """
-    Download SQLite database from Azure on container startup.
-    This restores state from the single source of truth.
-
-    Returns:
-        True if download successful or Azure not configured
-    """
-    if not is_azure_configured():
-        logger.info("Azure not configured, using local database")
-        return True
-
-    blob = _get_blob_client("impulator.db")
-    if blob is None:
-        return False
-
-    db_path = Path(settings.DATA_DIR) / "impulator.db"
-
-    try:
-        # Ensure data directory exists
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-
-        if blob.exists():
-            with open(db_path, "wb") as f:
-                download_stream = blob.download_blob()
-                f.write(download_stream.readall())
-            logger.info(f"Downloaded SQLite from Azure ({db_path})")
-            return True
-        else:
-            logger.info("No existing database in Azure, starting fresh")
-            return True
-
-    except Exception as e:
-        logger.error(f"Failed to download database from Azure: {e}")
-        return False
-
-
-def sync_db_to_azure() -> bool:
-    """
-    Upload SQLite database to Azure immediately.
-    Called after every job completion to ensure no data loss.
-
-    Returns:
-        True if sync successful or Azure not configured
-    """
-    if not is_azure_configured():
-        return True
-
-    blob = _get_blob_client("impulator.db")
-    if blob is None:
-        return False
-
-    db_path = Path(settings.DATA_DIR) / "impulator.db"
-    temp_path = Path(settings.DATA_DIR) / "impulator.db.sync"
-
-    try:
-        if not db_path.exists():
-            logger.warning("Database file not found, skipping sync")
-            return False
-
-        # Use SQLite backup API for a consistent snapshot (safe even during writes)
-        import sqlite3
-        src = sqlite3.connect(str(db_path))
-        dst = sqlite3.connect(str(temp_path))
-        try:
-            src.backup(dst)
-        finally:
-            dst.close()
-            src.close()
-
-        with open(temp_path, "rb") as f:
-            blob.upload_blob(f, overwrite=True)
-
-        # Cleanup temp file
-        temp_path.unlink(missing_ok=True)
-
-        logger.info("Synced SQLite to Azure")
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to sync database to Azure: {e}")
-        # Cleanup temp file on error
-        if temp_path.exists():
-            temp_path.unlink(missing_ok=True)
-        return False
-
-
-# Legacy upload/download functions removed - use upload_result_to_azure_by_entry_id
-# and download_result_from_azure_by_entry_id instead
-
-
 def _is_uuid_path(blob_name: str) -> bool:
     """
     Check if a blob name is a UUID-based path.
@@ -361,7 +272,7 @@ def _is_uuid_path(blob_name: str) -> bool:
     return bool(uuid_pattern.match(blob_name))
 
 
-def _extract_entry_id_from_blob(blob_name: str) -> Optional[str]:
+def _extract_entry_id_from_blob(blob_name: str) -> str | None:
     """
     Extract entry_id (UUID) from a UUID-based blob path.
 
@@ -408,11 +319,6 @@ def list_results_in_azure() -> list:
     except Exception as e:
         logger.error(f"Failed to list results from Azure: {e}")
         return []
-
-
-# Legacy delete_result_from_azure and sync_compound_table_from_azure removed
-# - Use delete_result_from_azure_by_entry_id instead
-# - Database is the source of truth, no legacy sync needed
 
 
 def sync_logs_to_azure() -> bool:  # pragma: no cover -- shutdown log upload
@@ -708,7 +614,7 @@ def check_result_exists_in_azure_by_entry_id(entry_id: str) -> bool:
 
 
 # ============================================================================
-# AZURE UPLOAD RETRY + TWO-PHASE COMMIT MARKERS (Phase 2: Stability)
+# AZURE UPLOAD RETRY + TWO-PHASE COMMIT MARKERS
 # ============================================================================
 
 _upload_log = structlog.get_logger("azure_sync")
@@ -724,14 +630,15 @@ def _on_upload_retry(retry_state):
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=10),
-    retry=retry_if_exception_type(Exception),
+    retry=retry_if_exception_type((OSError, ConnectionError, RuntimeError)),
     reraise=True,
     before_sleep=_on_upload_retry,
 )
 def _upload_with_retry(local_path: str, entry_id: str) -> bool:
     """Upload result ZIP to Azure with tenacity retry (3 attempts, exponential backoff).
 
-    Wraps upload_result_to_azure_by_entry_id with automatic retry on any exception.
+    Retries only transient errors (OSError, ConnectionError, RuntimeError).
+    Non-retriable errors (ValueError, FileNotFoundError) fail immediately.
     On permanent failure (after 3 attempts), the exception is reraised.
 
     Args:
@@ -768,7 +675,7 @@ def write_pending_marker(entry_id: str) -> bool:
     if not is_azure_configured() or not entry_id:
         return False
 
-    entry_id = entry_id.lower()
+    entry_id = str(entry_id).lower()
     prefix = entry_id[:2]
     blob_name = f"results/{prefix}/.pending-{entry_id}"
 
@@ -796,7 +703,7 @@ def delete_pending_marker(entry_id: str) -> bool:
     if not is_azure_configured() or not entry_id:
         return False
 
-    entry_id = entry_id.lower()
+    entry_id = str(entry_id).lower()
     prefix = entry_id[:2]
     blob_name = f"results/{prefix}/.pending-{entry_id}"
 
@@ -813,7 +720,7 @@ def delete_pending_marker(entry_id: str) -> bool:
         return False
 
 
-def list_pending_markers() -> List[str]:
+def list_pending_markers() -> list[str]:
     """List all .pending marker blobs and extract entry_ids.
 
     Returns:
@@ -843,16 +750,15 @@ def list_pending_markers() -> List[str]:
         return []
 
 
-def reconcile_orphaned_uploads(db_entry_ids: set) -> int:
-    """Clean up orphaned .pending markers and their corresponding ZIPs.
+def reconcile_orphaned_uploads(max_age_hours: int = 24) -> int:
+    """Clean up orphaned .pending markers older than max_age_hours.
 
-    An orphan is a .pending marker whose entry_id does not appear in the
-    database. This can happen when a job was deleted while an upload was
-    in progress, or when a container crashed mid-upload and the DB was
-    later restored without that record.
+    A .pending marker older than max_age_hours indicates a failed or
+    abandoned upload. The marker and its corresponding ZIP (if any)
+    are deleted.
 
     Args:
-        db_entry_ids: Set of all entry_ids present in the database.
+        max_age_hours: Delete markers older than this (default 24).
 
     Returns:
         Number of orphaned markers cleaned up.
@@ -860,21 +766,33 @@ def reconcile_orphaned_uploads(db_entry_ids: set) -> int:
     if not is_azure_configured():
         return 0
 
-    pending = list_pending_markers()
-    if not pending:
+    container = _get_container_client()
+    if container is None:
         return 0
 
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
     cleaned = 0
-    for entry_id in pending:
-        if entry_id not in db_entry_ids:
-            _upload_log.info("orphan_cleanup", entry_id=entry_id)
-            # Delete the pending marker
-            delete_pending_marker(entry_id)
-            # Delete the corresponding ZIP if it exists
-            try:
-                delete_result_from_azure_by_entry_id(entry_id)
-            except Exception as e:
-                _upload_log.warning("orphan_zip_delete_failed", entry_id=entry_id, error=str(e))
-            cleaned += 1
+
+    try:
+        blobs = container.list_blobs(name_starts_with="results/")
+        for blob in blobs:
+            if "/.pending-" not in blob.name:
+                continue
+            # blob.last_modified is timezone-aware UTC datetime from Azure SDK
+            if blob.last_modified < cutoff:
+                parts = blob.name.rsplit("/.pending-", 1)
+                if len(parts) != 2:
+                    continue
+                entry_id = parts[1]
+                age_hours = (datetime.now(timezone.utc) - blob.last_modified).total_seconds() / 3600
+                _upload_log.info("orphan_cleanup", entry_id=entry_id, age_hours=round(age_hours, 1))
+                delete_pending_marker(entry_id)
+                try:
+                    delete_result_from_azure_by_entry_id(entry_id)
+                except Exception as e:
+                    _upload_log.warning("orphan_zip_delete_failed", entry_id=entry_id, error=str(e))
+                cleaned += 1
+    except Exception as e:
+        _upload_log.error("reconcile_orphaned_uploads_failed", error=str(e))
 
     return cleaned

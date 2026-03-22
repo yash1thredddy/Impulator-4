@@ -1,7 +1,16 @@
-"""Models package -- ORM models and Pydantic schemas."""
+"""Models package -- Postgres ORM models (v2.2+) and Pydantic schemas."""
 
-from .database import Job, Compound, DeletedCompound, JobStatus, JobType
-from .schemas import (
+from backend.models._pg_base import PGBase
+
+# ORM models
+from backend.models.enums import JobStatus, JobType, AuditEventType
+from backend.models.job import Job
+from backend.models.compound import Compound
+from backend.models.deleted_compound import DeletedCompound
+from backend.models.audit import AuditEvent
+
+# Pydantic schemas
+from backend.models.schemas import (
     # Enums
     DuplicateAction,
     # Job schemas
@@ -9,7 +18,6 @@ from .schemas import (
     JobProgress, ActiveJobResponse, JobListResponse,
     BatchSummary, BatchResponse,
     # Compound schemas
-    CompoundBase, CompoundCreate, CompoundResponse, CompoundList,
     CompoundListItem, CompoundListResponse, CompoundDetailResponse,
     CompoundDeleteResponse, BatchDeleteResponse,
     CompoundVersionItem, CompoundVersionsResponse,
@@ -29,22 +37,21 @@ from .schemas import (
     DeleteResponse, CancelResponse,
     FailedCompound,
     # Health schemas
-    HealthResponse, ExecutorStats,
-    # Typed JSON blobs
-    InputParams, ResultSummary,
+    HealthResponse,
 )
 
 __all__ = [
+    # Base
+    "PGBase",
     # ORM models
-    "Job", "Compound", "DeletedCompound", "JobStatus", "JobType",
+    "Job", "Compound", "DeletedCompound", "AuditEvent",
     # Enums
-    "DuplicateAction",
+    "JobStatus", "JobType", "AuditEventType", "DuplicateAction",
     # Job schemas
     "JobCreate", "BatchJobCreate", "JobResponse", "JobDetailResponse",
     "JobProgress", "ActiveJobResponse", "JobListResponse",
     "BatchSummary", "BatchResponse",
     # Compound schemas
-    "CompoundBase", "CompoundCreate", "CompoundResponse", "CompoundList",
     "CompoundListItem", "CompoundListResponse", "CompoundDetailResponse",
     "CompoundDeleteResponse", "BatchDeleteResponse",
     "CompoundVersionItem", "CompoundVersionsResponse",
@@ -64,7 +71,5 @@ __all__ = [
     "DeleteResponse", "CancelResponse",
     "FailedCompound",
     # Health schemas
-    "HealthResponse", "ExecutorStats",
-    # Typed JSON blobs
-    "InputParams", "ResultSummary",
+    "HealthResponse",
 ]

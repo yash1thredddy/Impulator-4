@@ -5,22 +5,31 @@ when no data is found at the user's requested threshold.
 Allows user to pick an alternative threshold or view existing compounds.
 
 This dialog replaces both the availability check AND the duplicate dialog
-when a compound has no ChEMBL data at the requested threshold — existing
+when a compound has no ChEMBL data at the requested threshold -- existing
 compound details are shown inline with full config comparison.
+
+Uses @st.dialog decorator for native modal behavior. Results are communicated
+via session_state (not return values) because @st.dialog functions cannot
+return values to the caller.
 """
 
 import html
 import logging
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Optional
 
 import streamlit as st
 
 logger = logging.getLogger(__name__)
 
+# Session state key for dialog result communication
+AVAILABILITY_RESULT_KEY = "availability_result"
+
+# WARNING: Targets Streamlit internal selectors -- may break on Streamlit upgrade
 # CSS to increase radio button label font size for readability
 _RADIO_CSS = """
 <style>
+    /* WARNING: Targets Streamlit internal selectors -- may break on Streamlit upgrade */
     div[data-testid="stRadio"] label {
         font-size: 1.1rem !important;
         padding: 0.4rem 0 !important;
@@ -46,7 +55,7 @@ def _recompute_config_match(
 
     threshold_same = ec_threshold == selected_threshold
 
-    # Backend default activity types — treat empty/missing as this set
+    # Backend default activity types -- treat empty/missing as this set
     _DEFAULT_ACTIVITIES = "AC50,EC50,GI50,IC50,Kd,Ki,MIC"
 
     submitted_norm = submitted_activity_types.strip() if submitted_activity_types else ""
@@ -142,21 +151,23 @@ def _render_existing_compound_section(
         st.caption(f"Author: {html.escape(ec_author)}  ·  Analyzed: {processed_at}")
 
 
-def render_availability_dialog(
+@st.dialog("Check Availability", width="large")
+def availability_dialog(
     avail_info: dict,
     compound_name: str,
-) -> Tuple[Optional[str], Optional[int], Optional[dict], Optional[str], Optional[str]]:
-    """Render the availability dialog for a single compound.
+):
+    """Render the availability dialog as a native @st.dialog modal.
 
     Combines availability check AND duplicate information in one dialog.
     Shows all thresholds at a glance with existing compound details.
 
-    Returns:
-        Tuple of (action, threshold, existing_compound_dict, duplicate_action, new_compound_name):
-        - ("submit", chosen_threshold, existing_or_None, "duplicate"|"replace"|None, new_name_or_None)
-        - ("view_existing", None, existing_compound_dict, None, None) — navigate to existing
-        - ("cancel", None, None, None, None) — abort
-        - (None, None, None, None, None) — dialog still showing
+    Results are written to st.session_state[AVAILABILITY_RESULT_KEY] and the
+    dialog is closed via st.rerun(). The caller must .pop() the result key
+    to consume it.
+
+    Args:
+        avail_info: Dict with thresholds, existing_compounds, etc.
+        compound_name: Name of the compound being checked.
     """
     requested_threshold = st.session_state.get('availability_requested_threshold', 90)
     submitted_at = st.session_state.get('availability_activity_types_str', "")
@@ -170,9 +181,16 @@ def render_availability_dialog(
 
     if not available_thresholds:
         st.error("No similar compounds found in ChEMBL at any threshold (40%-100%).")
-        if st.button("OK", key="avail_no_data_ok"):
-            return ("cancel", None, None, None, None)
-        return (None, None, None, None, None)
+        if st.button("OK", key="avail_no_data_ok", width='stretch'):
+            st.session_state[AVAILABILITY_RESULT_KEY] = {
+                "action": "cancel",
+                "threshold": None,
+                "existing": None,
+                "duplicate_action": None,
+                "new_name": None,
+            }
+            st.rerun()
+        return
 
     # --- Inject CSS for larger radio labels ---
     st.markdown(_RADIO_CSS, unsafe_allow_html=True)
@@ -205,7 +223,7 @@ def render_availability_dialog(
         )
         st.markdown(f"**No ChEMBL data can be found at:** {zero_info}")
 
-    # --- Threshold Selection (radio — all visible at once) ---
+    # --- Threshold Selection (radio -- all visible at once) ---
     st.markdown("#### Select Similarity Threshold")
 
     sorted_thresholds = sorted(available_thresholds, key=lambda x: x["threshold"], reverse=True)
@@ -227,7 +245,7 @@ def render_availability_dialog(
             if match == "identical":
                 best_ec = ec
                 best_match = match
-                break  # identical is the best possible — stop early
+                break  # identical is the best possible -- stop early
             elif best_ec is None:
                 best_ec = ec
                 best_match = match
@@ -252,7 +270,7 @@ def render_availability_dialog(
         range(len(radio_labels)),
         format_func=lambda i: radio_labels[i],
         key="avail_threshold_radio",
-        label_visibility="collapsed",
+        label_visibility="hidden",
     )
 
     selected_threshold = threshold_values[selected_idx]
@@ -283,29 +301,50 @@ def render_availability_dialog(
 
     st.markdown("")  # spacer
 
-    # --- Action Buttons (direct — one click per action) ---
+    # --- Action Buttons (direct -- one click per action) ---
     if active_match and active_match_type == "identical":
         # Same config: View existing | Replace | Cancel
         ec_btn = html.escape(active_match.get('compound_name', '?')[:25])
         col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button("Cancel", key="avail_cancel", use_container_width=True):
-                return ("cancel", None, None, None, None)
+            if st.button("Cancel", key="avail_cancel", width='stretch'):
+                st.session_state[AVAILABILITY_RESULT_KEY] = {
+                    "action": "cancel",
+                    "threshold": None,
+                    "existing": None,
+                    "duplicate_action": None,
+                    "new_name": None,
+                }
+                st.rerun()
         with col2:
             if st.button(
                 f"Replace at {selected_threshold}%",
                 key="avail_replace",
-                use_container_width=True,
+                width='stretch',
             ):
-                return ("submit", selected_threshold, active_match, "replace", None)
+                st.session_state[AVAILABILITY_RESULT_KEY] = {
+                    "action": "submit",
+                    "threshold": selected_threshold,
+                    "existing": active_match,
+                    "duplicate_action": "replace",
+                    "new_name": None,
+                }
+                st.rerun()
         with col3:
             if st.button(
                 f"View {ec_btn}",
                 key="avail_view_existing",
                 type="primary",
-                use_container_width=True,
+                width='stretch',
             ):
-                return ("view_existing", None, active_match, None, None)
+                st.session_state[AVAILABILITY_RESULT_KEY] = {
+                    "action": "view_existing",
+                    "threshold": None,
+                    "existing": active_match,
+                    "duplicate_action": None,
+                    "new_name": None,
+                }
+                st.rerun()
 
     elif active_match:
         # Different config: Keep Both | Replace | Cancel
@@ -316,8 +355,8 @@ def render_availability_dialog(
         new_keep_both_name = None
         if names_collide:
             # Count existing versions to suggest a unique name
-            existing_compounds = avail_info.get("existing_compounds", [])
-            version_count = len(existing_compounds) + 1
+            existing_compounds_list = avail_info.get("existing_compounds", [])
+            version_count = len(existing_compounds_list) + 1
             suggested_name = f"{compound_name}_v{version_count}"
             new_keep_both_name = st.text_input(
                 "Name for new copy (must differ from existing)",
@@ -329,15 +368,29 @@ def render_availability_dialog(
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button("Cancel", key="avail_cancel", use_container_width=True):
-                return ("cancel", None, None, None, None)
+            if st.button("Cancel", key="avail_cancel", width='stretch'):
+                st.session_state[AVAILABILITY_RESULT_KEY] = {
+                    "action": "cancel",
+                    "threshold": None,
+                    "existing": None,
+                    "duplicate_action": None,
+                    "new_name": None,
+                }
+                st.rerun()
         with col2:
             if st.button(
                 f"Replace at {selected_threshold}%",
                 key="avail_replace",
-                use_container_width=True,
+                width='stretch',
             ):
-                return ("submit", selected_threshold, active_match, "replace", None)
+                st.session_state[AVAILABILITY_RESULT_KEY] = {
+                    "action": "submit",
+                    "threshold": selected_threshold,
+                    "existing": active_match,
+                    "duplicate_action": "replace",
+                    "new_name": None,
+                }
+                st.rerun()
         with col3:
             # Disable Keep Both if names collide and no valid new name provided
             # Also block if user typed the same name as the existing compound
@@ -349,28 +402,47 @@ def render_availability_dialog(
                 f"Keep Both at {selected_threshold}%",
                 key="avail_submit",
                 type="primary",
-                use_container_width=True,
+                width='stretch',
                 disabled=keep_both_disabled,
             ):
                 final_new_name = new_keep_both_name.strip() if names_collide and new_keep_both_name else None
-                return ("submit", selected_threshold, active_match, "duplicate", final_new_name)
+                st.session_state[AVAILABILITY_RESULT_KEY] = {
+                    "action": "submit",
+                    "threshold": selected_threshold,
+                    "existing": active_match,
+                    "duplicate_action": "duplicate",
+                    "new_name": final_new_name,
+                }
+                st.rerun()
 
     else:
         # No existing compound: Submit | Cancel
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("Cancel", key="avail_cancel", use_container_width=True):
-                return ("cancel", None, None, None, None)
+            if st.button("Cancel", key="avail_cancel", width='stretch'):
+                st.session_state[AVAILABILITY_RESULT_KEY] = {
+                    "action": "cancel",
+                    "threshold": None,
+                    "existing": None,
+                    "duplicate_action": None,
+                    "new_name": None,
+                }
+                st.rerun()
         with col2:
             if st.button(
                 f"Submit at {selected_threshold}%",
                 key="avail_submit",
                 type="primary",
-                use_container_width=True,
+                width='stretch',
             ):
-                return ("submit", selected_threshold, None, None, None)
-
-    return (None, None, None, None, None)
+                st.session_state[AVAILABILITY_RESULT_KEY] = {
+                    "action": "submit",
+                    "threshold": selected_threshold,
+                    "existing": None,
+                    "duplicate_action": None,
+                    "new_name": None,
+                }
+                st.rerun()
 
 
 def clear_availability_state():

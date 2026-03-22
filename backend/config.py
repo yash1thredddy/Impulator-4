@@ -31,7 +31,6 @@ class Settings(BaseSettings):
     DATABASE_URL: str = ""  # Must be set via env var (postgresql://...)
     DB_POOL_TIMEOUT: int = 30  # Connection timeout in seconds
     DB_ECHO: bool = False  # SQL logging (disabled in production)
-    DIRECT_DATABASE_URL: str = ""  # Direct Supabase connection (port 5432) for DDL/migrations. Falls back to DATABASE_URL if empty.
 
     # Supabase (for future auth provider integration)
     SUPABASE_URL: str = ""  # https://<project-ref>.supabase.co

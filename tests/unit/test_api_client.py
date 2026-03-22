@@ -1,10 +1,76 @@
 """
 Unit tests for ChEMBL API client (backend/modules/api_client.py).
-All external API calls mocked -- no real network requests.
+
+Async rewrite for Phase 19.1: All external API calls mocked via httpx AsyncMock.
+No real network requests. Tests cover REST-primary, library fallback, circuit
+breaker, parallel activity fetch, POST format, and structural verification.
+
+asyncio_mode = auto in pytest.ini -- no @pytest.mark.asyncio needed.
 """
+
+import asyncio
+import inspect
+import json
+import os
 import time
+
+import httpx
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from backend.modules.api_client import (
+    _canonicalize_smiles,
+    _chembl_get,
+    _chembl_post,
+    _circuits,
+    _get_circuit,
+    _get_response_data,
+    _is_circuit_open,
+    _record_failure,
+    _record_success,
+    _url_encode_smiles,
+    cache_non_none,
+    clear_caches,
+    create_chembl_client,
+    fetch_all_activities_single_batch,
+    fetch_batch_molecule_data,
+    fetch_batch_target_names,
+    get_cache_info,
+    get_chembl_ids,
+    get_drug_indications_batch,
+    quick_has_bioactivity,
+    shutdown_api_client,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _mock_response(status_code=200, json_data=None, headers=None):
+    """Create a mock httpx.Response with the given status code and JSON data."""
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = status_code
+    resp.json.return_value = json_data or {}
+    resp.raise_for_status = MagicMock()
+    resp.headers = headers or {}
+    if status_code >= 400:
+        resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            f"HTTP {status_code}", request=MagicMock(), response=resp
+        )
+    return resp
+
+
+def _mock_client(**kwargs):
+    """Create an AsyncMock httpx.AsyncClient."""
+    client = AsyncMock(spec=httpx.AsyncClient)
+    client.timeout = httpx.Timeout(connect=5, read=30, write=10, pool=10)
+    return client
+
+
+# ---------------------------------------------------------------------------
+# cache_non_none (sync decorator -- preserved from pre-async codebase)
+# ---------------------------------------------------------------------------
 
 
 class TestCacheNonNone:
@@ -12,8 +78,6 @@ class TestCacheNonNone:
 
     def test_caches_non_none_result(self):
         """Test that non-None results are cached on second call."""
-        from backend.modules.api_client import cache_non_none
-
         call_count = 0
 
         @cache_non_none(maxsize=10, ttl_seconds=60)
@@ -26,12 +90,10 @@ class TestCacheNonNone:
         result2 = expensive_call("a")
         assert result1 == "result-a"
         assert result2 == "result-a"
-        assert call_count == 1  # Second call used cache
+        assert call_count == 1
 
     def test_does_not_cache_none(self):
         """Test that None results are NOT cached."""
-        from backend.modules.api_client import cache_non_none
-
         call_count = 0
 
         @cache_non_none(maxsize=10, ttl_seconds=60)
@@ -44,12 +106,10 @@ class TestCacheNonNone:
         result2 = returns_none("a")
         assert result1 is None
         assert result2 is None
-        assert call_count == 2  # Both calls hit the function
+        assert call_count == 2
 
     def test_cache_clear(self):
         """Test cache_clear resets cache."""
-        from backend.modules.api_client import cache_non_none
-
         call_count = 0
 
         @cache_non_none(maxsize=10, ttl_seconds=60)
@@ -67,15 +127,13 @@ class TestCacheNonNone:
 
     def test_cache_info(self):
         """Test cache_info returns stats."""
-        from backend.modules.api_client import cache_non_none
-
         @cache_non_none(maxsize=10, ttl_seconds=60)
         def fn(key):
             return key
 
         fn("a")
-        fn("a")  # cache hit
-        fn("b")  # cache miss
+        fn("a")  # hit
+        fn("b")  # miss
 
         info = fn.cache_info()
         assert info.hits == 1
@@ -85,8 +143,6 @@ class TestCacheNonNone:
 
     def test_cache_evicts_when_full(self):
         """Test cache evicts oldest entry when maxsize reached."""
-        from backend.modules.api_client import cache_non_none
-
         @cache_non_none(maxsize=2, ttl_seconds=60)
         def fn(key):
             return key
@@ -100,8 +156,6 @@ class TestCacheNonNone:
 
     def test_cache_ttl_expiry(self):
         """Test cache entries expire after TTL."""
-        from backend.modules.api_client import cache_non_none
-
         call_count = 0
 
         @cache_non_none(maxsize=10, ttl_seconds=0.1)
@@ -112,312 +166,12 @@ class TestCacheNonNone:
 
         fn("a")
         assert call_count == 1
-        time.sleep(0.15)  # Wait for TTL to expire
+        time.sleep(0.15)
         fn("a")
-        assert call_count == 2  # Had to call function again
+        assert call_count == 2
 
-
-class TestWithTimeout:
-    """Tests for the with_timeout decorator."""
-
-    def test_returns_result_within_timeout(self):
-        """Test normal function returns result."""
-        from backend.modules.api_client import with_timeout
-
-        @with_timeout(timeout_seconds=5)
-        def fast_fn():
-            return "done"
-
-        assert fast_fn() == "done"
-
-    def test_returns_none_on_timeout(self):
-        """Test returns None when function exceeds timeout."""
-        from backend.modules.api_client import with_timeout
-
-        @with_timeout(timeout_seconds=0.1)
-        def slow_fn():
-            time.sleep(5)
-            return "too late"
-
-        result = slow_fn()
-        assert result is None
-
-    def test_returns_none_on_exception(self):
-        """Test returns None when function raises exception."""
-        from backend.modules.api_client import with_timeout
-
-        @with_timeout(timeout_seconds=5)
-        def failing_fn():
-            raise RuntimeError("boom")
-
-        result = failing_fn()
-        assert result is None
-
-
-class TestSanitizeCompoundName:
-    """Tests for _sanitize_compound_name in azure_sync."""
-
-    def test_basic_sanitization(self):
-        """Test basic compound name sanitization."""
-        from backend.core.azure_sync import _sanitize_compound_name
-        assert _sanitize_compound_name("Aspirin") == "Aspirin"
-        assert _sanitize_compound_name("Vitamin C (Ascorbic Acid)") == "Vitamin_C_Ascorbic_Acid"
-        assert _sanitize_compound_name("test/compound\\name") == "test_compound_name"
-        assert _sanitize_compound_name("  ") == "unnamed_compound"
-        assert _sanitize_compound_name("a___b") == "a_b"
-
-
-class TestIsUuidPath:
-    """Tests for _is_uuid_path helper."""
-
-    def test_valid_uuid_path(self):
-        """Test recognizes valid UUID paths."""
-        from backend.core.azure_sync import _is_uuid_path
-        assert _is_uuid_path("results/3a/3a4f8c9e-1b2d-4e5f-9a1c-2d3e4f5a6b7c.zip") is True
-
-    def test_name_based_path(self):
-        """Test rejects name-based paths."""
-        from backend.core.azure_sync import _is_uuid_path
-        assert _is_uuid_path("results/Aspirin.zip") is False
-
-    def test_non_results_path(self):
-        """Test rejects non-results paths."""
-        from backend.core.azure_sync import _is_uuid_path
-        assert _is_uuid_path("logs/some.zip") is False
-
-
-class TestExtractEntryIdFromBlob:
-    """Tests for _extract_entry_id_from_blob helper."""
-
-    def test_extracts_uuid(self):
-        """Test extracts UUID from valid blob path."""
-        from backend.core.azure_sync import _extract_entry_id_from_blob
-        result = _extract_entry_id_from_blob("results/3a/3a4f8c9e-1b2d-4e5f-9a1c-2d3e4f5a6b7c.zip")
-        assert result == "3a4f8c9e-1b2d-4e5f-9a1c-2d3e4f5a6b7c"
-
-    def test_returns_none_for_name_path(self):
-        """Test returns None for name-based path."""
-        from backend.core.azure_sync import _extract_entry_id_from_blob
-        assert _extract_entry_id_from_blob("results/Aspirin.zip") is None
-
-
-class TestGetChemblClient:
-    """Tests for _get_chembl_client lazy initialization."""
-
-    def test_returns_none_when_not_installed(self):
-        """Test returns None when chembl_webresource_client not installed."""
-        from backend.modules import api_client
-
-        # Save and clear the global
-        original = api_client._chembl_client
-        api_client._chembl_client = None
-
-        try:
-            with patch('backend.modules.api_client._configure_chembl_settings'):
-                with patch.dict('sys.modules', {'chembl_webresource_client': None,
-                                                 'chembl_webresource_client.new_client': None}):
-                    # Force re-import to trigger ImportError
-                    pass
-        finally:
-            api_client._chembl_client = original
-
-
-class TestConfigureChemblSettings:
-    """Tests for _configure_chembl_settings."""
-
-    def test_configures_once(self):
-        """Test settings configured only once (idempotent)."""
-        from backend.modules import api_client
-
-        original = api_client._chembl_settings_configured
-
-        # Set to True so first call is a no-op
-        api_client._chembl_settings_configured = True
-        try:
-            api_client._configure_chembl_settings()
-            assert api_client._chembl_settings_configured is True
-        finally:
-            api_client._chembl_settings_configured = original
-
-    def test_configures_from_scratch(self):
-        """Test configures settings when not yet configured."""
-        from backend.modules import api_client
-
-        original = api_client._chembl_settings_configured
-        api_client._chembl_settings_configured = False
-
-        try:
-            # The function imports Settings inside its body, so we mock at the import
-            mock_settings_cls = MagicMock()
-            mock_instance = MagicMock()
-            mock_instance.MAX_LIMIT = 20
-            mock_instance.TIMEOUT = 3.0
-            mock_settings_cls.Instance.return_value = mock_instance
-
-            import sys
-            mock_mod = MagicMock()
-            mock_mod.Settings = mock_settings_cls
-            with patch.dict(sys.modules, {'chembl_webresource_client.settings': mock_mod}):
-                api_client._configure_chembl_settings()
-                assert api_client._chembl_settings_configured is True
-        finally:
-            api_client._chembl_settings_configured = original
-
-
-class TestGetThreadSession:
-    """Tests for _get_thread_session thread-local sessions."""
-
-    def test_returns_session(self):
-        """Test returns a requests.Session instance."""
-        from backend.modules.api_client import _get_thread_session
-        session = _get_thread_session()
-        import requests
-        assert isinstance(session, requests.Session)
-
-    def test_same_thread_same_session(self):
-        """Test same thread gets same session."""
-        from backend.modules.api_client import _get_thread_session
-        s1 = _get_thread_session()
-        s2 = _get_thread_session()
-        assert s1 is s2
-
-
-class TestGetTimeoutExecutor:
-    """Tests for _get_timeout_executor."""
-
-    def test_returns_executor(self):
-        """Test returns a ThreadPoolExecutor."""
-        from backend.modules.api_client import _get_timeout_executor
-        from concurrent.futures import ThreadPoolExecutor
-        executor = _get_timeout_executor()
-        assert isinstance(executor, ThreadPoolExecutor)
-
-
-class TestShutdownApiClient:
-    """Tests for shutdown_api_client."""
-
-    def test_shutdown_resets_thread_local(self):
-        """Test shutdown clears thread-local sessions."""
-        from backend.modules.api_client import shutdown_api_client, _get_thread_session, _thread_local
-
-        # Ensure a session exists
-        _get_thread_session()
-        assert hasattr(_thread_local, 'session')
-
-        shutdown_api_client()
-        # After shutdown, thread_local.session should be reset
-        # (the function deletes the attribute)
-        # Note: shutdown_api_client resets _thread_local completely
-
-
-class TestGetResponseData:
-    """Tests for _get_response_data helper."""
-
-    def test_returns_empty_for_none(self):
-        """Test returns empty list when data is None."""
-        from backend.modules.api_client import _get_response_data
-        assert _get_response_data(None, "activity") == []
-
-    def test_extracts_known_endpoint(self):
-        """Test extracts data using known endpoint key mapping."""
-        from backend.modules.api_client import _get_response_data
-        data = {"activities": [{"id": 1}, {"id": 2}]}
-        result = _get_response_data(data, "activity")
-        assert len(result) == 2
-        assert result[0]["id"] == 1
-
-    def test_extracts_molecule_endpoint(self):
-        """Test extracts data for molecule endpoint."""
-        from backend.modules.api_client import _get_response_data
-        data = {"molecules": [{"chembl_id": "CHEMBL25"}]}
-        result = _get_response_data(data, "molecule")
-        assert len(result) == 1
-
-    def test_fallback_pluralized_key(self):
-        """Test falls back to pluralized endpoint name when not in mapping."""
-        from backend.modules.api_client import _get_response_data
-        data = {"unknowns": [{"x": 1}]}
-        result = _get_response_data(data, "unknown")
-        assert len(result) == 1
-
-    def test_missing_key_returns_empty(self):
-        """Test returns empty list when response key not in data."""
-        from backend.modules.api_client import _get_response_data
-        data = {"wrong_key": [{"x": 1}]}
-        result = _get_response_data(data, "activity")
-        assert result == []
-
-
-class TestUrlEncodeSmiles:
-    """Tests for _url_encode_smiles."""
-
-    def test_basic_smiles(self):
-        """Test basic SMILES encoding."""
-        from backend.modules.api_client import _url_encode_smiles
-        result = _url_encode_smiles("CCO")
-        assert result == "CCO"
-
-    def test_special_chars_encoded(self):
-        """Test URL-significant chars are encoded."""
-        from backend.modules.api_client import _url_encode_smiles
-        result = _url_encode_smiles("CC(=O)OC1=CC=CC=C1C(=O)O")
-        # Parentheses and = should be encoded
-        assert "(" not in result or "%28" in result
-
-    def test_hash_encoded(self):
-        """Test # is encoded."""
-        from backend.modules.api_client import _url_encode_smiles
-        result = _url_encode_smiles("C#N")
-        assert "%23" in result
-
-    def test_slash_encoded(self):
-        """Test / is encoded."""
-        from backend.modules.api_client import _url_encode_smiles
-        result = _url_encode_smiles("C/C=C/C")
-        assert "%2F" in result
-
-
-class TestClearCaches:
-    """Tests for clear_caches function."""
-
-    def test_clear_caches_no_error(self):
-        """Test clear_caches runs without error."""
-        from backend.modules.api_client import clear_caches
-        # Should not raise
-        clear_caches()
-
-
-class TestGetCacheInfo:
-    """Tests for get_cache_info function."""
-
-    def test_returns_dict(self):
-        """Test get_cache_info returns dict with expected keys."""
-        from backend.modules.api_client import get_cache_info
-        info = get_cache_info()
-        assert isinstance(info, dict)
-        assert "molecule_data" in info
-        assert "classification" in info
-        assert "target_name" in info
-        assert "drug_indications" in info
-
-    def test_cache_info_has_stats(self):
-        """Test each cache info entry has expected stats."""
-        from backend.modules.api_client import get_cache_info
-        info = get_cache_info()
-        for key, stats in info.items():
-            assert "hits" in stats
-            assert "misses" in stats
-            assert "maxsize" in stats
-            assert "currsize" in stats
-
-
-class TestCacheInfoAsDict:
-    """Tests for CacheInfo._asdict method (line 178)."""
-
-    def test_asdict_returns_correct_keys(self):
-        """Test CacheInfo._asdict returns all expected fields."""
-        from backend.modules.api_client import cache_non_none
-
+    def test_cache_info_asdict(self):
+        """Test CacheInfo._asdict returns correct keys."""
         @cache_non_none(maxsize=5, ttl_seconds=60)
         def fn(key):
             return key
@@ -434,72 +188,537 @@ class TestCacheInfoAsDict:
         assert d["currsize"] == 2
 
 
-class TestCacheDoubleCheck:
-    """Tests for ARCH-10 double-checked locking in cache_non_none (lines 138-141)."""
-
-    def test_concurrent_cache_writes(self):
-        """Test double-check path when concurrent threads populate the same key."""
-        import threading
-        from backend.modules.api_client import cache_non_none
-
-        call_count = 0
-
-        @cache_non_none(maxsize=10, ttl_seconds=60)
-        def slow_fn(key):
-            nonlocal call_count
-            call_count += 1
-            return f"result-{key}-{call_count}"
-
-        # Simulate: both threads call the function, both get a result,
-        # but only one should set the cache. The second should use the first's value.
-        results = []
-        barrier = threading.Barrier(2)
-
-        def worker():
-            barrier.wait()
-            result = slow_fn("shared")
-            results.append(result)
-
-        t1 = threading.Thread(target=worker)
-        t2 = threading.Thread(target=worker)
-        t1.start()
-        t2.start()
-        t1.join(timeout=5)
-        t2.join(timeout=5)
-
-        # Both should return a result (either the same or different depending on timing)
-        assert len(results) == 2
-        # The cache should have exactly 1 entry
-        info = slow_fn.cache_info()
-        assert info.currsize == 1
+# ---------------------------------------------------------------------------
+# Pure / sync helpers
+# ---------------------------------------------------------------------------
 
 
-class TestRateLimiter:
-    """Tests for the RateLimiter class."""
+class TestUrlEncodeSmiles:
+    """Tests for _url_encode_smiles."""
 
-    def test_basic_rate_limiting(self):
-        """Test rate limiter enforces timing."""
-        from backend.modules.api_client import RateLimiter
-        limiter = RateLimiter(calls_per_second=100)  # High rate for fast test
-        # Should not raise
-        limiter.wait()
-        limiter.wait()
+    def test_basic_smiles(self):
+        result = _url_encode_smiles("CCO")
+        assert result == "CCO"
 
-    def test_min_interval_property(self):
-        """Test min_interval is calculated correctly."""
-        from backend.modules.api_client import RateLimiter
-        limiter = RateLimiter(calls_per_second=10)
-        assert limiter.min_interval == pytest.approx(0.1, abs=0.01)
+    def test_hash_encoded(self):
+        result = _url_encode_smiles("C#N")
+        assert "%23" in result
+
+    def test_slash_encoded(self):
+        result = _url_encode_smiles("C/C=C/C")
+        assert "%2F" in result
 
 
-class TestGetSession:
-    """Tests for get_session function."""
+class TestGetResponseData:
+    """Tests for _get_response_data helper."""
 
-    def test_returns_session_with_retries(self):
-        """Test creates a session with retry adapters."""
-        from backend.modules.api_client import get_session
-        import requests
-        s = get_session()
-        assert isinstance(s, requests.Session)
-        # Should have retry adapters mounted
-        assert len(s.adapters) >= 2  # http:// and https://
+    def test_returns_empty_for_none(self):
+        assert _get_response_data(None, "activity") == []
+
+    def test_extracts_known_endpoint(self):
+        data = {"activities": [{"id": 1}, {"id": 2}]}
+        result = _get_response_data(data, "activity")
+        assert len(result) == 2
+
+    def test_extracts_molecule_endpoint(self):
+        data = {"molecules": [{"chembl_id": "CHEMBL25"}]}
+        result = _get_response_data(data, "molecule")
+        assert len(result) == 1
+
+    def test_fallback_pluralized_key(self):
+        data = {"unknowns": [{"x": 1}]}
+        result = _get_response_data(data, "unknown")
+        assert len(result) == 1
+
+    def test_missing_key_returns_empty(self):
+        data = {"wrong_key": [{"x": 1}]}
+        result = _get_response_data(data, "activity")
+        assert result == []
+
+
+class TestCanonicalizeSmiles:
+    """Tests for _canonicalize_smiles (D-18)."""
+
+    def test_valid_smiles_returns_canonical(self):
+        result = _canonicalize_smiles("c1ccccc1")
+        assert result == "c1ccccc1"  # RDKit canonical form
+
+    def test_invalid_smiles_returns_original(self):
+        result = _canonicalize_smiles("not_a_smiles_XYZ")
+        assert result == "not_a_smiles_XYZ"
+
+    def test_already_canonical_unchanged(self):
+        result = _canonicalize_smiles("CCO")
+        assert result == "CCO"
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker
+# ---------------------------------------------------------------------------
+
+
+class TestCircuitBreaker:
+    """Tests for circuit breaker helpers (D-31/D-32)."""
+
+    def test_circuits_dict_importable(self):
+        """_circuits dict is importable for test manipulation."""
+        assert isinstance(_circuits, dict)
+
+    def test_get_circuit_creates_new(self):
+        circuit = _get_circuit("test_cb_new")
+        assert "failures" in circuit
+        assert "open_until" in circuit
+        assert "threshold" in circuit
+        assert "cooldown" in circuit
+        _circuits.pop("test_cb_new", None)
+
+    def test_circuit_closed_when_below_threshold(self):
+        circuit = _get_circuit("test_cb_closed")
+        circuit["failures"] = 0
+        assert not _is_circuit_open(circuit)
+        _circuits.pop("test_cb_closed", None)
+
+    def test_circuit_open_when_at_threshold(self):
+        circuit = _get_circuit("test_cb_open")
+        circuit["failures"] = circuit["threshold"]
+        circuit["open_until"] = time.monotonic() + 300
+        assert _is_circuit_open(circuit)
+        _circuits.pop("test_cb_open", None)
+
+    def test_circuit_half_open_after_cooldown(self):
+        circuit = _get_circuit("test_cb_half")
+        circuit["failures"] = circuit["threshold"]
+        circuit["open_until"] = time.monotonic() - 1  # Cooldown expired
+        assert not _is_circuit_open(circuit)  # Half-open: allows probe
+        assert circuit["failures"] == circuit["threshold"] - 1
+        _circuits.pop("test_cb_half", None)
+
+    def test_record_success_resets(self):
+        circuit = _get_circuit("test_cb_success")
+        circuit["failures"] = 5
+        _record_success(circuit)
+        assert circuit["failures"] == 0
+        assert circuit["open_until"] == 0.0
+        _circuits.pop("test_cb_success", None)
+
+    def test_record_failure_increments_and_opens(self):
+        circuit = _get_circuit("test_cb_fail")
+        circuit["failures"] = 0
+        for _ in range(circuit["threshold"]):
+            _record_failure(circuit)
+        assert circuit["failures"] >= circuit["threshold"]
+        assert circuit["open_until"] > 0
+        _circuits.pop("test_cb_fail", None)
+
+
+# ---------------------------------------------------------------------------
+# _chembl_get
+# ---------------------------------------------------------------------------
+
+
+class TestChemblGet:
+    """Tests for _chembl_get async HTTP helper."""
+
+    async def test_chembl_get_success(self):
+        client = _mock_client()
+        client.get.return_value = _mock_response(
+            200, {"activities": [{"id": 1}], "page_meta": {"total_count": 1}}
+        )
+        result = await _chembl_get(client, "activity", {"limit": 1000})
+        assert result is not None
+        assert "activities" in result
+
+    async def test_chembl_get_circuit_open_returns_none(self):
+        circuit = _get_circuit("test_get_open")
+        circuit["failures"] = 10
+        circuit["open_until"] = time.monotonic() + 300
+        client = _mock_client()
+        result = await _chembl_get(client, "test_get_open", {})
+        assert result is None
+        _circuits.pop("test_get_open", None)
+
+    async def test_chembl_get_429_retries(self):
+        client = _mock_client()
+        resp_429 = _mock_response(429, headers={"Retry-After": "0"})
+        resp_429.raise_for_status = MagicMock()  # 429 doesn't raise
+        resp_200 = _mock_response(200, {"activities": []})
+        client.get.side_effect = [resp_429, resp_200]
+        result = await _chembl_get(client, "activity", {})
+        assert result is not None
+
+    async def test_chembl_get_5xx_retries(self):
+        client = _mock_client()
+        resp_500 = _mock_response(500)
+        resp_500.raise_for_status = MagicMock()  # Override -- 5xx handled before raise_for_status
+        resp_200 = _mock_response(200, {"activities": []})
+        client.get.side_effect = [resp_500, resp_200]
+        result = await _chembl_get(client, "activity", {})
+        assert result is not None
+
+    async def test_chembl_get_timeout_exhausts_retries(self):
+        client = _mock_client()
+        client.get.side_effect = httpx.ReadTimeout("timeout")
+        result = await _chembl_get(client, "activity", {})
+        assert result is None
+
+    async def test_chembl_get_with_semaphore(self):
+        client = _mock_client()
+        client.get.return_value = _mock_response(200, {"activities": []})
+        sem = asyncio.Semaphore(1)
+        result = await _chembl_get(client, "activity", {}, semaphore=sem)
+        assert result is not None
+
+    async def test_chembl_get_with_timeout_override(self):
+        client = _mock_client()
+        client.get.return_value = _mock_response(200, {"activities": []})
+        result = await _chembl_get(client, "activity", {}, timeout_override=90)
+        assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# _chembl_post
+# ---------------------------------------------------------------------------
+
+
+class TestChemblPost:
+    """Tests for _chembl_post (D-16 nested list format)."""
+
+    async def test_chembl_post_uses_nested_list_format(self):
+        """POST body uses [[key, val], ...] format, not dict (D-16)."""
+        client = _mock_client()
+        client.post.return_value = _mock_response(200, {"activities": []})
+        await _chembl_post(
+            client, "activity",
+            {"molecule_chembl_id__in": "CHEMBL25", "limit": 1000},
+        )
+        call_args = client.post.call_args
+        body = call_args.kwargs.get("content") or call_args[1].get("content")
+        parsed = json.loads(body)
+        assert isinstance(parsed, list)
+        assert all(isinstance(item, list) for item in parsed)
+
+    async def test_chembl_post_has_override_header(self):
+        """POST includes X-HTTP-Method-Override: GET header (D-16)."""
+        client = _mock_client()
+        client.post.return_value = _mock_response(200, {"activities": []})
+        await _chembl_post(client, "activity", {"limit": 1000})
+        call_args = client.post.call_args
+        headers = call_args.kwargs.get("headers") or call_args[1].get("headers")
+        assert headers["X-HTTP-Method-Override"] == "GET"
+
+    async def test_chembl_post_circuit_open_returns_none(self):
+        circuit = _get_circuit("test_post_open")
+        circuit["failures"] = 10
+        circuit["open_until"] = time.monotonic() + 300
+        client = _mock_client()
+        result = await _chembl_post(client, "test_post_open", {})
+        assert result is None
+        _circuits.pop("test_post_open", None)
+
+
+# ---------------------------------------------------------------------------
+# get_chembl_ids
+# ---------------------------------------------------------------------------
+
+
+class TestGetChemblIds:
+    """Tests for get_chembl_ids (similarity search)."""
+
+    async def test_rest_primary_success(self):
+        client = _mock_client()
+        client.get.return_value = _mock_response(200, {
+            "molecules": [{"molecule_chembl_id": "CHEMBL25"}],
+            "page_meta": {"total_count": 1},
+        })
+        result = await get_chembl_ids(client, "c1ccccc1", 90)
+        assert len(result) >= 1
+        assert result[0]["molecule_chembl_id"] == "CHEMBL25"
+
+    async def test_empty_smiles_returns_empty(self):
+        client = _mock_client()
+        result = await get_chembl_ids(client, "", 90)
+        assert result == []
+
+    async def test_fallback_on_rest_failure(self):
+        """When REST fails, falls back to library via run_in_executor (D-34)."""
+        client = _mock_client()
+        client.get.side_effect = httpx.ReadTimeout("timeout")
+        with patch(
+            "backend.modules.api_client._library_fallback_similarity",
+            return_value=[{"molecule_chembl_id": "CHEMBL99"}],
+        ):
+            result = await get_chembl_ids(client, "CCO", 90)
+        assert len(result) == 1
+        assert result[0]["molecule_chembl_id"] == "CHEMBL99"
+
+
+# ---------------------------------------------------------------------------
+# Parallel activity fetch
+# ---------------------------------------------------------------------------
+
+
+class TestFetchActivitiesParallel:
+    """Tests for per-type parallel activity fetch (D-20/D-22/D-23)."""
+
+    async def test_activities_per_type_parallel(self):
+        """Activities fetched per-type via asyncio.gather (D-20)."""
+        client = _mock_client()
+
+        async def mock_get(url, **kwargs):
+            return _mock_response(200, {
+                "activities": [{"standard_type": "IC50", "molecule_chembl_id": "CHEMBL25"}],
+                "page_meta": {"total_count": 1, "limit": 1000, "offset": 0},
+            })
+
+        client.get.side_effect = mock_get
+        result = await fetch_all_activities_single_batch(
+            client, ["CHEMBL25"], ["IC50", "Ki"],
+        )
+        # Each type produces one activity via the mock
+        assert len(result) >= 2
+
+    async def test_activities_empty_ids_returns_empty(self):
+        client = _mock_client()
+        result = await fetch_all_activities_single_batch(client, [], ["IC50"])
+        assert result == []
+
+    async def test_activities_rest_failure_falls_back(self):
+        """REST failure falls back to library (D-23/D-34)."""
+        client = _mock_client()
+        client.get.side_effect = httpx.ReadTimeout("timeout")
+        with patch(
+            "backend.modules.api_client._library_fallback_activities",
+            return_value=[{"standard_type": "IC50", "molecule_chembl_id": "CHEMBL25"}],
+        ):
+            result = await fetch_all_activities_single_batch(
+                client, ["CHEMBL25"], ["IC50"],
+            )
+        assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# POST for large ID lists
+# ---------------------------------------------------------------------------
+
+
+class TestPostForLargeIdLists:
+    """Tests for automatic GET/POST routing (D-17)."""
+
+    async def test_uses_get_for_small_id_lists(self):
+        """IDs <= 200 use GET (D-17)."""
+        client = _mock_client()
+        client.get.return_value = _mock_response(200, {
+            "molecules": [{"molecule_chembl_id": "CHEMBL1"}],
+            "page_meta": {"total_count": 1},
+        })
+        small_ids = [f"CHEMBL{i}" for i in range(50)]
+        await fetch_batch_molecule_data(client, small_ids)
+        assert client.get.called
+
+    async def test_uses_post_for_large_id_lists(self):
+        """IDs > 200 use POST with nested list body (D-17)."""
+        client = _mock_client()
+        client.post.return_value = _mock_response(200, {
+            "molecules": [],
+            "page_meta": {"total_count": 0},
+        })
+        # Need >200 comma-separated IDs to trigger POST
+        large_ids = [f"CHEMBL{i}" for i in range(250)]
+        await fetch_batch_molecule_data(client, large_ids)
+        assert client.post.called
+
+
+# ---------------------------------------------------------------------------
+# fetch_batch_target_names
+# ---------------------------------------------------------------------------
+
+
+class TestFetchBatchTargetNames:
+    """Tests for fetch_batch_target_names."""
+
+    async def test_success(self):
+        client = _mock_client()
+        client.get.return_value = _mock_response(200, {
+            "targets": [{"target_chembl_id": "CHEMBL1862", "pref_name": "Cyclooxygenase-2"}],
+            "page_meta": {"total_count": 1},
+        })
+        result = await fetch_batch_target_names(client, ["CHEMBL1862"])
+        assert result["CHEMBL1862"] == "Cyclooxygenase-2"
+
+    async def test_empty_ids(self):
+        client = _mock_client()
+        result = await fetch_batch_target_names(client, [])
+        assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# get_drug_indications_batch
+# ---------------------------------------------------------------------------
+
+
+class TestGetDrugIndicationsBatch:
+    """Tests for get_drug_indications_batch."""
+
+    async def test_success(self):
+        client = _mock_client()
+        client.get.return_value = _mock_response(200, {
+            "drug_indications": [{
+                "molecule_chembl_id": "CHEMBL25",
+                "mesh_id": "D000893",
+                "mesh_heading": "Pain",
+                "indication_refs": [],
+            }],
+            "page_meta": {"total_count": 1},
+        })
+        all_ind, by_compound = await get_drug_indications_batch(client, ["CHEMBL25"])
+        assert len(all_ind) == 1
+        assert "CHEMBL25" in by_compound
+
+    async def test_empty_ids(self):
+        client = _mock_client()
+        all_ind, by_compound = await get_drug_indications_batch(client, [])
+        assert all_ind == []
+        assert by_compound == {}
+
+
+# ---------------------------------------------------------------------------
+# quick_has_bioactivity
+# ---------------------------------------------------------------------------
+
+
+class TestQuickHasBioactivity:
+    """Tests for quick_has_bioactivity."""
+
+    async def test_returns_true_when_activity_exists(self):
+        client = _mock_client()
+
+        async def mock_get(url, **kwargs):
+            if "similarity" in url:
+                return _mock_response(200, {
+                    "molecules": [{"molecule_chembl_id": "CHEMBL25"}],
+                    "page_meta": {"total_count": 1},
+                })
+            return _mock_response(200, {
+                "activities": [{"molecule_chembl_id": "CHEMBL25"}],
+                "page_meta": {"total_count": 5},
+            })
+
+        client.get.side_effect = mock_get
+        result = await quick_has_bioactivity(client, "CCO")
+        assert result is True
+
+    async def test_returns_false_when_no_similar(self):
+        client = _mock_client()
+        client.get.return_value = _mock_response(200, {
+            "molecules": [],
+            "page_meta": {"total_count": 0},
+        })
+        result = await quick_has_bioactivity(client, "CCO")
+        assert result is False
+
+    async def test_empty_smiles_returns_false(self):
+        client = _mock_client()
+        result = await quick_has_bioactivity(client, "")
+        assert result is False
+
+    async def test_returns_true_on_error_optimistic(self):
+        """Optimistic: returns True on error so processing can try."""
+        client = _mock_client()
+        client.get.side_effect = httpx.ReadTimeout("timeout")
+        result = await quick_has_bioactivity(client, "CCO")
+        assert result is True
+
+
+# ---------------------------------------------------------------------------
+# Structural verification
+# ---------------------------------------------------------------------------
+
+
+class TestNoThreadingArtifacts:
+    """Verify removed sync infrastructure (D-07/D-08/D-38/D-42)."""
+
+    def test_no_rate_limiter_class(self):
+        import backend.modules.api_client as m
+        source = inspect.getsource(m)
+        assert "class RateLimiter" not in source
+
+    def test_no_threading_local(self):
+        import backend.modules.api_client as m
+        source = inspect.getsource(m)
+        assert "threading.local()" not in source
+
+    def test_no_threadpool_executor(self):
+        import backend.modules.api_client as m
+        source = inspect.getsource(m)
+        assert "ThreadPoolExecutor" not in source
+
+
+class TestLibraryFallback:
+    """Tests for library fallback path (D-02/D-30)."""
+
+    def test_no_library_imports_outside_api_client(self):
+        """No direct chembl_webresource_client imports outside api_client (D-02/REST-13)."""
+        backend_dir = os.path.join(os.path.dirname(__file__), "..", "..", "backend")
+        violations = []
+        for root, dirs, files in os.walk(backend_dir):
+            for f in files:
+                if f.endswith(".py") and f != "api_client.py":
+                    path = os.path.join(root, f)
+                    with open(path) as fh:
+                        content = fh.read()
+                        if (
+                            "from chembl_webresource_client" in content
+                            or "import chembl_webresource_client" in content
+                        ):
+                            violations.append(path)
+        assert violations == [], f"Library imported outside api_client.py: {violations}"
+
+
+# ---------------------------------------------------------------------------
+# Misc public API
+# ---------------------------------------------------------------------------
+
+
+class TestClearCaches:
+    """Tests for clear_caches function."""
+
+    def test_clear_caches_no_error(self):
+        clear_caches()
+
+
+class TestGetCacheInfo:
+    """Tests for get_cache_info function."""
+
+    def test_returns_dict(self):
+        info = get_cache_info()
+        assert isinstance(info, dict)
+
+
+class TestShutdownApiClient:
+    """Tests for shutdown_api_client."""
+
+    def test_shutdown_no_error(self):
+        shutdown_api_client()
+
+
+class TestCreateChemblClient:
+    """Tests for create_chembl_client factory."""
+
+    def test_returns_async_client(self):
+        client = create_chembl_client()
+        assert isinstance(client, httpx.AsyncClient)
+
+
+class TestConfigureChemblSettings:
+    """Tests for _configure_chembl_settings (library fallback config)."""
+
+    def test_configures_once(self):
+        from backend.modules import api_client
+
+        original = api_client._chembl_settings_configured
+        api_client._chembl_settings_configured = True
+        try:
+            api_client._configure_chembl_settings()
+            assert api_client._chembl_settings_configured is True
+        finally:
+            api_client._chembl_settings_configured = original

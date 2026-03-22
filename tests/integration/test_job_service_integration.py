@@ -12,8 +12,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from backend.core.database import Base
-from backend.models.database import Compound, Job
+from backend.models._pg_base import PGBase
+from backend.models.compound import Compound
+from backend.models.job import Job
+from backend.models.deleted_compound import DeletedCompound  # noqa: F401
 from backend.services.job_service import (
     JobService,
     _inchikey_structure_key,
@@ -30,9 +32,9 @@ def engine():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    Base.metadata.create_all(bind=eng)
+    PGBase.metadata.create_all(bind=eng)
     yield eng
-    Base.metadata.drop_all(bind=eng)
+    PGBase.metadata.drop_all(bind=eng)
     eng.dispose()
 
 
@@ -41,7 +43,7 @@ def _clean(engine):
     """Truncate all tables after each test."""
     yield
     with engine.connect() as conn:
-        for table in reversed(Base.metadata.sorted_tables):
+        for table in reversed(PGBase.metadata.sorted_tables):
             conn.execute(table.delete())
         conn.commit()
 
@@ -73,7 +75,7 @@ def seed(db):
             "inchikey": inchikey,
             "inchikey_structure_key": _inchikey_structure_key(inchikey),
             "similarity_threshold": 90,
-            "activity_types": "EC50,IC50,Kd,Ki",
+            "activity_types": ["EC50", "IC50", "Kd", "Ki"],
         }
         defaults.update(overrides)
         comp = Compound(**defaults)
@@ -226,7 +228,7 @@ class TestResolveDuplicateAction:
         from backend.models.schemas import ResolveDuplicateRequest
         from unittest.mock import patch
 
-        comp = seed(name="Ethanol", smiles="CCO", activity_types="IC50,Ki")
+        comp = seed(name="Ethanol", smiles="CCO", activity_types=["IC50", "Ki"])
 
         request = ResolveDuplicateRequest(
             action="duplicate",

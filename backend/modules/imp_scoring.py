@@ -26,12 +26,21 @@ Converts 5 binary assay interference flags into a 0-1 score: flags_triggered / 5
 Only PAINS, Aggregator, Thiol, Redox, and Fluorescence are counted.
 BRENK and NIH remain display-only (not counted in score).
 More flags = stronger evidence the compound is a genuine IMP (assay artifact).
+
+**Async Functions** (19.2):
+- calculate_imp_score() and calculate_pdb_evidence_score() are async, accepting
+  httpx.AsyncClient for PDB queries via asyncio.gather with Semaphore(5).
+- PDB dedup via per-PDB-ID detail cache prevents redundant GraphQL queries.
+- Pure math scoring functions remain sync (sub-second).
 """
 
+import asyncio
+import logging
+from typing import Callable
+
+import httpx
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Callable, Optional
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +71,39 @@ INTERFERENCE_FLAG_COUNT = len(INTERFERENCE_FLAG_COLUMNS)  # 5
 # Default efficiency metrics (use only SEI and BEI, not NSEI/NBEI)
 DEFAULT_EFFICIENCY_METRICS = ['SEI', 'BEI']
 
+# =============================================================================
+# PDB Detail Cache (per-PDB-ID, cross-compound dedup) -- D-25, D-27
+# =============================================================================
+
+_pdb_details_cache: dict[str, dict] = {}
+
+# GraphQL query fetching ALL fields in one call (D-25, D-28)
+_PDB_DETAILS_GRAPHQL = """
+query($ids: [String!]!) {
+    entries(entry_ids: $ids) {
+        rcsb_id
+        struct { title }
+        rcsb_entry_info { resolution_combined }
+        exptl { method }
+        rcsb_primary_citation { pdbx_database_id_DOI }
+        polymer_entities {
+            rcsb_polymer_entity_container_identifiers {
+                reference_sequence_identifiers {
+                    database_name
+                    database_accession
+                }
+            }
+        }
+    }
+}
+"""
+
+GRAPHQL_URL = "https://data.rcsb.org/graphql"
+
 
 def calculate_efficiency_outlier_score(
     df: pd.DataFrame,
-    metrics: List[str] = None
+    metrics: list[str] = None
 ) -> pd.Series:
     """
     Component 1: Efficiency Outlier Score (40% raw weight).
@@ -222,10 +260,339 @@ def calculate_interference_score(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def calculate_imp_score(
+# =============================================================================
+# Async PDB dedup helpers (D-25, D-27, D-28)
+# =============================================================================
+
+
+async def _batch_fetch_pdb_details(
+    client: httpx.AsyncClient,
+    pdb_ids: list[str],
+) -> dict[str, dict]:
+    """
+    Batch-fetch PDB structure details via GraphQL (D-28).
+
+    Fetches resolution, title, method, DOI, and UniProt IDs in a single query
+    for all provided PDB IDs.
+
+    Args:
+        client: httpx.AsyncClient instance
+        pdb_ids: List of PDB IDs to fetch details for
+
+    Returns:
+        Dict mapping PDB ID -> detail dict with keys:
+        pdb_id, title, resolution, doi, uniprot_ids, url, experimental_method
+    """
+    if not pdb_ids:
+        return {}
+
+    pdb_ids_normalized = [pid.upper() for pid in pdb_ids]
+
+    try:
+        response = await client.post(
+            GRAPHQL_URL,
+            json={"query": _PDB_DETAILS_GRAPHQL, "variables": {"ids": pdb_ids_normalized}},
+            timeout=60,
+        )
+
+        results: dict[str, dict] = {}
+
+        if response.status_code == 200:
+            data = response.json()
+            for entry in data.get("data", {}).get("entries", []) or []:
+                pid = entry.get("rcsb_id", "")
+                if not pid:
+                    continue
+
+                # Resolution
+                resolution = None
+                res_list = (entry.get("rcsb_entry_info") or {}).get("resolution_combined", [])
+                if res_list:
+                    resolution = float(res_list[0])
+
+                # Title
+                title = (entry.get("struct") or {}).get("title")
+
+                # Experimental method
+                experimental_method = None
+                exptl_list = entry.get("exptl") or []
+                if exptl_list:
+                    experimental_method = exptl_list[0].get("method")
+
+                # DOI
+                doi = (entry.get("rcsb_primary_citation") or {}).get("pdbx_database_id_DOI")
+
+                # UniProt IDs
+                uniprot_ids: list[str] = []
+                for polymer in entry.get("polymer_entities") or []:
+                    container = (polymer or {}).get("rcsb_polymer_entity_container_identifiers") or {}
+                    for ref in container.get("reference_sequence_identifiers") or []:
+                        if ref.get("database_name") == "UniProt":
+                            uid = ref.get("database_accession")
+                            if uid and uid not in uniprot_ids:
+                                uniprot_ids.append(uid)
+
+                results[pid] = {
+                    "pdb_id": pid,
+                    "title": title,
+                    "resolution": resolution,
+                    "doi": doi,
+                    "uniprot_ids": uniprot_ids,
+                    "url": f"https://www.rcsb.org/structure/{pid}",
+                    "experimental_method": experimental_method,
+                }
+
+            logger.info(f"PDB GraphQL details fetched: {len(results)}/{len(pdb_ids)}")
+        else:
+            logger.warning(f"PDB GraphQL details error: status={response.status_code}")
+
+        return results
+
+    except Exception as exc:
+        logger.error(f"PDB GraphQL details failed: {exc}")
+        return {}
+
+
+def _assemble_pdb_results(
+    pdb_ids: list[str],
+    cache: dict[str, dict],
+) -> dict:
+    """
+    Assemble PDB evidence results for a compound from cached PDB details.
+
+    Pure CPU function -- reads from cache, computes score.
+
+    Args:
+        pdb_ids: List of PDB IDs for this compound
+        cache: The _pdb_details_cache dict
+
+    Returns:
+        Dict with pdb_score, num_structures, quality counts, pdb_ids, resolutions
+    """
+    from backend.modules.pdb_client import classify_resolution_quality
+
+    resolutions: list = []
+    quality_classes: list[str] = []
+    quality_multipliers: list[float] = []
+
+    for pid in pdb_ids:
+        detail = cache.get(pid.upper(), {})
+        resolution = detail.get("resolution")
+        if resolution is not None:
+            resolutions.append(resolution)
+            quality_class, quality_mult = classify_resolution_quality(resolution)
+            quality_classes.append(quality_class)
+            quality_multipliers.append(quality_mult)
+        else:
+            resolutions.append(None)
+            quality_classes.append("N/A")
+            quality_multipliers.append(0.0)
+
+    num_high = sum(1 for q in quality_classes if q == "***")
+    num_medium = sum(1 for q in quality_classes if q == "**")
+    num_poor = sum(1 for q in quality_classes if q == "*")
+    num_with_resolution = num_high + num_medium + num_poor
+
+    if num_with_resolution == 0:
+        pdb_score = 0.0
+    else:
+        base_score = min(num_with_resolution / 5.0, 1.0)
+        quality_weighted = sum(quality_multipliers) / num_with_resolution
+        pdb_score = (base_score + quality_weighted) / 2.0
+
+    return {
+        "pdb_score": pdb_score,
+        "num_structures": len(pdb_ids),
+        "num_high_quality": num_high,
+        "num_medium_quality": num_medium,
+        "num_poor_quality": num_poor,
+        "pdb_ids": pdb_ids,
+        "resolutions": resolutions,
+    }
+
+
+async def _fetch_pdb_for_compound(client: httpx.AsyncClient, smiles: str) -> dict:
+    """
+    Fetch PDB evidence for a compound, using per-PDB-ID cache for dedup (D-27).
+
+    Flow:
+    1. search_similar_ligands(client, smiles) returns PDB IDs
+    2. Check _pdb_details_cache for each PDB ID
+    3. Batch-fetch uncached PDB IDs via GraphQL (D-28)
+    4. Store results in _pdb_details_cache
+    5. Assemble combined results from cache
+
+    Args:
+        client: httpx.AsyncClient instance
+        smiles: SMILES string of compound
+
+    Returns:
+        Dict with pdb_score, num_structures, quality counts, pdb_ids, resolutions
+    """
+    from backend.modules.pdb_client import search_similar_ligands
+
+    # Step 1: Get PDB IDs for this compound's SMILES
+    pdb_ids = await search_similar_ligands(client, smiles, similarity_threshold=0.9)
+    if not pdb_ids:
+        return {
+            "pdb_score": 0.0,
+            "num_structures": 0,
+            "num_high_quality": 0,
+            "num_medium_quality": 0,
+            "num_poor_quality": 0,
+            "pdb_ids": [],
+            "resolutions": [],
+        }
+
+    # Step 2: Identify uncached PDB IDs
+    uncached_ids = [pid for pid in pdb_ids if pid.upper() not in _pdb_details_cache]
+
+    # Step 3: Batch-fetch uncached PDB details via GraphQL (D-28)
+    if uncached_ids:
+        details = await _batch_fetch_pdb_details(client, uncached_ids)
+        for pdb_id, detail in details.items():
+            _pdb_details_cache[pdb_id] = detail
+
+        # For any IDs that GraphQL didn't return, cache an empty entry
+        for pid in uncached_ids:
+            pid_upper = pid.upper()
+            if pid_upper not in _pdb_details_cache:
+                _pdb_details_cache[pid_upper] = {
+                    "pdb_id": pid_upper,
+                    "title": None,
+                    "resolution": None,
+                    "doi": None,
+                    "uniprot_ids": [],
+                    "url": f"https://www.rcsb.org/structure/{pid_upper}",
+                    "experimental_method": None,
+                }
+
+    # Step 4: Assemble results from cache for all PDB IDs
+    return _assemble_pdb_results(pdb_ids, _pdb_details_cache)
+
+
+# =============================================================================
+# Async scoring functions (D-23, D-24)
+# =============================================================================
+
+
+async def calculate_pdb_evidence_score(
+    client: httpx.AsyncClient,
+    df: pd.DataFrame,
+    use_pdb: bool = False,
+    progress_callback: ProgressCallback | None = None
+) -> pd.DataFrame:
+    """
+    Component 5: PDB Structural Evidence Score (5% raw weight).
+
+    Query RCSB PDB for experimental structures of the compound or close analogs.
+    Uses asyncio.gather with Semaphore(5) for concurrent PDB queries (D-24).
+    Per-PDB-ID cache provides cross-compound dedup (D-27).
+
+    Args:
+        client: httpx.AsyncClient instance for PDB API calls
+        df: DataFrame with SMILES column
+        use_pdb: If True, query PDB API; if False, return zeros
+        progress_callback: Optional callback for progress updates
+
+    Returns:
+        DataFrame with added PDB columns
+
+    Example:
+        Compound with PDB hit (exact ligand match): pdb_score = 1.0
+        Compound with no PDB data: pdb_score = 0.0
+    """
+    df = df.copy()
+
+    if not use_pdb:
+        logger.info("PDB Evidence Score disabled. Returning zeros.")
+        df['PDB_Score'] = 0.0
+        df['PDB_Num_Structures'] = 0
+        df['PDB_High_Quality'] = 0
+        df['PDB_Medium_Quality'] = 0
+        df['PDB_Poor_Quality'] = 0
+        df['PDB_IDs'] = ""
+        df['PDB_Best_Resolution'] = np.nan
+        return df
+
+    logger.info(f"Querying RCSB PDB for {len(df)} compounds...")
+
+    unique_smiles = df['SMILES'].dropna().unique()
+
+    if progress_callback:
+        progress_callback(0.0, f"Querying PDB for {len(unique_smiles)} unique compound(s)...")
+
+    # Async PDB queries using asyncio.gather with Semaphore(5) (D-24)
+    sem = asyncio.Semaphore(5)
+    completed_count = 0
+
+    async def _bounded_fetch(smiles: str) -> tuple:
+        nonlocal completed_count
+        async with sem:
+            try:
+                result = await _fetch_pdb_for_compound(client, smiles)
+            except Exception as exc:
+                logger.error(f"PDB query failed for {smiles[:50]}: {exc}")
+                result = {
+                    "pdb_score": 0.0,
+                    "num_structures": 0,
+                    "num_high_quality": 0,
+                    "num_medium_quality": 0,
+                    "num_poor_quality": 0,
+                    "pdb_ids": [],
+                    "resolutions": [],
+                }
+
+            completed_count += 1
+            if progress_callback:
+                progress = completed_count / len(unique_smiles)
+                progress_callback(
+                    progress,
+                    f"Processed {completed_count}/{len(unique_smiles)} compounds "
+                    f"({result['num_structures']} structures found)"
+                )
+            return smiles, result
+
+    tasks = [_bounded_fetch(s) for s in unique_smiles]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Process results
+    pdb_results: dict[str, dict] = {}
+    for item in results:
+        if isinstance(item, Exception):
+            logger.error(f"PDB gather exception: {item}")
+            continue
+        smiles, result = item
+        pdb_results[smiles] = result
+
+    if progress_callback:
+        progress_callback(1.0, "PDB query complete")
+
+    df['PDB_Score'] = df['SMILES'].map(lambda s: pdb_results.get(s, {}).get('pdb_score', 0.0))
+    df['PDB_Num_Structures'] = df['SMILES'].map(lambda s: pdb_results.get(s, {}).get('num_structures', 0))
+    df['PDB_High_Quality'] = df['SMILES'].map(lambda s: pdb_results.get(s, {}).get('num_high_quality', 0))
+    df['PDB_Medium_Quality'] = df['SMILES'].map(lambda s: pdb_results.get(s, {}).get('num_medium_quality', 0))
+    df['PDB_Poor_Quality'] = df['SMILES'].map(lambda s: pdb_results.get(s, {}).get('num_poor_quality', 0))
+
+    df['PDB_IDs'] = df['SMILES'].map(
+        lambda s: ",".join(pdb_results.get(s, {}).get('pdb_ids', []))
+    )
+
+    df['PDB_Best_Resolution'] = df['SMILES'].map(
+        lambda s: min([r for r in pdb_results.get(s, {}).get('resolutions', []) if r is not None], default=np.nan)
+    )
+
+    total_structures = sum([result['num_structures'] for result in pdb_results.values()])
+    logger.info(f"PDB query complete. Found {total_structures} total structures across {len(unique_smiles)} unique compounds.")
+
+    return df
+
+
+async def calculate_imp_score(
+    client: httpx.AsyncClient,
     df: pd.DataFrame,
     use_pdb: bool = True,
-    progress_callback: Optional[ProgressCallback] = None
+    progress_callback: ProgressCallback | None = None
 ) -> pd.DataFrame:
     """
     Calculate IMP score using all 5 components.
@@ -242,6 +609,7 @@ def calculate_imp_score(
     When use_pdb=False, PDB_Score = 0 (max possible = 95% before QED).
 
     Args:
+        client: httpx.AsyncClient instance for PDB API calls
         df: DataFrame with efficiency metrics, plane geometry, SMILES, and
             optionally interference flag columns
         use_pdb: If True, query PDB for structural evidence
@@ -268,17 +636,19 @@ def calculate_imp_score(
     if missing_columns:
         raise ValueError(f"Missing required columns: {missing_columns}")
 
-    # Ensure numeric dtypes — upstream columns may be object dtype
+    # Ensure numeric dtypes -- upstream columns may be object dtype
     numeric_cols = [c for c in required_columns if c != 'SMILES']
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # Calculate component scores
+    # Calculate component scores (sync -- pure math, sub-second)
     df['Efficiency_Score'] = calculate_efficiency_outlier_score(df)
     df['Angle_Score'] = calculate_angle_score(df['Angle_SEI_BEI'])
     df['Distance_Score'] = calculate_distance_to_best_score(df)
     df = calculate_interference_score(df)
-    df = calculate_pdb_evidence_score(df, use_pdb=use_pdb, progress_callback=progress_callback)
+
+    # PDB evidence score (async -- network I/O)
+    df = await calculate_pdb_evidence_score(client, df, use_pdb=use_pdb, progress_callback=progress_callback)
 
     # Calculate base score (direct weights, no normalization)
     df['IMP_Base_Score'] = (
@@ -359,231 +729,24 @@ def calculate_imp_score_phase1(  # pragma: no cover
     return df
 
 
-def calculate_pdb_evidence_score(
-    df: pd.DataFrame,
-    use_pdb: bool = False,
-    progress_callback: Optional[ProgressCallback] = None
-) -> pd.DataFrame:
-    """
-    Component 4: PDB Structural Evidence Score (5% raw weight).
-
-    Query RCSB PDB for experimental structures of the compound or close analogs.
-
-    Args:
-        df: DataFrame with SMILES column
-        use_pdb: If True, query PDB API; if False, return zeros
-        progress_callback: Optional callback for progress updates
-
-    Returns:
-        DataFrame with added PDB columns
-
-    Example:
-        Compound with PDB hit (exact ligand match): pdb_score = 1.0
-        Compound with no PDB data: pdb_score = 0.0
-    """
-    df = df.copy()
-
-    if not use_pdb:
-        logger.info("PDB Evidence Score disabled. Returning zeros.")
-        df['PDB_Score'] = 0.0
-        df['PDB_Num_Structures'] = 0
-        df['PDB_High_Quality'] = 0
-        df['PDB_Medium_Quality'] = 0
-        df['PDB_Poor_Quality'] = 0
-        df['PDB_IDs'] = ""
-        df['PDB_Best_Resolution'] = np.nan
-        return df
-
-    # Import PDB client with clear error reporting
-    get_pdb_evidence_score = None
-    try:
-        # Try relative import first, then absolute
-        try:
-            from .pdb_client import get_pdb_evidence_score
-        except ImportError:
-            from backend.modules.pdb_client import get_pdb_evidence_score
-    except ImportError as e:
-        logger.error(f"Failed to import pdb_client: {e}")
-        logger.error("PDB evidence scoring will be disabled - returning zeros")
-
-    if get_pdb_evidence_score is None:
-        df['PDB_Score'] = 0.0
-        df['PDB_Num_Structures'] = 0
-        df['PDB_High_Quality'] = 0
-        df['PDB_Medium_Quality'] = 0
-        df['PDB_Poor_Quality'] = 0
-        df['PDB_IDs'] = ""
-        df['PDB_Best_Resolution'] = np.nan
-        return df
-
-    logger.info(f"Querying RCSB PDB for {len(df)} compounds...")
-
-    unique_smiles = df['SMILES'].dropna().unique()
-
-    if progress_callback:
-        progress_callback(0.0, f"Querying PDB for {len(unique_smiles)} unique compound(s)...")
-
-    # Parallel PDB queries using ThreadPoolExecutor
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    import threading
-
-    pdb_results = {}
-    completed_count = [0]  # Use list for mutable counter in closure
-    lock = threading.Lock()
-
-    def fetch_pdb_for_smiles(smiles: str, max_retries: int = 2) -> tuple:
-        """Fetch PDB evidence for a single SMILES string with retry logic.
-
-        Handles transient PDB API failures (timeouts, connection errors).
-        """
-        import time
-        smiles_preview = smiles[:50] + "..." if len(smiles) > 50 else smiles
-
-        last_error = None
-        for attempt in range(max_retries):
-            try:
-                result = get_pdb_evidence_score(smiles, similarity_threshold=0.9)
-                return smiles, result
-            except Exception as e:
-                last_error = e
-                error_str = str(e).lower()
-                # Check for transient errors that are worth retrying
-                is_transient = any(x in error_str for x in [
-                    'timeout', 'connection', 'temporary', '503', '502', '504'
-                ])
-
-                if attempt < max_retries - 1:
-                    if is_transient:
-                        logger.warning(f"PDB query transient error for {smiles_preview} (attempt {attempt + 1}), retrying...")
-                    else:
-                        logger.warning(f"PDB query attempt {attempt + 1} failed for {smiles_preview}: {e}")
-                    time.sleep(0.5 * (attempt + 1))
-                else:
-                    logger.error(f"PDB query failed for {smiles_preview} after {max_retries} attempts: {last_error}")
-
-        # Return empty result on failure
-        return smiles, {
-            'pdb_score': 0.0,
-            'num_structures': 0,
-            'num_high_quality': 0,
-            'num_medium_quality': 0,
-            'num_poor_quality': 0,
-            'pdb_ids': [],
-            'resolutions': []
-        }
-
-    # Use 5 parallel workers (balance between speed and API rate limits)
-    max_workers = min(5, len(unique_smiles)) if len(unique_smiles) > 0 else 1
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(fetch_pdb_for_smiles, smiles): smiles
-            for smiles in unique_smiles
-        }
-
-        for future in as_completed(futures):
-            smiles, result = future.result()
-            pdb_results[smiles] = result
-
-            with lock:
-                completed_count[0] += 1
-                if progress_callback:
-                    progress = completed_count[0] / len(unique_smiles)
-                    progress_callback(
-                        progress,
-                        f"Processed {completed_count[0]}/{len(unique_smiles)} compounds "
-                        f"({result['num_structures']} structures found)"
-                    )
-
-    if progress_callback:
-        progress_callback(1.0, "PDB query complete")
-
-    df['PDB_Score'] = df['SMILES'].map(lambda s: pdb_results.get(s, {}).get('pdb_score', 0.0))
-    df['PDB_Num_Structures'] = df['SMILES'].map(lambda s: pdb_results.get(s, {}).get('num_structures', 0))
-    df['PDB_High_Quality'] = df['SMILES'].map(lambda s: pdb_results.get(s, {}).get('num_high_quality', 0))
-    df['PDB_Medium_Quality'] = df['SMILES'].map(lambda s: pdb_results.get(s, {}).get('num_medium_quality', 0))
-    df['PDB_Poor_Quality'] = df['SMILES'].map(lambda s: pdb_results.get(s, {}).get('num_poor_quality', 0))
-
-    df['PDB_IDs'] = df['SMILES'].map(
-        lambda s: ",".join(pdb_results.get(s, {}).get('pdb_ids', []))
-    )
-
-    df['PDB_Best_Resolution'] = df['SMILES'].map(
-        lambda s: min([r for r in pdb_results.get(s, {}).get('resolutions', []) if r is not None], default=np.nan)
-    )
-
-    total_structures = sum([result['num_structures'] for result in pdb_results.values()])
-    logger.info(f"PDB query complete. Found {total_structures} total structures across {len(unique_smiles)} unique compounds.")
-
-    return df
-
-
 def calculate_imp_score_phase2(  # pragma: no cover
     df: pd.DataFrame,
     use_pdb: bool = True,
-    progress_callback: Optional[ProgressCallback] = None
+    progress_callback: ProgressCallback | None = None
 ) -> pd.DataFrame:
     """
     Deprecated: Use calculate_imp_score() instead.
 
-    Calculate IMP score using Phase 2 components (1-4, no interference).
-
-    Phase 2 weights (raw -> normalized):
-    - Efficiency: 45% -> 52.94%
-    - Angle: 15% -> 17.65%
-    - Distance: 20% -> 23.53%
-    - PDB: 5% -> 5.88%
-
-    QED Multiplier: 0.75 + 0.25 * QED
-
-    Args:
-        df: DataFrame with efficiency metrics, plane geometry, and SMILES
-        use_pdb: If True, query PDB for structural evidence
-        progress_callback: Optional callback for progress updates
-
-    Returns:
-        pd.DataFrame: Input DataFrame with added IMP score columns
+    Note: This function is deprecated and no longer functional since
+    calculate_pdb_evidence_score is now async. Use calculate_imp_score() instead.
     """
-    df = df.copy()
-
-    required_columns = ['SEI', 'BEI', 'NSEI', 'NBEI', 'Angle_SEI_BEI', 'Modulus_SEI_BEI', 'QED', 'SMILES']
-    missing_columns = [col for col in required_columns if col not in df.columns]
-    if missing_columns:
-        raise ValueError(f"Missing required columns: {missing_columns}")
-
-    df['Efficiency_Score'] = calculate_efficiency_outlier_score(df)
-    df['Angle_Score'] = calculate_angle_score(df['Angle_SEI_BEI'])
-    df['Distance_Score'] = calculate_distance_to_best_score(df)
-
-    df = calculate_pdb_evidence_score(df, use_pdb=use_pdb, progress_callback=progress_callback)
-
-    total_phase2_weight = WEIGHT_EFFICIENCY + WEIGHT_ANGLE + WEIGHT_DISTANCE + WEIGHT_PDB
-    w1 = WEIGHT_EFFICIENCY / total_phase2_weight
-    w2 = WEIGHT_ANGLE / total_phase2_weight
-    w3 = WEIGHT_DISTANCE / total_phase2_weight
-    w4 = WEIGHT_PDB / total_phase2_weight
-
-    df['IMP_Base_Score'] = (
-        w1 * df['Efficiency_Score'] +
-        w2 * df['Angle_Score'] +
-        w3 * df['Distance_Score'] +
-        w4 * df['PDB_Score']
+    raise NotImplementedError(
+        "calculate_imp_score_phase2 is deprecated. Use calculate_imp_score() instead. "
+        "PDB evidence scoring is now async."
     )
 
-    df['QED_Multiplier'] = QED_MULTIPLIER_FLOOR + QED_MULTIPLIER_SCALE * df['QED']
-    df['IMP_Final_Score'] = df['IMP_Base_Score'] * df['QED_Multiplier']
 
-    df['Efficiency_Contribution'] = w1 * df['Efficiency_Score'] * df['QED_Multiplier']
-    df['Angle_Contribution'] = w2 * df['Angle_Score'] * df['QED_Multiplier']
-    df['Distance_Contribution'] = w3 * df['Distance_Score'] * df['QED_Multiplier']
-    df['PDB_Contribution'] = w4 * df['PDB_Score'] * df['QED_Multiplier']
-
-    df['QED_Impact'] = df['IMP_Final_Score'] - df['IMP_Base_Score']
-
-    return df
-
-
-def interpret_imp_score(score: float) -> Dict[str, str]:
+def interpret_imp_score(score: float) -> dict[str, str]:
     """
     Interpret IMP score and provide classification + recommendation.
 
@@ -593,8 +756,8 @@ def interpret_imp_score(score: float) -> Dict[str, str]:
     Lower IMP scores indicate compounds more likely to be genuine leads.
 
     Score Interpretation (INVERSE relationship):
-    - High Score (0.9+) = High false positive risk → EXCLUDE/DEPRIORITIZE
-    - Low Score (<0.3) = Low false positive risk → PROCEED with confidence
+    - High Score (0.9+) = High false positive risk -> EXCLUDE/DEPRIORITIZE
+    - Low Score (<0.3) = Low false positive risk -> PROCEED with confidence
 
     Example:
         >>> interpret_imp_score(0.85)
@@ -614,35 +777,35 @@ def interpret_imp_score(score: float) -> Dict[str, str]:
     if 0.9 <= score <= 1.0:
         return {
             'classification': 'Exceptional IMP',
-            'interpretation': '⚠️ VERY HIGH false positive risk - likely assay artifact',
+            'interpretation': 'VERY HIGH false positive risk - likely assay artifact',
             'action': 'DEPRIORITIZE - Do not pursue unless validated with orthogonal assays',
             'priority': 1  # Priority 1 = Highest concern (to exclude)
         }
     elif 0.7 <= score < 0.9:
         return {
             'classification': 'Strong IMP',
-            'interpretation': '⚠️ HIGH false positive risk - requires validation',
+            'interpretation': 'HIGH false positive risk - requires validation',
             'action': 'VALIDATE with orthogonal assays (SPR, ITC) before advancing',
             'priority': 2  # Priority 2 = High concern (validate before proceeding)
         }
     elif 0.5 <= score < 0.7:
         return {
             'classification': 'Moderate IMP',
-            'interpretation': '⚠️ MODERATE false positive risk',
+            'interpretation': 'MODERATE false positive risk',
             'action': 'Monitor carefully - gather additional evidence before investing resources',
             'priority': 3  # Priority 3 = Moderate concern
         }
     elif 0.3 <= score < 0.5:
         return {
             'classification': 'Weak IMP',
-            'interpretation': '✓ LOW false positive risk - more likely genuine',
+            'interpretation': 'LOW false positive risk - more likely genuine',
             'action': 'PROCEED with standard due diligence',
             'priority': 4  # Priority 4 = Low concern (proceed normally)
         }
     else:
         return {
             'classification': 'Not IMP',
-            'interpretation': '✓ LOWEST false positive risk - likely genuine activity',
+            'interpretation': 'LOWEST false positive risk - likely genuine activity',
             'action': 'PROCEED with confidence - prioritize for development',
             'priority': None  # No concern - best candidates
         }
@@ -778,7 +941,7 @@ def _build_component_scores(row: pd.Series) -> dict:
             'value': row.get('Angle_Score'),
             'weight': f'{WEIGHT_ANGLE * 100:.0f}%',
             'contribution': row.get('Angle_Contribution'),
-            'description': 'Proximity to optimal 45° development angle'
+            'description': 'Proximity to optimal 45 degree development angle'
         },
         'interference': {
             'value': row.get('Interference_Score'),
@@ -814,12 +977,12 @@ def get_imp_score_breakdown(row: pd.Series) -> dict:
         'efficiency_metrics': {
             'SEI': {
                 'value': row.get('SEI'),
-                'description': 'Surface Efficiency Index (pActivity / PSA×100)',
+                'description': 'Surface Efficiency Index (pActivity / PSA*100)',
                 'used_in_score': True
             },
             'BEI': {
                 'value': row.get('BEI'),
-                'description': 'Binding Efficiency Index (pActivity / MW×1000)',
+                'description': 'Binding Efficiency Index (pActivity / MW*1000)',
                 'used_in_score': True
             },
             'NSEI': {
@@ -840,14 +1003,14 @@ def get_imp_score_breakdown(row: pd.Series) -> dict:
                     'The modulus measures the distance of the combined efficiency vector '
                     '(SEI, BEI) from the origin on the efficiency plane. It represents the '
                     'overall efficiency magnitude of a compound. While derived from SEI and BEI, '
-                    'the modulus is independent of the development angle—the angle only defines '
+                    'the modulus is independent of the development angle--the angle only defines '
                     "the vector's direction, not its magnitude."
                 )
             },
             'angle': {
                 'value': row.get('Angle_SEI_BEI'),
                 'optimal': 45.0,
-                'description': 'Development trajectory angle. 45° is optimal (balanced). <30° = too hydrophobic, >60° = too polar.'
+                'description': 'Development trajectory angle. 45 degrees is optimal (balanced). <30 = too hydrophobic, >60 = too polar.'
             },
         },
         'component_scores': _build_component_scores(row),
@@ -855,7 +1018,7 @@ def get_imp_score_breakdown(row: pd.Series) -> dict:
             'base_score': row.get('IMP_Base_Score'),
             'qed': row.get('QED'),
             'qed_multiplier': row.get('QED_Multiplier'),
-            'qed_formula': '0.75 + 0.25 × QED',
+            'qed_formula': '0.75 + 0.25 * QED',
             'qed_impact': row.get('QED_Impact'),
             'final_score': row.get('IMP_Final_Score'),
             'classification': row.get('IMP_Classification'),
@@ -872,11 +1035,12 @@ def get_imp_score_breakdown(row: pd.Series) -> dict:
     }
 
 
-def create_detailed_pdb_summary(df: pd.DataFrame, progress_callback: Optional[ProgressCallback] = None) -> pd.DataFrame:
+def create_detailed_pdb_summary(df: pd.DataFrame, progress_callback: ProgressCallback | None = None) -> pd.DataFrame:
     """
     Create detailed PDB summary with Title, Resolution, Quality, Experimental Method, UniProt IDs.
 
-    This fetches additional details from RCSB PDB API for each unique PDB ID found in the data.
+    This function is pure CPU -- reads from _pdb_details_cache and DataFrame columns
+    populated by calculate_pdb_evidence_score (D-26). Zero network calls.
 
     Args:
         df: DataFrame with PDB_IDs column (comma-separated PDB IDs per compound)
@@ -890,15 +1054,7 @@ def create_detailed_pdb_summary(df: pd.DataFrame, progress_callback: Optional[Pr
         logger.warning("PDB_IDs column not found in dataframe. Cannot create detailed PDB summary.")
         return pd.DataFrame()
 
-    try:
-        # Try relative import first, then absolute
-        try:
-            from .pdb_client import get_structure_details, classify_resolution_quality
-        except ImportError:
-            from backend.modules.pdb_client import get_structure_details, classify_resolution_quality
-    except ImportError:
-        logger.error("PDB client module not found. Cannot create detailed PDB summary.")
-        return pd.DataFrame()
+    from backend.modules.pdb_client import classify_resolution_quality
 
     # Collect all unique PDB IDs with their associated compounds (vectorized)
     valid_mask = df['PDB_IDs'].notna() & (df['PDB_IDs'].astype(str).str.strip() != '')
@@ -925,61 +1081,44 @@ def create_detailed_pdb_summary(df: pd.DataFrame, progress_callback: Optional[Pr
 
     unique_pdb_ids = list(pdb_compound_map.keys())
 
-    logger.info(f"Fetching detailed information for {len(unique_pdb_ids)} unique PDB structures...")
+    logger.info(f"Building detailed summary for {len(unique_pdb_ids)} unique PDB structures...")
 
     if progress_callback:
-        progress_callback(0.0, f"Fetching details for {len(unique_pdb_ids)} PDB structures...")
+        progress_callback(0.0, f"Processing details for {len(unique_pdb_ids)} PDB structures...")
 
     detailed_data = []
 
     for i, pdb_id in enumerate(unique_pdb_ids):
-        try:
-            # Fetch PDB details from API
-            pdb_info = get_structure_details(pdb_id)
+        # Read from _pdb_details_cache (populated by calculate_pdb_evidence_score)
+        pdb_info = _pdb_details_cache.get(pdb_id, {})
 
-            # Get resolution and quality
-            resolution = pdb_info.get('resolution')
-            if resolution is not None:
-                quality, _ = classify_resolution_quality(resolution)
-                resolution_str = f"{resolution:.2f}"
-            else:
-                quality = 'N/A'
-                resolution_str = 'N/A'
+        # Get resolution and quality
+        resolution = pdb_info.get('resolution')
+        if resolution is not None:
+            quality, _ = classify_resolution_quality(resolution)
+            resolution_str = f"{resolution:.2f}"
+        else:
+            quality = 'N/A'
+            resolution_str = 'N/A'
 
-            # Get associated compounds
-            compounds = pdb_compound_map.get(pdb_id, [])
-            chembl_ids = list(set([c[0] for c in compounds if c[0]]))
-            mol_names = list(set([c[1] for c in compounds if c[1]]))
+        # Get associated compounds
+        compounds = pdb_compound_map.get(pdb_id, [])
+        chembl_ids = list(set([c[0] for c in compounds if c[0]]))
+        mol_names = list(set([c[1] for c in compounds if c[1]]))
 
-            # Get UniProt IDs from API
-            api_uniprots = pdb_info.get('uniprot_ids', [])
+        # Get UniProt IDs from cache
+        api_uniprots = pdb_info.get('uniprot_ids', [])
 
-            detailed_data.append({
-                'PDB_ID': pdb_id,
-                'ChEMBL_ID': ', '.join(chembl_ids) if chembl_ids else 'N/A',
-                'Molecule_Name': ', '.join(mol_names) if mol_names else 'N/A',
-                'Title': pdb_info.get('title') or 'N/A',
-                'Resolution': resolution_str,
-                'Quality': quality,
-                'Experimental_Method': pdb_info.get('experimental_method') or 'N/A',
-                'UniProt_IDs': ', '.join(api_uniprots) if api_uniprots else 'N/A'
-            })
-
-        except Exception as e:
-            logger.warning(f"Error fetching details for {pdb_id}: {e}")
-            compounds = pdb_compound_map.get(pdb_id, [])
-            chembl_ids = list(set([c[0] for c in compounds if c[0]]))
-            mol_names = list(set([c[1] for c in compounds if c[1]]))
-            detailed_data.append({
-                'PDB_ID': pdb_id,
-                'ChEMBL_ID': ', '.join(chembl_ids) if chembl_ids else 'N/A',
-                'Molecule_Name': ', '.join(mol_names) if mol_names else 'N/A',
-                'Title': 'N/A',
-                'Resolution': 'N/A',
-                'Quality': 'N/A',
-                'Experimental_Method': 'N/A',
-                'UniProt_IDs': 'N/A'
-            })
+        detailed_data.append({
+            'PDB_ID': pdb_id,
+            'ChEMBL_ID': ', '.join(chembl_ids) if chembl_ids else 'N/A',
+            'Molecule_Name': ', '.join(mol_names) if mol_names else 'N/A',
+            'Title': pdb_info.get('title') or 'N/A',
+            'Resolution': resolution_str,
+            'Quality': quality,
+            'Experimental_Method': pdb_info.get('experimental_method') or 'N/A',
+            'UniProt_IDs': ', '.join(api_uniprots) if api_uniprots else 'N/A'
+        })
 
         if progress_callback and i % 10 == 0:
             progress = (i + 1) / len(unique_pdb_ids)

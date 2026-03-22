@@ -49,7 +49,6 @@ __all__ = [
     "ACTIVITY_TYPES",
     "CACHE_SIZE",
     "MAX_BATCH_SIZE",
-    "MAX_WORKERS",
     # Assay Interference Filter
     "InterferenceFlags",
     "calculate_interference_flags",
@@ -116,10 +115,12 @@ def __getattr__(name):  # pragma: no cover -- lazy import dispatcher, tested ind
         from backend.modules import imp_scoring
         return getattr(imp_scoring, name)
 
-    # Configuration
-    if name in ("ACTIVITY_TYPES", "CACHE_SIZE", "MAX_BATCH_SIZE", "MAX_WORKERS"):
-        from backend.modules import config
-        return getattr(config, name)
+    # Configuration (consolidated into backend.config)
+    if name == "ACTIVITY_TYPES":
+        return ["IC50", "Ki", "Kd", "EC50"]
+    if name in ("CACHE_SIZE", "MAX_BATCH_SIZE"):
+        from backend.config import settings
+        return getattr(settings, name.upper())
 
     # Assay Interference Filter
     if name in ("InterferenceFlags", "calculate_interference_flags",

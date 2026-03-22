@@ -35,7 +35,7 @@ from frontend.ui.components.compound_card import (
     render_compound_list,
 )
 from frontend.ui.components.duplicate_dialog import (
-    render_duplicate_dialog,
+    duplicate_dialog,
     clear_duplicate_dialog_state,
 )
 from frontend.ui.components.plotly_legend import plotly_legend_monitor
@@ -70,7 +70,7 @@ __all__ = [
     "render_compound_grid",
     "render_compound_list",
     # Duplicate dialog
-    "render_duplicate_dialog",
+    "duplicate_dialog",
     "clear_duplicate_dialog_state",
     # Plotly legend stats
     "plotly_legend_monitor",

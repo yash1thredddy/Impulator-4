@@ -13,8 +13,16 @@ from frontend.services import get_api_client
 from frontend.config.settings import config
 from frontend.utils import SessionState, InputValidator, sanitize_compound_name
 from frontend.ui.components.sidebar import start_polling
-from frontend.ui.components.duplicate_dialog import render_duplicate_dialog, clear_duplicate_dialog_state
-from frontend.ui.components.availability_dialog import render_availability_dialog, clear_availability_state
+from frontend.ui.components.duplicate_dialog import (
+    duplicate_dialog,
+    clear_duplicate_dialog_state,
+    DUPLICATE_RESULT_KEY,
+)
+from frontend.ui.components.availability_dialog import (
+    availability_dialog,
+    clear_availability_state,
+    AVAILABILITY_RESULT_KEY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,37 +30,40 @@ logger = logging.getLogger(__name__)
 def render_job_form() -> Optional[str]:
     """Render the job submission form.
 
+    Uses @st.dialog for duplicate/availability modals (session_state communication),
+    st.pills for activity type selection, and st.form for name/author/submit grouping.
+
     Returns:
         Optional[str]: Job ID if submitted successfully, None otherwise
     """
-    # Check if we have a pending success from duplicate resolution
-    # Just return the job_id - analyze.py will handle the success display
+    # --- Consume pending dialog results (written by @st.dialog via session_state) ---
+
+    # Check for pending success from duplicate resolution
     if st.session_state.get('duplicate_resolution_success'):
         success_info = st.session_state.pop('duplicate_resolution_success')
         return success_info['job_id']
 
-    # Check if we need to show the duplicate dialog
-    if st.session_state.get('show_duplicate_dialog'):
-        duplicate_info = st.session_state.get('pending_duplicate_info', {})
-        action, new_name = render_duplicate_dialog(duplicate_info)
+    # Check for pending duplicate dialog result
+    if DUPLICATE_RESULT_KEY in st.session_state:
+        result = st.session_state.pop(DUPLICATE_RESULT_KEY)
+        action = result.get("action")
+        new_name = result.get("new_name")
 
         if action == "cancel":
-            # User cancelled - clear state and return to form
             clear_duplicate_dialog_state()
             st.rerun()
             return None
         elif action is not None:
-            # User made a choice - resolve the duplicate
             return _resolve_duplicate_action(action, new_name)
 
-        # Dialog still showing, don't render the form below it
-        return None
-
-    # Check if we need to show the availability dialog
-    if st.session_state.get('show_availability_dialog'):
-        avail_info = st.session_state.get('pending_availability_info', {})
-        avail_name = st.session_state.get('availability_compound_name', 'Unknown')
-        action, threshold, existing, dup_action, new_name = render_availability_dialog(avail_info, avail_name)
+    # Check for pending availability dialog result
+    if AVAILABILITY_RESULT_KEY in st.session_state:
+        result = st.session_state.pop(AVAILABILITY_RESULT_KEY)
+        action = result.get("action")
+        threshold = result.get("threshold")
+        existing = result.get("existing")
+        dup_action = result.get("duplicate_action")
+        new_name = result.get("new_name")
 
         if action == "cancel":
             clear_availability_state()
@@ -67,7 +78,6 @@ def render_job_form() -> Optional[str]:
             st.rerun()
             return None
         elif action == "submit" and threshold:
-            # Submit at the chosen threshold
             smiles = st.session_state.get('availability_smiles', '')
             compound_name = st.session_state.get('availability_compound_name', '')
             author_name = st.session_state.get('availability_author_name', '')
@@ -76,8 +86,6 @@ def render_job_form() -> Optional[str]:
             clear_availability_state()
 
             if existing and dup_action:
-                # Existing match with a chosen action — call resolve_duplicate
-                # directly to avoid the double-dialog (submit_job re-detects).
                 return _resolve_from_availability(
                     existing_entry_id=existing.get('entry_id'),
                     action=dup_action,
@@ -89,7 +97,6 @@ def render_job_form() -> Optional[str]:
                     author_name=author_name,
                 )
             else:
-                # No existing match — normal submission
                 return _submit_with_availability(
                     compound_name=compound_name,
                     smiles=smiles,
@@ -98,24 +105,8 @@ def render_job_form() -> Optional[str]:
                     author_name=author_name,
                 )
 
-        # Dialog still showing
-        return None
-
+    # --- Structure input OUTSIDE form (reactive validation) ---
     st.subheader("Compound Information")
-
-    # Compound name input
-    compound_name = st.text_input(
-        "Compound Name",
-        placeholder="e.g., Aspirin",
-        help="Name to identify this compound in results"
-    )
-
-    # Author name input
-    author_name = st.text_input(
-        "Author Name",
-        placeholder="e.g., Dr. Jane Smith",
-        help="Your name (required for attribution in reports)"
-    )
 
     # Input type selection
     input_type = st.radio(
@@ -148,55 +139,68 @@ def render_job_form() -> Optional[str]:
             help="27-character International Chemical Identifier Key"
         )
 
-    # Configuration section
+    # Inline validation feedback for structure input
+    if structure_input and structure_input.strip():
+        if input_type == "SMILES":
+            val_result = InputValidator.validate_smiles(structure_input)
+        elif input_type == "InChI":
+            val_result = InputValidator.validate_inchi(structure_input)
+        else:
+            val_result = InputValidator.validate_inchi_key(structure_input)
+        if not val_result.is_valid:
+            st.error(f"Invalid {input_type}: {val_result.errors[0]}")
+
+    # --- Configuration section ---
     st.subheader("Analysis Configuration")
 
-    col1, col2 = st.columns(2)
+    similarity_threshold = st.slider(
+        "Similarity Threshold (%)",
+        min_value=40,
+        max_value=100,
+        value=config.DEFAULT_SIMILARITY_THRESHOLD,
+        help="Minimum similarity for ChEMBL compound search"
+    )
 
-    with col1:
-        similarity_threshold = st.slider(
-            "Similarity Threshold (%)",
-            min_value=40,
-            max_value=100,
-            value=config.DEFAULT_SIMILARITY_THRESHOLD,
-            help="Minimum similarity for ChEMBL compound search"
+    # Activity pills OUTSIDE form (immediate visual feedback)
+    selected_activities = st.pills(
+        "Activity Types",
+        options=list(config.DEFAULT_ACTIVITY_TYPES),
+        selection_mode="multi",
+        default=list(config.DEFAULT_ACTIVITY_TYPES),
+        key="single_activity_pills",
+    )
+    if not selected_activities:
+        st.warning("Select at least one activity type")
+
+    # --- Form for name fields + submit (batched submission) ---
+    with st.form("job_submit_form"):
+        compound_name = st.text_input(
+            "Compound Name",
+            placeholder="e.g., Aspirin",
+            help="Name to identify this compound in results"
         )
 
-    with col2:
-        st.markdown("**Activity Types**")
-        selected_activities = render_activity_checkboxes()
+        author_name = st.text_input(
+            "Author Name",
+            placeholder="e.g., Dr. Jane Smith",
+            help="Your name (required for attribution in reports)"
+        )
 
-    # Validation feedback
-    if compound_name and structure_input:
-        if input_type == "SMILES":
-            result = InputValidator.validate_smiles(structure_input)
-        elif input_type == "InChI":
-            result = InputValidator.validate_inchi(structure_input)
-        else:  # InChIKey
-            result = InputValidator.validate_inchi_key(structure_input)
+        is_processing = SessionState.is_processing()
+        submitted = st.form_submit_button(
+            "Submit Analysis Job",
+            type="primary",
+            disabled=is_processing,
+        )
 
-        if not result.is_valid:
-            st.error(f"Invalid {input_type}: {result.errors[0]}")
-
-    # Submit button
-    st.divider()
-
-    # Check if we're already processing
-    is_processing = SessionState.is_processing()
-
-    if st.button(
-        "Submit Analysis Job",
-        type="primary",
-        disabled=is_processing,
-        width='stretch'
-    ):
+    if submitted:
         return _submit_job(
             compound_name=compound_name,
             author_name=author_name,
             structure_input=structure_input,
             input_type=input_type.lower(),
             similarity_threshold=similarity_threshold,
-            activity_types=selected_activities
+            activity_types=selected_activities,
         )
 
     if is_processing:
@@ -315,16 +319,15 @@ def _submit_job(
                 st.error("No similar compounds found in ChEMBL at any threshold (40%-100%). Job not submitted.")
                 return None
 
-            # Show availability dialog — data exists at lower thresholds
-            st.session_state['show_availability_dialog'] = True
-            st.session_state['pending_availability_info'] = result
+            # Store params for availability resolution, then open dialog
             st.session_state['availability_smiles'] = smiles
             st.session_state['availability_compound_name'] = sanitized_name
             st.session_state['availability_author_name'] = author_name.strip()
             st.session_state['availability_activity_types'] = activity_types
             st.session_state['availability_requested_threshold'] = similarity_threshold
             st.session_state['availability_activity_types_str'] = ",".join(sorted(activity_types))
-            st.rerun()
+            # Open @st.dialog modal directly (result comes back via session_state)
+            availability_dialog(result, sanitized_name)
             return None
         # available=True → fall through to normal submit
     elif avail.get("error"):
@@ -355,20 +358,21 @@ def _submit_job(
             start_polling()
             return response.job_id
         elif response.is_duplicate:
-            # Duplicate detected - store info and show dialog
-            # First clear any previous success state to prevent it showing behind dialog
+            # Duplicate detected - store params and open @st.dialog modal
             SessionState.set('just_submitted_job', False)
             SessionState.set('last_submitted_job_id', None)
 
-            st.session_state['show_duplicate_dialog'] = True
             st.session_state['pending_duplicate_info'] = response.duplicate_info
-            # Store job params for later resolution
             st.session_state['duplicate_smiles'] = smiles
             st.session_state['duplicate_compound_name'] = sanitized_name
             st.session_state['duplicate_author_name'] = author_name.strip()
             st.session_state['duplicate_similarity_threshold'] = similarity_threshold
             st.session_state['duplicate_activity_types'] = activity_types
-            st.rerun()
+            # Clear stale radio state before opening (Pitfall 8)
+            for _k in ('duplicate_action_exact', 'duplicate_action_structure', 'duplicate_new_name'):
+                st.session_state.pop(_k, None)
+            # Open @st.dialog modal directly (result comes back via session_state)
+            duplicate_dialog(response.duplicate_info)
             return None
         else:
             st.error(f"Failed to submit job: {response.error}")
@@ -548,18 +552,19 @@ def _submit_with_availability(
             start_polling()
             return response.job_id
         elif response.is_duplicate:
-            # Duplicate detected even after availability dialog — show duplicate dialog
+            # Duplicate detected even after availability dialog -- open @st.dialog
             SessionState.set('just_submitted_job', False)
             SessionState.set('last_submitted_job_id', None)
 
-            st.session_state['show_duplicate_dialog'] = True
             st.session_state['pending_duplicate_info'] = response.duplicate_info
             st.session_state['duplicate_smiles'] = smiles
             st.session_state['duplicate_compound_name'] = compound_name
             st.session_state['duplicate_author_name'] = author_name
             st.session_state['duplicate_similarity_threshold'] = similarity_threshold
             st.session_state['duplicate_activity_types'] = activity_types
-            st.rerun()
+            for _k in ('duplicate_action_exact', 'duplicate_action_structure', 'duplicate_new_name'):
+                st.session_state.pop(_k, None)
+            duplicate_dialog(response.duplicate_info)
             return None
         else:
             st.error(f"Failed to submit job: {response.error}")
@@ -1903,6 +1908,18 @@ def _submit_batch(
                         f"{len(skipped_internal_duplicates)} duplicates from the same uploaded file: "
                         f"{', '.join(skipped_internal_duplicates[:5])}"
                         f"{'...' if len(skipped_internal_duplicates) > 5 else ''}"
+                    )
+
+                # Show failed compounds if any
+                failed_compounds = result.get("failed", [])
+                if failed_compounds:
+                    failed_names = [
+                        f.get("compound_name", "unknown") for f in failed_compounds
+                    ]
+                    st.warning(
+                        f"Failed to submit {len(failed_compounds)} compound(s): "
+                        f"{', '.join(failed_names[:5])}"
+                        f"{'...' if len(failed_names) > 5 else ''}"
                     )
 
                 # Start polling for job updates

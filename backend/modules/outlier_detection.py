@@ -19,7 +19,6 @@ Method:
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
@@ -28,7 +27,7 @@ logger = logging.getLogger(__name__)
 def calculate_iqr_threshold(
     data: pd.Series,
     multiplier: float = 1.5
-) -> Tuple[float, float, float, float, float]:
+) -> tuple[float, float, float, float, float]:
     """
     Calculate IQR statistics and outlier threshold for a metric.
 
@@ -40,7 +39,7 @@ def calculate_iqr_threshold(
                    - 1.0 → ~15% outliers (more lenient)
 
     Returns:
-        Tuple[float, float, float, float, float]: (Q1, Q3, IQR, lower_threshold, upper_threshold)
+        tuple[float, float, float, float, float]: (Q1, Q3, IQR, lower_threshold, upper_threshold)
 
     Example:
         >>> q1, q3, iqr, lower, upper = calculate_iqr_threshold(df['SEI'])
@@ -100,7 +99,7 @@ def flag_outliers_single_metric(
         raise ValueError(f"Invalid direction: {direction}. Use 'upper', 'lower', or 'both'")
 
 
-def calculate_percentile_ranks(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+def calculate_percentile_ranks(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     """
     Calculate percentile ranks (0-100) for specified columns.
 
@@ -133,7 +132,7 @@ def calculate_percentile_ranks(df: pd.DataFrame, columns: List[str]) -> pd.DataF
 
 def detect_efficiency_outliers(
     df: pd.DataFrame,
-    metrics: List[str] = None,
+    metrics: list[str] = None,
     multiplier: float = 1.5
 ) -> pd.DataFrame:
     """
@@ -193,8 +192,8 @@ def detect_efficiency_outliers(
 
 def calculate_cohort_statistics(
     df: pd.DataFrame,
-    metrics: List[str] = None
-) -> Dict[str, Dict[str, float]]:
+    metrics: list[str] = None
+) -> dict[str, dict[str, float]]:
     """
     Calculate comprehensive statistics for each metric across the cohort.
 
@@ -205,7 +204,7 @@ def calculate_cohort_statistics(
         metrics: List of metrics to analyze (default: ['SEI', 'BEI', 'NSEI', 'NBEI'])
 
     Returns:
-        Dict[str, Dict[str, float]]: Nested dictionary with statistics
+        dict[str, dict[str, float]]: Nested dictionary with statistics
 
     Example:
         >>> stats = calculate_cohort_statistics(df)
@@ -258,7 +257,7 @@ def calculate_cohort_statistics(
     return statistics
 
 
-def get_outlier_summary(df: pd.DataFrame) -> Dict[str, any]:
+def get_outlier_summary(df: pd.DataFrame) -> dict[str, any]:
     """
     Generate summary statistics about outliers in the dataset.
 
@@ -304,7 +303,7 @@ def get_outlier_summary(df: pd.DataFrame) -> Dict[str, any]:
     }
 
 
-def calculate_z_scores(df: pd.DataFrame, metrics: List[str] = None) -> pd.DataFrame:
+def calculate_z_scores(df: pd.DataFrame, metrics: list[str] = None) -> pd.DataFrame:
     """
     Calculate Z-scores for efficiency metrics.
 

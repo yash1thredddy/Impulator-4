@@ -27,7 +27,7 @@ from backend.models.schemas import (
 
 def _seed_compound(session, name="TestCompound", smiles="CCO", **overrides):
     """Seed a compound into the database and return its entry_id."""
-    from backend.models.database import Compound
+    from backend.models.compound import Compound
 
     entry_id = str(uuid.uuid4())
     defaults = {
@@ -400,7 +400,7 @@ class TestDeleteCompound:
 
     def test_delete_creates_audit_record(self, test_engine, client):
         """Deletion creates a record in deleted_compounds table."""
-        from backend.models.database import DeletedCompound
+        from backend.models.deleted_compound import DeletedCompound
 
         Session = sessionmaker(bind=test_engine)
         session = Session()
@@ -421,7 +421,7 @@ class TestDeleteCompound:
 
     def test_delete_main_promotes_child(self, test_engine, client):
         """Deleting a main compound promotes oldest child to main."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
 
         Session = sessionmaker(bind=test_engine)
         session = Session()
@@ -448,7 +448,7 @@ class TestDeleteCompound:
 
     def test_delete_duplicate_does_not_promote(self, test_engine, client):
         """Deleting a duplicate doesn't affect parent or siblings."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
 
         Session = sessionmaker(bind=test_engine)
         session = Session()
@@ -526,7 +526,7 @@ class TestBatchDeleteCompounds:
 
     def test_batch_delete_creates_audit_records(self, test_engine, client):
         """Batch delete creates audit records for each deleted compound."""
-        from backend.models.database import DeletedCompound
+        from backend.models.deleted_compound import DeletedCompound
 
         Session = sessionmaker(bind=test_engine)
         session = Session()
@@ -563,7 +563,7 @@ class TestBatchDeleteCompounds:
 
     def test_batch_delete_promotes_children(self, test_engine, client):
         """Batch deleting a parent promotes children."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
 
         Session = sessionmaker(bind=test_engine)
         session = Session()

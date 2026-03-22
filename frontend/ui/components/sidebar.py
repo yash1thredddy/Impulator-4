@@ -13,9 +13,10 @@ import html as html_mod
 import logging
 from typing import Dict, Any
 
+import requests
 import streamlit as st
 
-from frontend.services import get_api_client, delete_from_cache, set_session_id
+from frontend.services import get_api_client, get_compounds_cached, delete_from_cache, set_session_id
 from frontend.utils import SessionState
 from frontend.config.settings import config
 
@@ -66,6 +67,7 @@ def render_sidebar() -> None:
         with col1:
             if st.button("Home", key="nav_home", width='stretch'):
                 SessionState.navigate_to_home()
+                st.query_params.clear()
                 st.rerun()
         with col2:
             if st.button("+ New", key="nav_analyze", width='stretch'):
@@ -141,8 +143,9 @@ def render_active_jobs_polling() -> None:
         if has_active:
             st.caption(f"Polling every {config.JOB_POLL_INTERVAL_SECONDS}s")
         else:
-            # All jobs completed - stop polling
+            # All jobs completed - stop polling and invalidate compound list cache
             stop_polling()
+            get_compounds_cached.clear()
             st.success("✅ All jobs completed!")
             if st.button("🔄 Refresh Home", key="refresh_home_completed", width='stretch'):
                 SessionState.navigate_to_home()
@@ -200,7 +203,7 @@ def _fetch_and_check_jobs():
         viewed_ids = _get_viewed_jobs()
         non_failed = [j for j in non_failed if j.get('id') not in viewed_ids]
 
-        has_active = any(j.get('status') in ('pending', 'processing') for j in non_failed)
+        has_active = any(j.get('status') in ('pending', 'processing', 'pending_upload') for j in non_failed)
         return non_failed, has_active, failed_jobs
     except Exception as e:
         logger.error(f"Failed to fetch active jobs: {e}")
@@ -266,6 +269,8 @@ def render_job_card(job: Dict[str, Any]) -> None:
             st.caption("Queued...")
         elif status == 'completed':
             st.caption("Ready to view")
+        elif status == 'pending_upload':
+            st.caption("Uploading results...")
         elif status == 'failed':
             error_msg = job.get('error_message', '')
             if error_msg:
@@ -285,7 +290,7 @@ def render_job_card(job: Dict[str, Any]) -> None:
                         "Retry at",
                         options,
                         key=f"cascade_select_{job_id}",
-                        label_visibility="collapsed",
+                        label_visibility="hidden",
                     )
                     # Extract threshold from selection
                     selected_idx = options.index(selected)
@@ -299,7 +304,7 @@ def render_job_card(job: Dict[str, Any]) -> None:
                     )
 
         # Action buttons - use callbacks to avoid rerun issues in fragment
-        if status in ('pending', 'processing'):
+        if status in ('pending', 'processing', 'pending_upload'):
             st.button(
                 "Cancel",
                 key=f"cancel_{job_id}",
@@ -312,6 +317,10 @@ def render_job_card(job: Dict[str, Any]) -> None:
             if st.button("View Results", key=f"view_{job_id}", type="primary", width='stretch'):
                 _mark_job_viewed(job_id)
                 SessionState.navigate_to_compound(compound_name, entry_id=entry_id, storage_path=storage_path)
+                # Deep linking: update URL on compound selection
+                if entry_id:
+                    st.query_params["compound_id"] = entry_id
+                    st.query_params["tab"] = "overview"
                 st.rerun()
         elif status == 'failed':
             st.button(
@@ -348,6 +357,7 @@ def get_status_emoji(status: str) -> str:
         'completed': '✅',
         'failed': '❌',
         'cancelled': '🚫',
+        'pending_upload': '📤',
     }.get(status, '❓')
 
 
@@ -507,15 +517,31 @@ def _exit_select_mode() -> None:
         del st.session_state[k]
 
 
-def render_backend_status() -> None:
-    """Render backend health status."""
-    client = get_api_client()
+@st.cache_data(ttl=10)
+def _cached_health_check() -> bool:
+    """Cached health check to avoid blocking every rerun.
 
+    TTL=10s means we check at most once every 10 seconds.
+    """
+    client = get_api_client()
+    return client.health_check()
+
+
+def render_backend_status() -> None:
+    """Render backend health status.
+
+    Uses cached health check (TTL=10s) to avoid blocking every rerun.
+    Distinguishes between backend unreachable and unexpected errors.
+    """
     try:
-        is_healthy = client.health_check()
+        is_healthy = _cached_health_check()
         if is_healthy:
             st.caption(" Backend connected")
         else:
             st.caption(" Backend unavailable")
-    except Exception:
-        st.caption(" Backend error")
+    except requests.exceptions.RequestException:
+        # Backend unreachable (network error, connection refused, timeout)
+        st.error("Backend unreachable")
+    except Exception as e:
+        logger.error(f"Health check error: {e}")
+        st.warning(f"Backend status error: {type(e).__name__}")

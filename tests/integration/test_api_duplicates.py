@@ -34,7 +34,7 @@ class TestDuplicateDetection:
 
     def test_submit_job_duplicate_exact_match(self, test_engine, client_with_db):
         """Test duplicate detection when exact match exists."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
         from backend.services.job_service import generate_inchikey, _inchikey_structure_key
 
         Session = sessionmaker(bind=test_engine)
@@ -51,7 +51,7 @@ class TestDuplicateDetection:
             inchikey=inchikey,
             inchikey_structure_key=_inchikey_structure_key(inchikey),
             similarity_threshold=90,
-            activity_types="EC50,IC50,Kd,Ki",
+            activity_types=["EC50", "IC50", "Kd", "Ki"],
         )
         session.add(existing_compound)
         session.commit()
@@ -77,7 +77,7 @@ class TestDuplicateDetection:
 
     def test_submit_job_duplicate_structure_only(self, test_engine, client_with_db):
         """Test duplicate detection when only structure matches (different name)."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
         from backend.services.job_service import generate_inchikey, _inchikey_structure_key
 
         Session = sessionmaker(bind=test_engine)
@@ -93,7 +93,7 @@ class TestDuplicateDetection:
             inchikey=inchikey,
             inchikey_structure_key=_inchikey_structure_key(inchikey),
             similarity_threshold=90,
-            activity_types="EC50,IC50,Kd,Ki",
+            activity_types=["EC50", "IC50", "Kd", "Ki"],
         )
         session.add(existing_compound)
         session.commit()
@@ -139,7 +139,7 @@ class TestResolveDuplicate:
 
     def test_resolve_duplicate_replace(self, test_engine, client_with_db):
         """Test replacing an existing compound."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
         from backend.services.job_service import generate_inchikey, _inchikey_structure_key
 
         Session = sessionmaker(bind=test_engine)
@@ -155,7 +155,7 @@ class TestResolveDuplicate:
             inchikey=inchikey,
             inchikey_structure_key=_inchikey_structure_key(inchikey),
             similarity_threshold=90,
-            activity_types="EC50,IC50,Kd,Ki",
+            activity_types=["EC50", "IC50", "Kd", "Ki"],
         )
         session.add(existing_compound)
         session.commit()
@@ -185,7 +185,7 @@ class TestResolveDuplicate:
         assert still_exists is not None, "Compound should not be deleted until job completes"
 
         # Verify the job stores replace_entry_id for deferred deletion
-        from backend.models.database import Job
+        from backend.models.job import Job
         import json
         job = check_session.query(Job).filter(Job.id == data["id"]).first()
         assert job is not None
@@ -195,7 +195,7 @@ class TestResolveDuplicate:
 
     def test_resolve_duplicate_as_duplicate(self, test_engine, client_with_db):
         """Test saving as a duplicate (keeping both) with different config."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
         from backend.services.job_service import generate_inchikey, _inchikey_structure_key
 
         Session = sessionmaker(bind=test_engine)
@@ -211,7 +211,7 @@ class TestResolveDuplicate:
             inchikey=inchikey,
             inchikey_structure_key=_inchikey_structure_key(inchikey),
             similarity_threshold=90,
-            activity_types="IC50,Ki",  # Different from default so config isn't "identical"
+            activity_types=["IC50", "Ki"],  # Different from default so config isn't "identical"
         )
         session.add(existing_compound)
         session.commit()
@@ -244,7 +244,7 @@ class TestResolveDuplicate:
 
     def test_resolve_duplicate_identical_config_blocked(self, test_engine, client_with_db):
         """Test that DUPLICATE action is blocked when config is identical."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
         from backend.services.job_service import generate_inchikey, _inchikey_structure_key
 
         Session = sessionmaker(bind=test_engine)
@@ -260,7 +260,7 @@ class TestResolveDuplicate:
             inchikey=inchikey,
             inchikey_structure_key=_inchikey_structure_key(inchikey),
             similarity_threshold=90,
-            activity_types="EC50,IC50,Kd,Ki",
+            activity_types=["EC50", "IC50", "Kd", "Ki"],
         )
         session.add(existing_compound)
         session.commit()
@@ -306,7 +306,7 @@ class TestCheckDuplicates:
 
     def test_check_duplicates_some_exist(self, test_engine, client_with_db):
         """Test checking duplicates when some exist."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
 
         Session = sessionmaker(bind=test_engine)
 
@@ -338,7 +338,7 @@ class TestCheckDuplicates:
 
     def test_check_duplicates_name_match_is_case_insensitive(self, test_engine, client_with_db):
         """Name-based duplicate check should match regardless of case."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
 
         Session = sessionmaker(bind=test_engine)
         session = Session()
@@ -358,7 +358,7 @@ class TestCheckDuplicates:
 
     def test_check_duplicates_structure_match_includes_config_context(self, test_engine, client_with_db):
         """Structure-based duplicate check should include config-aware match details."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
         from backend.services.job_service import generate_inchikey
 
         smiles = "CCO"
@@ -373,7 +373,7 @@ class TestCheckDuplicates:
             smiles=smiles,
             inchikey=inchikey,
             similarity_threshold=90,
-            activity_types="EC50,IC50,Kd,Ki",
+            activity_types=["EC50", "IC50", "Kd", "Ki"],
         ))
         session.commit()
         session.close()
@@ -395,7 +395,7 @@ class TestCheckDuplicates:
         assert match["match_type"] == "exact"
         assert match["config_match"] == "identical"
         assert match["existing_similarity_threshold"] == 90
-        assert match["existing_activity_types"] == "EC50,IC50,Kd,Ki"
+        assert match["existing_activity_types"] == ["EC50", "IC50", "Kd", "Ki"]
 
     def test_check_duplicates_detects_internal_structure_duplicates(self, client_with_db):
         """Duplicate check should detect duplicate rows within the submitted payload itself."""
@@ -449,7 +449,7 @@ class TestCheckDuplicates:
 
     def test_check_duplicates_supports_inchikey_only_payload(self, test_engine, client_with_db):
         """Structure duplicate detection should work when payload contains only InChIKey."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
         from backend.services.job_service import generate_inchikey
 
         smiles = "CC(=O)OC1=CC=CC=C1C(=O)O"  # Aspirin
@@ -464,7 +464,7 @@ class TestCheckDuplicates:
             smiles=smiles,
             inchikey=inchikey,
             similarity_threshold=90,
-            activity_types="EC50,IC50,Kd,Ki",
+            activity_types=["EC50", "IC50", "Kd", "Ki"],
         ))
         session.commit()
         session.close()

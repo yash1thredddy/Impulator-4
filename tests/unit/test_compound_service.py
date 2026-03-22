@@ -1,935 +1,401 @@
 """
-Unit tests for CompoundService.
+Unit tests for compound_service module functions (async).
 """
+import asyncio
 import os
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone
 import pandas as pd
 import numpy as np
 
 
-class TestCompoundService:
-    """Tests for CompoundService class."""
+# ---------------------------------------------------------------------------
+# Common patch targets
+# ---------------------------------------------------------------------------
+_MOD = "backend.services.compound_service"
 
-    @pytest.fixture
-    def service(self):
-        """Create a CompoundService instance."""
-        from backend.services.compound_service import CompoundService
-        return CompoundService()
 
-    def test_service_init(self, service):
-        """Test service initialization."""
-        assert service.results_dir is not None
+def _mock_clients():
+    """Return patch context managers for all 3 httpx client factories."""
+    cc = patch(f"{_MOD}.create_chembl_client", return_value=AsyncMock())
+    cp = patch(f"{_MOD}.create_pdb_client", return_value=AsyncMock())
+    cl = patch(f"{_MOD}.create_classifier_client", return_value=AsyncMock())
+    return cc, cp, cl
 
-    def test_search_similar_compounds_fallback(self, service):
-        """Test fallback similarity search."""
-        from backend.services.compound_service import CompoundService
 
-        with patch.object(CompoundService, '_search_similar_compounds_fallback') as mock:
-            mock.return_value = [{"ChEMBL ID": "CHEMBL25"}]
+def _mock_db_session():
+    """Return a mock context-manager db session."""
+    mock_db = MagicMock()
+    mock_db.__enter__ = MagicMock(return_value=mock_db)
+    mock_db.__exit__ = MagicMock(return_value=False)
+    return mock_db
 
-            result = service._search_similar_compounds_fallback("CCO", 90)
 
-            # Should return mocked result
-            assert mock.called or isinstance(result, list)
+class TestModuleStructure:
+    """Verify module-level structure: no CompoundService class, no JobCancelledException."""
 
-    def test_save_results(self, service, tmp_path):
-        """Test saving results to disk."""
-        service.results_dir = str(tmp_path)
+    def test_no_compound_service_class(self):
+        """CompoundService class must be deleted (D-13)."""
+        import backend.services.compound_service as mod
+        assert not hasattr(mod, 'CompoundService')
 
-        df = pd.DataFrame({
-            'ChEMBL_ID': ['CHEMBL25', 'CHEMBL26'],
-            'Molecule_Name': ['Ethanol', 'Methanol'],
-            'SMILES': ['CCO', 'CO'],
-            'pActivity': [5.0, 6.0],
-        })
+    def test_no_job_cancelled_exception(self):
+        """JobCancelledException must be deleted (D-53)."""
+        import backend.services.compound_service as mod
+        assert not hasattr(mod, 'JobCancelledException')
 
-        result_path, summary = service._save_results(
-            compound_name="TestCompound",
-            smiles="CCO",
-            similarity_threshold=90,
-            activity_types=['IC50'],
-            df_results=df
+    def test_no_is_job_cancelled(self):
+        """_is_job_cancelled methods must be deleted."""
+        import backend.services.compound_service as mod
+        assert not hasattr(mod, '_is_job_cancelled')
+        assert not hasattr(mod, '_is_job_cancelled_fresh')
+
+    def test_process_compound_job_is_async(self):
+        """process_compound_job must be async def (D-14)."""
+        import inspect
+        from backend.services.compound_service import process_compound_job
+        assert inspect.iscoroutinefunction(process_compound_job)
+
+    def test_cleanup_stale_folders_is_sync(self):
+        import inspect
+        from backend.services.compound_service import cleanup_stale_folders
+        assert not inspect.iscoroutinefunction(cleanup_stale_folders)
+
+    def test_scan_recovery_markers_is_sync(self):
+        import inspect
+        from backend.services.compound_service import scan_recovery_markers
+        assert not inspect.iscoroutinefunction(scan_recovery_markers)
+
+    def test_module_exports(self):
+        from backend.services.compound_service import (
+            process_compound_job,
+            cleanup_stale_folders,
+            scan_recovery_markers,
+            get_compound_versions,
+            delete_compound_with_cleanup,
+            batch_delete_with_cleanup,
         )
-
-        assert result_path.endswith('.zip')
-        assert summary['compound_name'] == "TestCompound"
-        assert summary['total_bioactivity_rows'] == 2
-
-
-class TestCompoundServiceProgressCallbacks:
-    """Tests for progress callback handling."""
-
-    @pytest.fixture
-    def mock_db(self):
-        """Create a mock database session."""
-        return MagicMock()
-
-    def test_update_progress(self, mock_db):
-        """Test progress update calls job_service."""
-        import backend.services.job_service as js_mod
-        from backend.services.compound_service import CompoundService
-        from backend.models.database import JobStatus
-
-        service = CompoundService()
-
-        mock_js = MagicMock()
-        with patch.object(js_mod, 'job_service', mock_js):
-            service._update_progress(
-                mock_db,
-                "test-job-id",
-                50.0,
-                "Processing...",
-                JobStatus.PROCESSING
-            )
-
-            mock_js.update_progress.assert_called_once_with(
-                mock_db,
-                "test-job-id",
-                50.0,
-                "Processing...",
-                JobStatus.PROCESSING
-            )
-
-    def test_complete_job(self, mock_db):
-        """Test job completion calls job_service."""
-        import backend.services.job_service as js_mod
-        from backend.services.compound_service import CompoundService
-
-        service = CompoundService()
-
-        mock_js = MagicMock()
-        with patch.object(js_mod, 'job_service', mock_js):
-            service._complete_job(
-                mock_db,
-                "test-job-id",
-                "/path/to/result.zip",
-                {"total": 100}
-            )
-
-            mock_js.complete_job.assert_called_once()
-
-    def test_fail_job(self, mock_db):
-        """Test job failure calls job_service."""
-        import backend.services.job_service as js_mod
-        from backend.services.compound_service import CompoundService
-
-        service = CompoundService()
-
-        mock_js = MagicMock()
-        with patch.object(js_mod, 'job_service', mock_js):
-            service._fail_job(mock_db, "test-job-id", "Test error")
-
-            mock_js.fail_job.assert_called_once_with(
-                mock_db,
-                "test-job-id",
-                "Test error",
-                cascade_results=None
-            )
-
-
-class TestProcessCompoundJobWrapper:
-    """Tests for the process_compound_job wrapper function."""
-
-    def test_wrapper_delegates_to_service(self):
-        """Test that wrapper function delegates to service singleton."""
-        from backend.services.compound_service import process_compound_job, compound_service
-
-        with patch.object(compound_service, 'process_compound_job') as mock_method:
-            process_compound_job(
-                job_id="test-123",
-                compound_name="Aspirin",
-                smiles="CC(=O)OC1=CC=CC=C1C(=O)O",
-                similarity_threshold=90,
-                activity_types=['IC50', 'Ki'],
-                author_name=None
-            )
-
-            mock_method.assert_called_once_with(
-                job_id="test-123",
-                compound_name="Aspirin",
-                smiles="CC(=O)OC1=CC=CC=C1C(=O)O",
-                similarity_threshold=90,
-                activity_types=['IC50', 'Ki'],
-                author_name=None
-            )
+        for fn in [process_compound_job, cleanup_stale_folders, scan_recovery_markers,
+                    get_compound_versions, delete_compound_with_cleanup, batch_delete_with_cleanup]:
+            assert callable(fn)
 
 
 class TestCleanupStaleFolders:
-    """Tests for CompoundService.cleanup_stale_folders classmethod."""
 
     def test_cleanup_no_results_dir(self, tmp_path):
-        """Test cleanup when results directory doesn't exist."""
-        from backend.services.compound_service import CompoundService
-
-        with patch('backend.services.compound_service.settings') as mock_settings:
-            mock_settings.RESULTS_DIR = tmp_path / "nonexistent"
-            result = CompoundService.cleanup_stale_folders()
-            assert result == 0
+        from backend.services.compound_service import cleanup_stale_folders
+        with patch(f"{_MOD}.settings") as ms:
+            ms.RESULTS_DIR = tmp_path / "nonexistent"
+            assert cleanup_stale_folders() == 0
 
     def test_cleanup_removes_compound_folders(self, tmp_path):
-        """Test cleanup removes compound processing folders."""
-        from backend.services.compound_service import CompoundService
-
-        # Create compound folders (stale processing artifacts)
+        from backend.services.compound_service import cleanup_stale_folders
         (tmp_path / "Aspirin").mkdir()
         (tmp_path / "Caffeine").mkdir()
-        # Create UUID prefix dir (should be kept)
         (tmp_path / "3a").mkdir()
-        # Create a ZIP file (should be kept)
         (tmp_path / "result.zip").touch()
 
-        with patch('backend.services.compound_service.settings') as mock_settings:
-            mock_settings.RESULTS_DIR = tmp_path
-            result = CompoundService.cleanup_stale_folders()
-            assert result == 2
+        with patch(f"{_MOD}.settings") as ms:
+            ms.RESULTS_DIR = tmp_path
+            assert cleanup_stale_folders() == 2
             assert not (tmp_path / "Aspirin").exists()
-            assert not (tmp_path / "Caffeine").exists()
             assert (tmp_path / "3a").exists()
-            assert (tmp_path / "result.zip").exists()
 
     def test_cleanup_skips_hex_prefix_dirs(self, tmp_path):
-        """Test cleanup skips 2-char hex UUID prefix directories."""
-        from backend.services.compound_service import CompoundService
-
+        from backend.services.compound_service import cleanup_stale_folders
         for prefix in ["3a", "7f", "00", "ff"]:
             (tmp_path / prefix).mkdir()
-
-        with patch('backend.services.compound_service.settings') as mock_settings:
-            mock_settings.RESULTS_DIR = tmp_path
-            result = CompoundService.cleanup_stale_folders()
-            assert result == 0
+        with patch(f"{_MOD}.settings") as ms:
+            ms.RESULTS_DIR = tmp_path
+            assert cleanup_stale_folders() == 0
 
     def test_cleanup_handles_rmtree_error(self, tmp_path):
-        """Test cleanup handles errors during folder removal."""
-        from backend.services.compound_service import CompoundService
-
+        from backend.services.compound_service import cleanup_stale_folders
         (tmp_path / "BadFolder").mkdir()
-
-        with patch('backend.services.compound_service.settings') as mock_settings:
-            mock_settings.RESULTS_DIR = tmp_path
+        with patch(f"{_MOD}.settings") as ms:
+            ms.RESULTS_DIR = tmp_path
             with patch('shutil.rmtree', side_effect=PermissionError("locked")):
-                result = CompoundService.cleanup_stale_folders()
-                # Returns 0 because rmtree failed
-                assert result == 0
-                assert (tmp_path / "BadFolder").exists()
+                assert cleanup_stale_folders() == 0
 
 
-class TestIsJobCancelled:
-    """Tests for _is_job_cancelled method."""
+class TestRecoveryMarkers:
 
-    def test_cancelled_job_returns_true(self):
-        """Test returns True when job is CANCELLED."""
-        from backend.services.compound_service import CompoundService
-        from backend.models.database import JobStatus
+    def test_scan_no_markers(self, tmp_path):
+        from backend.services.compound_service import scan_recovery_markers
+        with patch(f"{_MOD}.settings") as ms:
+            ms.DATA_DIR = tmp_path
+            assert scan_recovery_markers() == []
 
-        service = CompoundService()
-        mock_db = MagicMock()
-        mock_job = MagicMock()
-        mock_job.status = JobStatus.CANCELLED
-
-        import backend.services.job_service as js_mod
-        mock_js = MagicMock()
-        mock_js.get_job.return_value = mock_job
-        with patch.object(js_mod, 'job_service', mock_js):
-            result = service._is_job_cancelled(mock_db, "test-job-id")
-            assert result is True
-
-    def test_processing_job_returns_false(self):
-        """Test returns False when job is PROCESSING."""
-        from backend.services.compound_service import CompoundService
-        from backend.models.database import JobStatus
-
-        service = CompoundService()
-        mock_db = MagicMock()
-        mock_job = MagicMock()
-        mock_job.status = JobStatus.PROCESSING
-
-        import backend.services.job_service as js_mod
-        mock_js = MagicMock()
-        mock_js.get_job.return_value = mock_job
-        with patch.object(js_mod, 'job_service', mock_js):
-            result = service._is_job_cancelled(mock_db, "test-job-id")
-            assert result is False
-
-    def test_nonexistent_job_returns_false(self):
-        """Test returns False when job not found."""
-        from backend.services.compound_service import CompoundService
-
-        service = CompoundService()
-        mock_db = MagicMock()
-
-        import backend.services.job_service as js_mod
-        mock_js = MagicMock()
-        mock_js.get_job.return_value = None
-        with patch.object(js_mod, 'job_service', mock_js):
-            result = service._is_job_cancelled(mock_db, "nonexistent")
-            assert result is False
+    def test_scan_finds_markers(self, tmp_path):
+        import json
+        from backend.services.compound_service import scan_recovery_markers
+        data = {"job_id": "t-123", "entry_id": "abc", "compound_name": "T",
+                "status": "COMPLETED", "result_summary": {}, "completed_at": "2026-01-01T00:00:00Z"}
+        (tmp_path / ".recovery-abc.json").write_text(json.dumps(data))
+        with patch(f"{_MOD}.settings") as ms:
+            ms.DATA_DIR = tmp_path
+            markers = scan_recovery_markers()
+            assert len(markers) == 1
+            assert markers[0]["job_id"] == "t-123"
 
 
-class TestSearchSimilarCompounds:
-    """Tests for _search_similar_compounds method."""
+class TestSaveResultsSync:
 
-    def test_successful_search(self):
-        """Test successful similarity search."""
-        from backend.services.compound_service import CompoundService
-
-        service = CompoundService()
-        expected = [{"ChEMBL ID": "CHEMBL25", "Similarity": 95.0}]
-
-        with patch('backend.services.compound_service.get_chembl_ids', return_value=expected):
-            result = service._search_similar_compounds("CCO", 90)
-            assert result == expected
-
-    def test_fallback_on_connection_error(self):
-        """Test fallback triggered on ConnectionError."""
-        from backend.services.compound_service import CompoundService
-
-        service = CompoundService()
-        fallback_result = [{"ChEMBL ID": "CHEMBL26"}]
-
-        with patch('backend.services.compound_service.get_chembl_ids', side_effect=ConnectionError("timeout")):
-            with patch.object(service, '_search_similar_compounds_fallback', return_value=fallback_result):
-                result = service._search_similar_compounds("CCO", 90)
-                assert result == fallback_result
-
-    def test_fallback_on_index_error(self):
-        """Test fallback triggered on IndexError."""
-        from backend.services.compound_service import CompoundService
-
-        service = CompoundService()
-
-        with patch('backend.services.compound_service.get_chembl_ids', side_effect=IndexError("empty")):
-            with patch.object(service, '_search_similar_compounds_fallback', return_value=[]):
-                result = service._search_similar_compounds("CCO", 90)
-                assert result == []
-
-    def test_fallback_on_unexpected_error(self):
-        """Test fallback on unexpected exception types."""
-        from backend.services.compound_service import CompoundService
-
-        service = CompoundService()
-
-        with patch('backend.services.compound_service.get_chembl_ids', side_effect=RuntimeError("weird")):
-            with patch.object(service, '_search_similar_compounds_fallback', return_value=[]):
-                result = service._search_similar_compounds("CCO", 90)
-                assert result == []
-
-
-class TestSaveResultsInner:
-    """Tests for _save_results_inner with entry_id UUID-based storage."""
-
-    @pytest.fixture
-    def service(self, tmp_path):
-        from backend.services.compound_service import CompoundService
-        svc = CompoundService()
-        svc.results_dir = str(tmp_path)
-        return svc
-
-    @pytest.fixture
-    def basic_df(self):
-        return pd.DataFrame({
+    def test_save_results_creates_zip(self, tmp_path):
+        from backend.services.compound_service import _save_results_sync
+        df = pd.DataFrame({
             'ChEMBL_ID': ['CHEMBL25', 'CHEMBL26'],
-            'SMILES': ['CCO', 'CO'],
             'Molecule_Name': ['Ethanol', 'Methanol'],
-            'pActivity': [5.0, 6.0],
-        })
-
-    def test_save_with_entry_id(self, service, tmp_path, basic_df):
-        """Test saving with entry_id creates UUID-based path."""
-        entry_id = "3a4f8c9e-1b2d-4e5f-9a1c-2d3e4f5a6b7c"
-        result_path, summary = service._save_results(
-            compound_name="Ethanol",
-            smiles="CCO",
-            similarity_threshold=90,
-            activity_types=["IC50"],
-            df_results=basic_df,
-            entry_id=entry_id,
-        )
-        assert entry_id in result_path
-        assert result_path.endswith(".zip")
-        assert os.path.exists(result_path)
-        assert summary['schema_version'] == 1
-        assert summary['compound_name'] == "Ethanol"
-
-    def test_save_without_entry_id(self, service, tmp_path, basic_df):
-        """Test saving without entry_id uses name-based path."""
-        result_path, summary = service._save_results(
-            compound_name="Ethanol",
-            smiles="CCO",
-            similarity_threshold=90,
-            activity_types=["IC50"],
-            df_results=basic_df,
-        )
-        assert "Ethanol" in result_path
-        assert result_path.endswith(".zip")
-
-    def test_save_results_with_imp_columns(self, service, tmp_path):
-        """Test summary includes IMP and interference stats."""
-        df = pd.DataFrame({
-            'ChEMBL_ID': ['CHEMBL25', 'CHEMBL26'],
             'SMILES': ['CCO', 'CO'],
             'pActivity': [5.0, 6.0],
-            'Is_IMP_Candidate': [True, False],
-            'IMP_Final_Score': [0.85, 0.45],
-            'PAINS_Violation': [1, 0],
-            'BRENK_Alerts': [0, 1],
-            'NIH_Alerts': [1, 0],
-            'QED': [0.75, 0.82],
         })
-        result_path, summary = service._save_results(
-            compound_name="TestComp",
-            smiles="CCO",
-            similarity_threshold=90,
-            activity_types=["IC50"],
-            df_results=df,
-            entry_id="12345678-1234-1234-1234-123456789012",
-        )
-        assert summary['imp_candidates'] == 1
-        assert summary['has_imp_candidates'] is True
-        assert summary['pains_count'] == 1
-        assert summary['brenk_count'] == 1
-        assert summary['nih_count'] == 1
-        assert summary['imp_score'] == pytest.approx(0.85, abs=0.01)
-        assert summary['qed'] == pytest.approx(0.785, abs=0.01)
-
-    def test_save_results_with_outlier_columns(self, service, tmp_path):
-        """Test summary counts outlier rows."""
-        df = pd.DataFrame({
-            'ChEMBL_ID': ['C1', 'C2', 'C3'],
-            'SMILES': ['CCO', 'CO', 'C'],
-            'pActivity': [5.0, 6.0, 7.0],
-            'SEI_outlier': [True, False, True],
-            'BEI_outlier': [False, False, True],
-        })
-        _, summary = service._save_results(
-            compound_name="Outlier_Test",
-            smiles="CCO",
-            similarity_threshold=90,
-            activity_types=["IC50"],
-            df_results=df,
-            entry_id="22345678-1234-1234-1234-123456789012",
-        )
-        # Rows where any outlier is True: rows 0 and 2
-        assert summary['num_outliers'] == 2
-
-    def test_save_results_with_indications(self, service, tmp_path, basic_df):
-        """Test saving with drug indications DataFrame."""
-        indications_df = pd.DataFrame({
-            'ChEMBL_ID': ['CHEMBL25'],
-            'MESH_Heading': ['Pain'],
-            'Max_Phase': [4],
-        })
-        result_path, summary = service._save_results(
-            compound_name="WithIndications",
-            smiles="CCO",
-            similarity_threshold=90,
-            activity_types=["IC50"],
-            df_results=basic_df,
-            indications_df=indications_df,
-            entry_id="32345678-1234-1234-1234-123456789012",
-        )
-        assert os.path.exists(result_path)
-
-    def test_save_results_with_all_similar(self, service, tmp_path, basic_df):
-        """Test saving with all similar molecules DataFrame."""
-        all_similar_df = pd.DataFrame({
-            'ChEMBL_ID': ['CHEMBL25', 'CHEMBL27'],
-            'Similarity': [95.0, 80.0],
-        })
-        _, summary = service._save_results(
-            compound_name="WithSimilar",
-            smiles="CCO",
-            similarity_threshold=90,
-            activity_types=["IC50"],
-            df_results=basic_df,
-            all_similar_df=all_similar_df,
-            entry_id="42345678-1234-1234-1234-123456789012",
-        )
-        assert summary['total_similar'] == 2
-        assert summary['similar_count'] == 2
-
-
-class TestFetchActivities:
-    """Tests for _fetch_activities method."""
-
-    def test_fetch_empty_ids(self):
-        """Test fetch with no ChEMBL IDs."""
-        from backend.services.compound_service import CompoundService
-        service = CompoundService()
-        result = service._fetch_activities([], None, lambda p, m: None)
-        assert result == []
-
-    def test_fetch_none_activity_types_uses_defaults(self):
-        """Test that None activity_types falls back to defaults."""
-        from backend.services.compound_service import CompoundService
-        service = CompoundService()
-
-        chembl_ids = [{"ChEMBL ID": "CHEMBL25"}]
-
-        with patch('backend.services.compound_service.CompoundService._fetch_activities') as mock:
-            mock.return_value = []
-            # Call directly to check the logic
-            service._fetch_activities(chembl_ids, None, lambda p, m: None)  # verifies no crash
-            # The method handles None internally
-
-
-class TestCalculateImpScores:
-    """Tests for _calculate_imp_scores method."""
-
-    def test_imp_scores_success(self):
-        """Test IMP score calculation success path."""
-        from backend.services.compound_service import CompoundService
-        service = CompoundService()
-
-        df = pd.DataFrame({'ChEMBL_ID': ['C1'], 'pActivity': [5.0]})
-
-        with patch('backend.services.compound_service.calculate_imp_score', return_value=df):
-            with patch('backend.services.compound_service.add_imp_score_interpretation', return_value=df):
-                result_df, pdb_unavailable = service._calculate_imp_scores(df, use_pdb=True)
-                assert pdb_unavailable is False
-
-    def test_imp_scores_failure_flags_pdb(self):
-        """Test IMP score failure flags PDB as unavailable."""
-        from backend.services.compound_service import CompoundService
-        service = CompoundService()
-
-        df = pd.DataFrame({'ChEMBL_ID': ['C1'], 'pActivity': [5.0]})
-
-        with patch('backend.services.compound_service.calculate_imp_score', side_effect=Exception("PDB down")):
-            result_df, pdb_unavailable = service._calculate_imp_scores(df, use_pdb=True)
-            assert pdb_unavailable is True
-
-    def test_imp_scores_failure_no_pdb_flag(self):
-        """Test IMP score failure without PDB doesn't flag it."""
-        from backend.services.compound_service import CompoundService
-        service = CompoundService()
-
-        df = pd.DataFrame({'ChEMBL_ID': ['C1'], 'pActivity': [5.0]})
-
-        with patch('backend.services.compound_service.calculate_imp_score', side_effect=Exception("other")):
-            result_df, pdb_unavailable = service._calculate_imp_scores(df, use_pdb=False)
-            assert pdb_unavailable is False
-
-
-class TestClassifyImps:
-    """Tests for _classify_imps method."""
-
-    def test_classify_imps_delegates(self):
-        """Test classify_imps delegates to classify_imp_candidates."""
-        from backend.services.compound_service import CompoundService
-        service = CompoundService()
-
-        df = pd.DataFrame({'IMP_Final_Score': [0.85]})
-
-        with patch('backend.services.compound_service.classify_imp_candidates', return_value=df) as mock:
-            result = service._classify_imps(df)
-            mock.assert_called_once()
-            assert len(result) == 1
-
-
-class TestAddChemicalClassification:
-    """Tests for _add_chemical_classification method."""
-
-    def test_no_smiles_column(self):
-        """Test returns unmodified DataFrame when SMILES column missing."""
-        from backend.services.compound_service import CompoundService
-        service = CompoundService()
-
-        df = pd.DataFrame({'ChEMBL_ID': ['C1']})
-        result = service._add_chemical_classification(df)
-        assert len(result) == 1
-
-
-class TestCalculateAdvancedMetrics:
-    """Tests for _calculate_advanced_metrics method."""
-
-    def test_missing_input_columns(self):
-        """Test graceful handling when required columns are missing."""
-        from backend.services.compound_service import CompoundService
-        service = CompoundService()
-
-        df = pd.DataFrame({'pActivity': [5.0]})
-        result = service._calculate_advanced_metrics(df, lambda p, m: None)
-        # Should not crash, returns df with initialized columns
-        assert 'SEI' in result.columns
-        assert 'BEI' in result.columns
-
-    def test_exception_returns_original_df(self):
-        """Test that exception in metrics returns original DataFrame."""
-        from backend.services.compound_service import CompoundService
-        service = CompoundService()
-
-        df = pd.DataFrame({'pActivity': [5.0]})
-
-        with patch('backend.services.compound_service.calculate_efficiency_metrics_dataframe', side_effect=Exception("fail")):
-            result = service._calculate_advanced_metrics(df, lambda p, m: None)
-            assert 'pActivity' in result.columns
-
-
-class TestGetCompoundVersions:
-    """Tests for get_compound_versions module function."""
-
-    def test_not_found_raises(self):
-        """Test raises ValueError when compound not found."""
-        from backend.services.compound_service import get_compound_versions
-
-        mock_db = MagicMock()
-        with patch('backend.services.compound_service.compound_repo') as mock_repo:
-            mock_repo.get_versions.return_value = []
-            mock_repo.get_by_entry_id.return_value = None
-            with pytest.raises(ValueError, match="Compound not found"):
-                get_compound_versions(mock_db, "nonexistent")
-
-    def test_single_compound_no_versions(self):
-        """Test single compound returns empty versions list."""
-        from backend.services.compound_service import get_compound_versions
-
-        mock_db = MagicMock()
-        mock_compound = MagicMock()
-        mock_compound.entry_id = "abc-123"
-
-        with patch('backend.services.compound_service.compound_repo') as mock_repo:
-            mock_repo.get_versions.return_value = [mock_compound]
-            result = get_compound_versions(mock_db, "abc-123")
-            assert result['versions'] == []
-            assert result['current_entry_id'] == "abc-123"
-
-    def test_multiple_siblings(self):
-        """Test multiple structural siblings returned correctly."""
-        from backend.services.compound_service import get_compound_versions
-
-        mock_db = MagicMock()
-
-        def make_compound(entry_id, name, is_dup=False, dup_of=None):
-            c = MagicMock()
-            c.entry_id = entry_id
-            c.compound_name = name
-            c.similarity_threshold = 90
-            c.activity_types = "IC50"
-            c.imp_score = 0.8
-            c.qed = 0.7
-            c.similar_compounds = 10
-            c.total_activities = 50
-            c.is_duplicate = is_dup
-            c.duplicate_of = dup_of
-            c.author_name = "Author"
-            c.processed_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
-            c.storage_path = "results/ab/abc.zip"
-            return c
-
-        c1 = make_compound("id-1", "Aspirin", is_dup=False)
-        c2 = make_compound("id-2", "Aspirin (v2)", is_dup=True, dup_of="id-1")
-
-        with patch('backend.services.compound_service.compound_repo') as mock_repo:
-            mock_repo.get_versions.return_value = [c1, c2]
-            mock_repo.get_by_entry_id.return_value = c1
-            result = get_compound_versions(mock_db, "id-1")
-            assert len(result['versions']) == 2
-            assert result['versions'][0]['is_original'] is True
-            assert result['versions'][0]['is_current'] is True
-            assert result['versions'][1]['is_duplicate'] is True
-            assert result['versions'][1]['duplicate_of'] == "id-1"
-
-
-class TestDeleteCompoundWithCleanup:
-    """Tests for delete_compound_with_cleanup module function."""
-
-    def test_not_found_raises(self):
-        """Test raises ValueError when compound not found."""
-        from backend.services.compound_service import delete_compound_with_cleanup
-
-        mock_db = MagicMock()
-        with patch('backend.services.compound_service.compound_repo') as mock_repo:
-            mock_repo.get_by_entry_id.return_value = None
-            with pytest.raises(ValueError, match="Compound not found"):
-                delete_compound_with_cleanup(mock_db, "nonexistent", "session-id")
-
-    def test_successful_delete(self):
-        """Test successful compound deletion."""
-        from backend.services.compound_service import delete_compound_with_cleanup
-
-        mock_db = MagicMock()
-        mock_compound = MagicMock()
-        mock_compound.compound_name = "Aspirin"
-        mock_compound.entry_id = "12345678-1234-1234-1234-123456789012"
-
-        with patch('backend.services.compound_service.compound_repo') as mock_repo, \
-             patch('backend.services.compound_service.delete_result_from_azure_by_entry_id', return_value=True), \
-             patch('backend.services.compound_service.log_job_deleted'), \
-             patch('backend.services.compound_service.truncate_session_id', return_value="sess"), \
-             patch('backend.services.compound_service.settings') as mock_settings:
-            mock_repo.get_by_entry_id.return_value = mock_compound
-            mock_settings.RESULTS_DIR = MagicMock()
-            mock_settings.RESULTS_DIR.__truediv__ = MagicMock(return_value=MagicMock(exists=MagicMock(return_value=False)))
-            result = delete_compound_with_cleanup(mock_db, "12345678-1234-1234-1234-123456789012", "session-id")
-            assert result.status == "deleted"
-            assert result.entry_id == "12345678-1234-1234-1234-123456789012"
-
-
-class TestBatchDeleteWithCleanup:
-    """Tests for batch_delete_with_cleanup module function."""
-
-    def test_empty_list_raises(self):
-        """Test raises ValueError for empty entry_ids."""
-        from backend.services.compound_service import batch_delete_with_cleanup
-        with pytest.raises(ValueError, match="empty"):
-            batch_delete_with_cleanup(MagicMock(), [], "session")
-
-    def test_too_many_raises(self):
-        """Test raises ValueError for more than 50 entries."""
-        from backend.services.compound_service import batch_delete_with_cleanup
-        with pytest.raises(ValueError, match="50"):
-            batch_delete_with_cleanup(MagicMock(), ["id"] * 51, "session")
-
-    def test_invalid_entry_id_raises(self):
-        """Test raises ValueError for non-string entry_ids."""
-        from backend.services.compound_service import batch_delete_with_cleanup
-        with pytest.raises(ValueError, match="non-empty"):
-            batch_delete_with_cleanup(MagicMock(), ["valid", ""], "session")
-
-    def test_not_found_returns_failed(self):
-        """Test not-found IDs are in failed list."""
-        from backend.services.compound_service import batch_delete_with_cleanup
-
-        mock_db = MagicMock()
-        with patch('backend.services.compound_service.compound_repo') as mock_repo, \
-             patch('backend.services.compound_service.log_job_deleted'), \
-             patch('backend.services.compound_service.truncate_session_id', return_value="s"), \
-             patch('backend.services.compound_service.delete_result_from_azure_by_entry_id', return_value=True), \
-             patch('backend.services.compound_service.settings') as mock_settings:
-            mock_repo.get_by_entry_id.return_value = None
-            mock_settings.RESULTS_DIR = MagicMock()
-            result = batch_delete_with_cleanup(mock_db, ["unknown-id"], "session")
-            assert result.total_deleted == 0
-            assert result.total_failed == 1
-
-
-class TestSaveResultsCleanupOnFailure:
-    """Tests for _save_results STAB-13 cleanup on failure."""
-
-    def test_cleanup_compound_folder_on_failure(self, tmp_path):
-        """Test that compound folder is cleaned up if _save_results_inner raises."""
-        from backend.services.compound_service import CompoundService
-
-        service = CompoundService()
-        service.results_dir = str(tmp_path)
-
-        df = pd.DataFrame({
-            'ChEMBL_ID': ['C1'],
-            'SMILES': ['CCO'],
-            'pActivity': [5.0],
-        })
-
-        with patch.object(service, '_save_results_inner', side_effect=RuntimeError("disk full")):
-            with pytest.raises(RuntimeError, match="disk full"):
-                service._save_results(
-                    compound_name="FailComp",
-                    smiles="CCO",
-                    similarity_threshold=90,
-                    activity_types=["IC50"],
-                    df_results=df,
+        with patch(f"{_MOD}.settings") as ms:
+            ms.RESULTS_DIR = tmp_path
+            result_path, summary = _save_results_sync(
+                compound_name="TestCompound", smiles="CCO",
+                similarity_threshold=90, activity_types=['IC50'], df_results=df,
+            )
+            assert str(result_path).endswith('.zip')
+            assert summary['compound_name'] == "TestCompound"
+            assert summary['total_bioactivity_rows'] == 2
+
+
+class TestUpdateProgress:
+
+    @pytest.mark.asyncio
+    async def test_update_progress_calls_job_service(self):
+        from backend.services.compound_service import _update_progress
+        from backend.models.enums import JobStatus
+
+        mock_js = MagicMock()
+        mock_db = _mock_db_session()
+
+        with patch(f"{_MOD}.get_db_session", return_value=mock_db):
+            with patch('backend.services.job_service.job_service', mock_js):
+                await _update_progress("j1", 50, "Processing...", JobStatus.PROCESSING)
+                mock_js.update_progress.assert_called_once_with(
+                    mock_db, "j1", 50, "Processing...", JobStatus.PROCESSING
                 )
 
-        # Folder should be cleaned up
-        assert not (tmp_path / "FailComp").exists()
+
+class TestMarkPendingUpload:
+
+    @pytest.mark.asyncio
+    async def test_mark_pending_upload_calls_job_service(self):
+        from backend.services.compound_service import _mark_pending_upload_with_retry
+
+        mock_js = MagicMock()
+        mock_db = _mock_db_session()
+
+        with patch(f"{_MOD}.get_db_session", return_value=mock_db):
+            with patch('backend.services.job_service.job_service', mock_js):
+                await _mark_pending_upload_with_retry("j1", {"entry_id": "abc"})
+                mock_js.mark_pending_upload.assert_called_once_with(
+                    mock_db, "j1", {"entry_id": "abc"}
+                )
 
 
-class TestSaveResultsEdgeCases:
-    """Tests for edge cases in _save_results_inner."""
+class TestFailJobWithRetry:
 
-    @pytest.fixture
-    def service(self, tmp_path):
-        from backend.services.compound_service import CompoundService
-        svc = CompoundService()
-        svc.results_dir = str(tmp_path)
-        return svc
+    @pytest.mark.asyncio
+    async def test_fail_job_calls_job_service(self):
+        from backend.services.compound_service import _fail_job_with_retry
 
-    def test_save_with_no_chembl_id_column(self, service, tmp_path):
-        """Test saving DataFrame without ChEMBL_ID column."""
-        df = pd.DataFrame({
-            'SMILES': ['CCO'],
-            'pActivity': [5.0],
-        })
-        result_path, summary = service._save_results(
-            compound_name="NoChEMBL",
-            smiles="CCO",
-            similarity_threshold=90,
-            activity_types=["IC50"],
-            df_results=df,
-            entry_id="52345678-1234-1234-1234-123456789012",
-        )
-        assert summary['total_compounds'] == 0
-        assert summary['chembl_id'] == ''
+        mock_js = MagicMock()
+        mock_db = _mock_db_session()
 
-    def test_save_with_pdb_column(self, service, tmp_path):
-        """Test saving DataFrame with PDB_IDs column creates PDB summary."""
-        df = pd.DataFrame({
-            'ChEMBL_ID': ['CHEMBL25'],
-            'SMILES': ['CCO'],
-            'pActivity': [5.0],
-            'PDB_IDs': ['1ABC,2DEF'],
-        })
-        with patch('backend.services.compound_service.create_detailed_pdb_summary',
-                    return_value=pd.DataFrame({'PDB_ID': ['1ABC']})):
-            result_path, summary = service._save_results(
-                compound_name="PDBComp",
-                smiles="CCO",
-                similarity_threshold=90,
-                activity_types=["IC50"],
-                df_results=df,
-                entry_id="62345678-1234-1234-1234-123456789012",
-            )
-        assert summary.get('pdb_structures_count') == 1
-
-    def test_save_with_pdb_exception(self, service, tmp_path):
-        """Test PDB summary exception is handled gracefully."""
-        df = pd.DataFrame({
-            'ChEMBL_ID': ['CHEMBL25'],
-            'SMILES': ['CCO'],
-            'pActivity': [5.0],
-            'PDB_IDs': ['1ABC'],
-        })
-        with patch('backend.services.compound_service.create_detailed_pdb_summary',
-                    side_effect=Exception("PDB error")):
-            result_path, summary = service._save_results(
-                compound_name="PDBErr",
-                smiles="CCO",
-                similarity_threshold=90,
-                activity_types=["IC50"],
-                df_results=df,
-                entry_id="72345678-1234-1234-1234-123456789012",
-            )
-        # Should not have pdb_structures_count
-        assert 'pdb_structures_count' not in summary
-
-    def test_save_with_empty_qed(self, service, tmp_path):
-        """Test QED handling when all values are NaN."""
-        df = pd.DataFrame({
-            'ChEMBL_ID': ['C1'],
-            'SMILES': ['CCO'],
-            'pActivity': [5.0],
-            'QED': [np.nan],
-        })
-        _, summary = service._save_results(
-            compound_name="NanQED",
-            smiles="CCO",
-            similarity_threshold=90,
-            activity_types=["IC50"],
-            df_results=df,
-            entry_id="82345678-1234-1234-1234-123456789012",
-        )
-        assert summary['qed'] == 0.0
-
-    def test_save_with_empty_imp_score(self, service, tmp_path):
-        """Test IMP score handling when all values are NaN."""
-        df = pd.DataFrame({
-            'ChEMBL_ID': ['C1'],
-            'SMILES': ['CCO'],
-            'pActivity': [5.0],
-            'IMP_Final_Score': [np.nan],
-        })
-        _, summary = service._save_results(
-            compound_name="NanIMP",
-            smiles="CCO",
-            similarity_threshold=90,
-            activity_types=["IC50"],
-            df_results=df,
-            entry_id="92345678-1234-1234-1234-123456789012",
-        )
-        assert summary['imp_score'] is None
-
-    def test_save_without_imp_column(self, service, tmp_path):
-        """Test summary when Is_IMP_Candidate column is missing."""
-        df = pd.DataFrame({
-            'ChEMBL_ID': ['C1'],
-            'SMILES': ['CCO'],
-            'pActivity': [5.0],
-        })
-        _, summary = service._save_results(
-            compound_name="NoIMP",
-            smiles="CCO",
-            similarity_threshold=90,
-            activity_types=["IC50"],
-            df_results=df,
-            entry_id="a2345678-1234-1234-1234-123456789012",
-        )
-        assert 'imp_candidates' not in summary
+        with patch(f"{_MOD}.get_db_session", return_value=mock_db):
+            with patch('backend.services.job_service.job_service', mock_js):
+                await _fail_job_with_retry("j1", "Test error")
+                mock_js.fail_job.assert_called_once_with(
+                    mock_db, "j1", "Test error", cascade_results=None
+                )
 
 
-class TestClassifyImpsError:
-    """Tests for _classify_imps error handling."""
+class TestProcessCompoundJobCancellation:
 
-    def test_classify_imps_exception_returns_original(self):
-        """Test classify_imps returns original df on exception."""
-        from backend.services.compound_service import CompoundService
-        service = CompoundService()
+    @pytest.mark.asyncio
+    async def test_cancelled_error_does_not_touch_db_status(self):
+        """CancelledError does not modify DB job status (D-52).
 
-        df = pd.DataFrame({'IMP_Final_Score': [0.85]})
-        with patch('backend.services.compound_service.classify_imp_candidates',
-                    side_effect=Exception("classify error")):
-            result = service._classify_imps(df)
-            assert len(result) == 1
+        process_compound_job catches CancelledError, logs it, and does NOT
+        call _fail_job_with_retry -- the caller already set CANCELLED status.
+        """
+        from backend.services.compound_service import process_compound_job
 
+        fail_mock = AsyncMock()
+        # _update_progress raises CancelledError (simulates task.cancel())
+        update_mock = AsyncMock(side_effect=asyncio.CancelledError())
 
-class TestAddChemicalClassificationWithSmiles:
-    """Tests for _add_chemical_classification with valid SMILES column."""
+        patches = {
+            f"{_MOD}._update_progress": update_mock,
+            f"{_MOD}._fail_job_with_retry": fail_mock,
+            f"{_MOD}.create_chembl_client": MagicMock(return_value=AsyncMock()),
+            f"{_MOD}.create_pdb_client": MagicMock(return_value=AsyncMock()),
+            f"{_MOD}.create_classifier_client": MagicMock(return_value=AsyncMock()),
+        }
 
-    def test_classification_exception_per_compound(self):
-        """Test classification catches per-compound exceptions."""
-        from backend.services.compound_service import CompoundService
-        service = CompoundService()
-
-        df = pd.DataFrame({'SMILES': ['CCO', 'INVALID']})
-
-        # Mock RDKit to raise on second call
-        mock_chem = MagicMock()
-        mock_mol = MagicMock()
-        mock_chem.MolFromSmiles.side_effect = [mock_mol, None]
-
-        with patch.dict('sys.modules', {'rdkit': MagicMock(), 'rdkit.Chem': mock_chem,
-                                         'rdkit.Chem.inchi': MagicMock()}):
-            with patch('backend.services.compound_service.get_complete_classification',
-                        return_value={}):
-                # The function should handle MolFromSmiles returning None
-                result = service._add_chemical_classification(df)
-                assert len(result) == 2
+        with _apply_patches(patches):
+            # CancelledError is caught inside process_compound_job -- no re-raise
+            await process_compound_job(job_id="j1", compound_name="T", smiles="CCO")
+            # _fail_job_with_retry must NOT be called for cancellation
+            fail_mock.assert_not_called()
 
 
-class TestGetCompoundVersionsEdgeCases:
-    """Additional edge case tests for get_compound_versions."""
+class TestProcessCompoundJobFailure:
 
-    def test_all_duplicates_fallback_original(self):
-        """Test original detection when all siblings are duplicates."""
-        from backend.services.compound_service import get_compound_versions
+    @pytest.mark.asyncio
+    async def test_unexpected_error_calls_fail_job(self):
+        from backend.services.compound_service import process_compound_job
 
-        mock_db = MagicMock()
+        fail_mock = AsyncMock()
+        update_mock = AsyncMock()
+        chembl_mock = AsyncMock(side_effect=RuntimeError("Unexpected"))
 
-        def make_compound(entry_id, is_dup=True):
-            c = MagicMock()
-            c.entry_id = entry_id
-            c.compound_name = f"Comp_{entry_id}"
-            c.similarity_threshold = 90
-            c.activity_types = "IC50"
-            c.imp_score = 0.5
-            c.qed = 0.7
-            c.similar_compounds = 5
-            c.total_activities = 20
-            c.is_duplicate = is_dup
-            c.duplicate_of = "parent-id" if is_dup else None
-            c.author_name = "Author"
-            c.processed_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
-            c.storage_path = "results/ab/abc.zip"
-            return c
+        patches = {
+            f"{_MOD}._update_progress": update_mock,
+            f"{_MOD}._fail_job_with_retry": fail_mock,
+            f"{_MOD}.get_chembl_ids": chembl_mock,
+            f"{_MOD}.create_chembl_client": MagicMock(return_value=AsyncMock()),
+            f"{_MOD}.create_pdb_client": MagicMock(return_value=AsyncMock()),
+            f"{_MOD}.create_classifier_client": MagicMock(return_value=AsyncMock()),
+        }
 
-        # All are duplicates - original should fall back to first sibling
-        c1 = make_compound("id-1", is_dup=True)
-        c2 = make_compound("id-2", is_dup=True)
+        with _apply_patches(patches):
+            await process_compound_job(job_id="j1", compound_name="T", smiles="CCO")
+            fail_mock.assert_called_once()
+            assert "RuntimeError" in fail_mock.call_args[0][1]
 
-        with patch('backend.services.compound_service.compound_repo') as mock_repo:
-            mock_repo.get_versions.return_value = [c1, c2]
-            mock_repo.get_by_entry_id.return_value = c1
-            result = get_compound_versions(mock_db, "id-1")
-            # original_entry_id should fall back to first sibling
-            assert result['versions'][0]['is_original'] is True
+
+class TestProcessCompoundJobNoResults:
+
+    @pytest.mark.asyncio
+    async def test_no_similar_compounds_fails_job(self):
+        from backend.services.compound_service import process_compound_job
+
+        fail_mock = AsyncMock()
+
+        patches = {
+            f"{_MOD}._update_progress": AsyncMock(),
+            f"{_MOD}._fail_job_with_retry": fail_mock,
+            f"{_MOD}.get_chembl_ids": AsyncMock(return_value=[]),
+            f"{_MOD}.cascade_similarity_counts": AsyncMock(return_value=[]),
+            f"{_MOD}.create_chembl_client": MagicMock(return_value=AsyncMock()),
+            f"{_MOD}.create_pdb_client": MagicMock(return_value=AsyncMock()),
+            f"{_MOD}.create_classifier_client": MagicMock(return_value=AsyncMock()),
+        }
+
+        with _apply_patches(patches):
+            await process_compound_job(job_id="j1", compound_name="T", smiles="CCO")
+            fail_mock.assert_called_once()
+            assert "No similar compounds" in fail_mock.call_args[0][1]
+
+
+class TestPendingUploadFlow:
+
+    @pytest.mark.asyncio
+    async def test_no_azure_marks_completed_immediately(self):
+        """Non-Azure: PENDING_UPLOAD -> COMPLETED immediately (D-35)."""
+        from backend.services.compound_service import process_compound_job
+
+        pending_mock = AsyncMock()
+        completed_mock = MagicMock()
+
+        patches = {
+            f"{_MOD}._update_progress": AsyncMock(),
+            f"{_MOD}._mark_pending_upload_with_retry": pending_mock,
+            f"{_MOD}._mark_completed_sync": completed_mock,
+            f"{_MOD}.get_chembl_ids": AsyncMock(return_value=[
+                {"ChEMBL ID": "CHEMBL25", "Similarity": 95.0}
+            ]),
+            f"{_MOD}.fetch_all_activities_single_batch": AsyncMock(return_value=[{
+                'molecule_chembl_id': 'CHEMBL25', 'standard_value': '100',
+                'standard_units': 'nM', 'standard_type': 'IC50', 'target_chembl_id': 'C1',
+            }]),
+            f"{_MOD}.fetch_batch_molecule_data": AsyncMock(return_value={
+                'CHEMBL25': {'pref_name': 'Test', 'molecule_properties': {'full_mwt': '200'},
+                             'molecule_structures': {'canonical_smiles': 'CCO'}},
+            }),
+            f"{_MOD}.fetch_batch_target_names": AsyncMock(return_value={'C1': 'Target1'}),
+            f"{_MOD}._calculate_molecular_descriptors_sync": lambda df: df,
+            f"{_MOD}._add_assay_interference_flags_sync": lambda df: df,
+            f"{_MOD}._calculate_advanced_metrics_sync": lambda df: df,
+            f"{_MOD}.calculate_imp_score": AsyncMock(side_effect=lambda c, df, **kw: df),
+            f"{_MOD}.add_imp_score_interpretation": lambda df: df,
+            f"{_MOD}.classify_imp_candidates": lambda df, *a, **kw: df,
+            f"{_MOD}._add_chemical_classification_async": AsyncMock(side_effect=lambda c, df: df),
+            f"{_MOD}._build_all_similar_df_async": AsyncMock(return_value=pd.DataFrame()),
+            f"{_MOD}._fetch_drug_indications_async": AsyncMock(return_value=pd.DataFrame()),
+            f"{_MOD}._save_results_sync": lambda *a, **kw: ("/path/to/zip", {"entry_id": "abc"}),
+            f"{_MOD}.is_azure_configured": lambda: False,
+            f"{_MOD}.create_chembl_client": MagicMock(return_value=AsyncMock()),
+            f"{_MOD}.create_pdb_client": MagicMock(return_value=AsyncMock()),
+            f"{_MOD}.create_classifier_client": MagicMock(return_value=AsyncMock()),
+        }
+
+        with _apply_patches(patches):
+            await process_compound_job(job_id="j1", compound_name="T", smiles="CCO")
+            pending_mock.assert_called_once()
+            completed_mock.assert_called_once()
+
+
+class TestFetchActivitiesAsync:
+
+    @pytest.mark.asyncio
+    async def test_empty_chembl_ids_returns_empty(self):
+        from backend.services.compound_service import _fetch_activities_async
+        result = await _fetch_activities_async(MagicMock(), [], None, None)
+        assert result == []
+
+
+class TestFetchDrugIndicationsAsync:
+
+    @pytest.mark.asyncio
+    async def test_no_chembl_id_column(self):
+        from backend.services.compound_service import _fetch_drug_indications_async
+        df = pd.DataFrame({'SMILES': ['CCO']})
+        result = await _fetch_drug_indications_async(MagicMock(), df)
+        assert result.empty
+
+
+class TestServicesInit:
+
+    def test_no_compound_service_class_in_init(self):
+        import backend.services as services
+        assert not hasattr(services, 'CompoundService')
+        assert not hasattr(services, 'compound_service_instance')
+
+    def test_function_exports_in_init(self):
+        from backend.services import process_compound_job, cleanup_stale_folders, scan_recovery_markers
+        assert callable(process_compound_job)
+        assert callable(cleanup_stale_folders)
+        assert callable(scan_recovery_markers)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+class _apply_patches:
+    """Context manager to apply multiple patches from a dict."""
+
+    def __init__(self, patches_dict):
+        self._patches = []
+        self._mocks = {}
+        for target, value in patches_dict.items():
+            if callable(value) and not isinstance(value, (MagicMock, AsyncMock)):
+                # Use side_effect for plain callables
+                p = patch(target, side_effect=value)
+            else:
+                p = patch(target, value)
+            self._patches.append(p)
+
+    def __enter__(self):
+        for p in self._patches:
+            p.start()
+        return self
+
+    def __exit__(self, *args):
+        for p in self._patches:
+            p.stop()

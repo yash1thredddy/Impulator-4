@@ -2,6 +2,7 @@
 from frontend.services.backend_client import (
     ImpulatorAPIClient,
     get_api_client,
+    get_compounds_cached,
     set_session_id,
     JobResponse,
     CompoundListResponse,
@@ -28,6 +29,7 @@ __all__ = [
     # Backend client
     "ImpulatorAPIClient",
     "get_api_client",
+    "get_compounds_cached",
     "set_session_id",
     "JobResponse",
     "CompoundListResponse",

@@ -102,6 +102,15 @@ class SessionState:
 
         # Error state
         'last_error': lambda: None,
+
+        # Navigation state for compound detail (used by navigate_to_compound)
+        'selected_compound_entry_id': lambda: None,
+        'selected_compound_storage_path': lambda: None,
+        'selected_compound_is_duplicate': lambda: None,
+        'selected_compound_duplicate_of_name': lambda: None,
+
+        # Failed job dismissal tracking
+        'dismissed_failed_jobs': lambda: set(),
     }
 
     # Legacy DEFAULTS for backwards compatibility (read-only reference)
@@ -370,3 +379,36 @@ class SessionState:
     def get_active_batches(cls) -> set:
         """Get set of active batch IDs."""
         return cls.get('active_batch_ids', set())
+
+
+# Cache eviction constants and helpers
+_MAX_VERSION_CACHE = 20
+_MAX_REPORT_CACHE = 5
+
+
+def evict_version_cache() -> None:
+    """Evict oldest version cache entries when limit exceeded.
+
+    Limits ``_versions_*`` session_state keys to ``_MAX_VERSION_CACHE``.
+    Call this before setting new version cache entries.
+    """
+    session_state = SessionState._get_session_state()
+    version_keys = sorted(k for k in session_state if k.startswith("_versions_"))
+    while len(version_keys) >= _MAX_VERSION_CACHE:
+        oldest = version_keys.pop(0)
+        del session_state[oldest]
+        logger.debug(f"Evicted version cache key: {oldest}")
+
+
+def evict_report_cache() -> None:
+    """Evict oldest report cache entries when limit exceeded.
+
+    Limits ``_report_*`` session_state keys to ``_MAX_REPORT_CACHE``.
+    Call this before setting new report cache entries.
+    """
+    session_state = SessionState._get_session_state()
+    report_keys = sorted(k for k in session_state if k.startswith("_report_"))
+    while len(report_keys) >= _MAX_REPORT_CACHE:
+        oldest = report_keys.pop(0)
+        del session_state[oldest]
+        logger.debug(f"Evicted report cache key: {oldest}")

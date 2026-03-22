@@ -15,18 +15,18 @@ All orchestration logic lives in job_service.py (ARCH-04).
 Route handlers are thin (10-30 lines): parse input, call service, return typed response.
 """
 import logging
-from typing import List, Optional
+import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Header
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, HTTPException, Query, Header
+from fastapi.responses import ORJSONResponse
 from sqlalchemy.orm import Session
 
-from backend.core.database import get_db
-from backend.core.executor import job_executor
-from backend.core.scheduler import job_scheduler
-from backend.core.auth import validate_session_id, truncate_session_id
+from backend.api.deps import DbDep, SessionDep, JobRateLimit, BatchRateLimit
+from backend.core import executor
+from backend.core import scheduler
+from backend.core.auth import truncate_session_id
 from backend.core.audit import log_job_cancelled, log_job_deleted
-from backend.models.database import JobStatus
+from backend.models.enums import JobStatus
 from backend.models.schemas import (
     JobCreate,
     BatchJobCreate,
@@ -48,7 +48,6 @@ from backend.models.schemas import (
     CheckAvailabilityBatchRequest,
     CheckAvailabilityResponse,
     CheckAvailabilityBatchResponse,
-    InputParams,
 )
 from backend.services.job_service import (
     job_service,
@@ -56,12 +55,7 @@ from backend.services.job_service import (
     _check_single_availability,
     MAX_BATCH_SIZE,
 )
-from backend.core.rate_limiter import (
-    rate_limit,
-    get_rate_limiter,
-    RATE_LIMIT_MAX_JOBS,
-    RATE_LIMIT_MAX_BATCH,
-)
+from backend.core.rate_limiter import get_rate_limiter
 from backend.repositories import job_repo
 
 # Backward-compatible singleton (used by health.py and tests)
@@ -72,7 +66,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["Jobs"])
 
 
-def _verify_job_ownership(db: Session, job_id: str, session_id: str):
+def _verify_job_ownership(db: Session, job_id: uuid.UUID, session_id: str):
     """Verify the session owns this job.
 
     Returns:
@@ -86,7 +80,7 @@ def _verify_job_ownership(db: Session, job_id: str, session_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if job.session_id and job.session_id != session_id:
+    if job.session_id and str(job.session_id) != session_id:
         logger.warning(
             f"Unauthorized access attempt: session {truncate_session_id(session_id)} "
             f"tried to access job {job_id}"
@@ -109,14 +103,14 @@ def _verify_job_ownership(db: Session, job_id: str, session_id: str):
     response_model=CheckAvailabilityResponse,
     summary="Check ChEMBL data availability before submission",
 )
-def check_availability(
+async def check_availability(
     request: CheckAvailabilityRequest,
-    db: Session = Depends(get_db),
-    session_id: str = Depends(validate_session_id),
+    db: DbDep,
+    session_id: SessionDep,
 ):
     """Check whether ChEMBL has similarity data for a compound."""
     try:
-        result = _check_single_availability(
+        result = await _check_single_availability(
             smiles=request.smiles,
             compound_name="query",
             similarity_threshold=request.similarity_threshold,
@@ -134,14 +128,14 @@ def check_availability(
     response_model=CheckAvailabilityBatchResponse,
     summary="Batch check ChEMBL data availability",
 )
-def check_availability_batch(
+async def check_availability_batch(
     request: CheckAvailabilityBatchRequest,
-    db: Session = Depends(get_db),
-    session_id: str = Depends(validate_session_id),
+    db: DbDep,
+    session_id: SessionDep,
 ):
     """Batch availability check for multiple compounds."""
     try:
-        return job_service.check_availability_batch_service(db, request)
+        return await job_service.check_availability_batch_service(db, request)
     except Exception:
         logger.exception("Batch availability check failed")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -159,10 +153,10 @@ def check_availability_batch(
 )
 async def create_job(
     request: JobCreate,
-    db: Session = Depends(get_db),
-    session_id: str = Depends(validate_session_id),
-    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
-    _: None = rate_limit(RATE_LIMIT_MAX_JOBS),
+    db: DbDep,
+    session_id: SessionDep,
+    _: JobRateLimit,
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
 ):
     """Submit a new compound processing job.
 
@@ -178,10 +172,10 @@ async def create_job(
         )
 
     if isinstance(result, DuplicateFoundResponse):
-        return JSONResponse(content=result.model_dump(mode="json"), status_code=200)
+        return ORJSONResponse(content=result.model_dump(mode="json"), status_code=200)
 
     # Trigger scheduler to start processing
-    job_scheduler.trigger()
+    scheduler.trigger()
     logger.info(f"Job queued for {request.compound_name} (session={truncate_session_id(session_id)})")
     return result
 
@@ -200,8 +194,8 @@ async def create_job(
 )
 async def resolve_duplicate(
     request: ResolveDuplicateRequest,
-    db: Session = Depends(get_db),
-    session_id: str = Depends(validate_session_id),
+    db: DbDep,
+    session_id: SessionDep,
 ):
     """Resolve a duplicate compound situation based on user's choice."""
     try:
@@ -210,7 +204,7 @@ async def resolve_duplicate(
         raise HTTPException(status_code=422, detail=str(e))
 
     if isinstance(result, SkipResponse):
-        return JSONResponse(content=result.model_dump(mode="json"), status_code=200)
+        return ORJSONResponse(content=result.model_dump(mode="json"), status_code=200)
     return result
 
 
@@ -221,7 +215,7 @@ async def resolve_duplicate(
 )
 async def check_duplicates(
     request: CheckDuplicatesRequest,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     """Check which compounds already exist or are being processed."""
     try:
@@ -239,9 +233,9 @@ async def check_duplicates(
 )
 async def create_batch_job(
     request: BatchJobCreate,
-    db: Session = Depends(get_db),
-    session_id: str = Depends(validate_session_id),
-    _: None = rate_limit(RATE_LIMIT_MAX_BATCH, key_suffix="_batch"),
+    db: DbDep,
+    session_id: SessionDep,
+    _: BatchRateLimit,
 ):
     """Submit multiple compound processing jobs."""
     if len(request.compounds) > MAX_BATCH_SIZE:
@@ -258,11 +252,11 @@ async def create_batch_job(
     summary="List jobs for current session",
 )
 async def list_jobs(
-    status: Optional[JobStatus] = Query(None, description="Filter by status"),
+    db: DbDep,
+    session_id: SessionDep,
+    status: JobStatus | None = Query(None, description="Filter by status"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    db: Session = Depends(get_db),
-    session_id: str = Depends(validate_session_id),
 ):
     """List jobs for the current session with optional status filter and pagination."""
     statuses = [status] if status else None
@@ -280,15 +274,20 @@ async def list_jobs(
 
 @router.get(
     "/active",
-    response_model=List[ActiveJobResponse],
+    response_model=list[ActiveJobResponse],
     summary="Get active jobs for sidebar",
 )
 async def get_active_jobs(
-    db: Session = Depends(get_db),
-    session_id: str = Depends(validate_session_id),
+    db: DbDep,
+    session_id: SessionDep,
 ):
     """Get active (pending/processing) jobs for the current session."""
-    return job_service.get_active_jobs(db, session_id=session_id)
+    jobs = job_service.get_active_jobs(db, session_id=session_id)
+    result = []
+    for job in jobs:
+        job_dict = ActiveJobResponse.model_validate(job, from_attributes=True).model_dump()
+        result.append(job_dict)
+    return result
 
 
 @router.get(
@@ -298,9 +297,9 @@ async def get_active_jobs(
     summary="Get batch summary",
 )
 async def get_batch_summary(
-    batch_id: str,
-    db: Session = Depends(get_db),
-    session_id: str = Depends(validate_session_id),
+    batch_id: uuid.UUID,
+    db: DbDep,
+    session_id: SessionDep,
 ):
     """Get summary statistics for a batch of jobs."""
     batch_jobs = job_repo.get_batch_jobs(db, batch_id)
@@ -309,7 +308,7 @@ async def get_batch_summary(
     if not first_job:
         raise HTTPException(status_code=404, detail="Batch not found")
 
-    if first_job.session_id and first_job.session_id != session_id:
+    if first_job.session_id and str(first_job.session_id) != session_id:
         logger.warning(
             f"Unauthorized batch access attempt: session {truncate_session_id(session_id)} "
             f"tried to access batch {batch_id}"
@@ -329,9 +328,9 @@ async def get_batch_summary(
     summary="Cancel all jobs in a batch",
 )
 async def cancel_batch(
-    batch_id: str,
-    db: Session = Depends(get_db),
-    session_id: str = Depends(validate_session_id),
+    batch_id: uuid.UUID,
+    db: DbDep,
+    session_id: SessionDep,
 ):
     """Cancel all pending/processing jobs in a batch."""
     batch_jobs = job_repo.get_batch_jobs(db, batch_id)
@@ -340,7 +339,7 @@ async def cancel_batch(
         raise HTTPException(status_code=404, detail="Batch not found")
 
     first_job = batch_jobs[0]
-    if first_job.session_id and first_job.session_id != session_id:
+    if first_job.session_id and str(first_job.session_id) != session_id:
         logger.warning(
             f"Unauthorized batch cancel attempt: session {truncate_session_id(session_id)} "
             f"tried to cancel batch {batch_id}"
@@ -364,9 +363,9 @@ async def cancel_batch(
     summary="Get job status",
 )
 async def get_job(
-    job_id: str,
-    db: Session = Depends(get_db),
-    session_id: str = Depends(validate_session_id),
+    job_id: uuid.UUID,
+    db: DbDep,
+    session_id: SessionDep,
 ):
     """Get the current status of a job."""
     job = _verify_job_ownership(db, job_id, session_id)
@@ -380,9 +379,9 @@ async def get_job(
     summary="Get detailed job info",
 )
 async def get_job_detail(
-    job_id: str,
-    db: Session = Depends(get_db),
-    session_id: str = Depends(validate_session_id),
+    job_id: uuid.UUID,
+    db: DbDep,
+    session_id: SessionDep,
 ):
     """Get detailed job information including parsed input parameters."""
     _verify_job_ownership(db, job_id, session_id)
@@ -399,9 +398,9 @@ async def get_job_detail(
     summary="Cancel a job",
 )
 async def cancel_job(
-    job_id: str,
-    db: Session = Depends(get_db),
-    session_id: str = Depends(validate_session_id),
+    job_id: uuid.UUID,
+    db: DbDep,
+    session_id: SessionDep,
 ):
     """Cancel a pending or processing job."""
     job = _verify_job_ownership(db, job_id, session_id)
@@ -412,16 +411,10 @@ async def cancel_job(
             detail=f"Job cannot be cancelled (status: {job.status.value})",
         )
 
-    # Extract compound name for audit log
-    compound_name = None
-    if job.input_params:
-        try:
-            params = InputParams.model_validate_json(job.input_params)
-            compound_name = params.compound_name
-        except Exception:
-            pass
+    # Extract compound name for audit log (direct column access)
+    compound_name = job.compound_name
 
-    job_executor.cancel(job_id)
+    executor.cancel(str(job_id))
     job = job_service.cancel_job(db, job_id)
     log_job_cancelled(truncate_session_id(session_id), job_id, compound_name)
 
@@ -435,9 +428,9 @@ async def cancel_job(
     summary="Delete a job record",
 )
 async def delete_job(
-    job_id: str,
-    db: Session = Depends(get_db),
-    session_id: str = Depends(validate_session_id),
+    job_id: uuid.UUID,
+    db: DbDep,
+    session_id: SessionDep,
 ):
     """Delete a job record and associated result files."""
     job = _verify_job_ownership(db, job_id, session_id)

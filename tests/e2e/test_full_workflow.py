@@ -24,17 +24,19 @@ def generate_valid_session_id(prefix: str = "") -> str:
 @pytest.fixture(scope="module")
 def test_engine():
     """Create a test database engine once per module."""
-    from backend.core.database import Base
-    from backend.models.database import Job, Compound  # noqa: F401
+    from backend.models._pg_base import PGBase
+    from backend.models.job import Job  # noqa: F401
+    from backend.models.compound import Compound  # noqa: F401
+    from backend.models.deleted_compound import DeletedCompound  # noqa: F401
 
     engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    Base.metadata.create_all(bind=engine)
+    PGBase.metadata.create_all(bind=engine)
     yield engine
-    Base.metadata.drop_all(bind=engine)
+    PGBase.metadata.drop_all(bind=engine)
     engine.dispose()
 
 
@@ -42,9 +44,9 @@ def test_engine():
 def _clean_tables(test_engine):
     """Truncate all tables after each test to isolate state."""
     yield
-    from backend.core.database import Base
+    from backend.models._pg_base import PGBase
     with test_engine.connect() as conn:
-        for table in reversed(Base.metadata.sorted_tables):
+        for table in reversed(PGBase.metadata.sorted_tables):
             conn.execute(table.delete())
         conn.commit()
 
@@ -64,10 +66,9 @@ def _clean_tables(test_engine):
 def mock_azure():
     """Mock Azure storage for tests."""
     with patch('backend.core.azure_sync.is_azure_configured', return_value=False):
-        with patch('backend.core.azure_sync.sync_db_to_azure', return_value=True):
-            with patch('backend.core.azure_sync.delete_result_from_azure_by_entry_id', return_value=True):
-                with patch('backend.core.azure_sync.upload_result_to_azure_by_entry_id', return_value=True):
-                    yield
+        with patch('backend.core.azure_sync.delete_result_from_azure_by_entry_id', return_value=True):
+            with patch('backend.core.azure_sync.upload_result_to_azure_by_entry_id', return_value=True):
+                yield
 
 
 @pytest.fixture
@@ -194,7 +195,7 @@ class TestDuplicateDetectionWorkflow:
         - Return 201 and create job (duplicate check at processing time)
         Both behaviors are acceptable.
         """
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
         from sqlalchemy.orm import sessionmaker
 
         # Create an existing compound

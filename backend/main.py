@@ -123,22 +123,6 @@ async def lifespan(app: FastAPI):  # pragma: no cover -- startup/shutdown lifecy
     init_db()
     logger.info("Database initialized")
 
-    # Run Alembic migrations (auto-upgrade to head on every startup)
-    # No-op if already at head (one quick SELECT on alembic_version).
-    # If migration fails, startup aborts -- container orchestrator restarts.
-    try:
-        from pathlib import Path as _Path
-        from alembic.config import Config as AlembicConfig
-        from alembic import command as alembic_command
-
-        _alembic_ini = str(_Path(__file__).parent / "alembic.ini")
-        _alembic_cfg = AlembicConfig(_alembic_ini)
-        alembic_command.upgrade(_alembic_cfg, "head")
-        logger.info("alembic_migrations_applied", status="upgrade_head")
-    except Exception as exc:
-        logger.error("alembic_migration_failed", error=str(exc), exc_info=True)
-        raise
-
     # Note: Legacy compound table sync removed - database is the source of truth
     # for all compound metadata. UUID-based storage paths are the only supported format.
 

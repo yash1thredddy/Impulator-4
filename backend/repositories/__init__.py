@@ -1,11 +1,22 @@
-"""Repository layer for centralized database access (ARCH-01)."""
-from backend.repositories.base import BaseRepository, _db_write_lock
-from backend.repositories.job_repository import JobRepository, job_repo
+"""Repository layer for centralized database access.
+
+Exports standalone repository singletons for Jobs and Compounds.
+No BaseRepository -- repositories are standalone classes using SA 2.0 select() style.
+"""
+
 from backend.repositories.compound_repository import CompoundRepository, compound_repo
+from backend.repositories.job_repository import (
+    DuplicateEntryError,
+    JobRepository,
+    ReferenceError,
+    ValidationError,
+    job_repo,
+)
 
 __all__ = [
-    "BaseRepository",
-    "_db_write_lock",
+    "DuplicateEntryError",
+    "ReferenceError",
+    "ValidationError",
     "JobRepository",
     "job_repo",
     "CompoundRepository",

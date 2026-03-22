@@ -52,7 +52,7 @@ class ImpulatorConfig:
     APP_NAME: str = "IMPULATOR"
     APP_ICON: str = "🧬"
     APP_VERSION: str = field(
-        default_factory=lambda: _get_str_env('APP_VERSION', "2.1.0")
+        default_factory=lambda: _get_str_env('APP_VERSION', "2.2.0-dev")
     )
 
     # Backend API
@@ -95,9 +95,9 @@ class ImpulatorConfig:
     # Molecule viewer
     MOLECULE_2D_SIZE: tuple = (300, 300)
 
-    # Input validation
-    MAX_SMILES_LENGTH: int = 2000
-    MAX_COMPOUND_NAME_LENGTH: int = 200
+    # Input validation (must match backend SmilesString/CompoundName max_length)
+    MAX_SMILES_LENGTH: int = 5000
+    MAX_COMPOUND_NAME_LENGTH: int = 255
 
     # File handling
     MAX_CSV_SIZE_MB: int = field(

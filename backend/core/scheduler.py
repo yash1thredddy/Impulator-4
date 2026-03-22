@@ -1,405 +1,202 @@
-"""
-Event-driven job scheduler - only runs when jobs exist.
+"""Event-driven async job scheduler.
 
-Uses SQLite as a persistent job queue. Scheduler polls for PENDING jobs
-and submits them to the ThreadPoolExecutor.
-
-Features:
-- Event-driven: starts on job submit, stops after idle timeout
-- Atomic job claiming: single-threaded scheduler prevents double-claiming
-- 2 workers max: only 2 jobs in executor, rest stay in SQLite
-- Recovery: handles stalled PROCESSING jobs on startup
+Module-level functions replacing JobScheduler class.
+Polls Postgres for PENDING jobs, submits to async executor.
+Starts on trigger(), exits after 5min idle.
 """
-import threading
-import time
-import logging
+import asyncio
 import uuid
 from datetime import datetime, timezone
 
 import structlog
-from sqlalchemy.exc import OperationalError
 
 from backend.core.database import get_db_session
-from backend.core.executor import job_executor
 from backend.core.logging import request_id_var, session_id_var
-from backend.models.database import JobStatus
-from backend.models.schemas import InputParams, ResultSummary
-from backend.repositories import job_repo, _db_write_lock
+from backend.models.enums import JobStatus
+from backend.repositories import job_repo
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
-# Idle timeout: stop polling 5 min after last job completes
-IDLE_TIMEOUT_SECONDS = 300
+IDLE_TIMEOUT_SECONDS = 300  # 5 min idle -> stop polling
+_DEFAULT_POLL_INTERVAL = 6.0
 
-# SQLite maintenance tracking (STAB-09, STAB-17)
-_last_vacuum_time: float = 0.0  # epoch timestamp of last VACUUM
-_VACUUM_INTERVAL = 86400  # At most once per day (seconds)
+_scheduler_task: asyncio.Task | None = None
+_consecutive_errors = 0
+_last_activity: float | None = None  # event loop time
+_crash_reason: str | None = None
 
 
-class JobScheduler:
-    """Event-driven scheduler that polls only when jobs exist."""
+def trigger():
+    """Start scheduler if not running (per D-11: sync-callable)."""
+    global _scheduler_task
+    if _scheduler_task is None or _scheduler_task.done():
+        _scheduler_task = asyncio.create_task(_scheduler_loop(), name="scheduler")
 
-    def __init__(self, poll_interval: float = 6.0):
-        """Initialize scheduler.
 
-        Args:
-            poll_interval: Seconds between polls (default 6 sec)
-        """
-        self._poll_interval = poll_interval
-        self._running = False
-        self._thread = None
-        self._lock = threading.Lock()
-        self._last_activity = None  # Track last job activity
+async def stop():
+    """Stop scheduler task."""
+    global _scheduler_task
+    if _scheduler_task and not _scheduler_task.done():
+        _scheduler_task.cancel()
+        try:
+            await _scheduler_task
+        except asyncio.CancelledError:
+            pass
+    _scheduler_task = None
 
-    def trigger(self):
-        """Called when jobs are submitted - starts scheduler if not running."""
-        with self._lock:
-            self._last_activity = datetime.now(timezone.utc)
-            if not self._running:
-                self._start()
 
-    def _start(self):
-        """Start scheduler in background thread."""
-        self._running = True
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-        logger.info("Job scheduler started")
+async def _scheduler_loop():
+    """Main scheduler loop (per D-09, D-10)."""
+    global _consecutive_errors, _last_activity, _crash_reason
+    _consecutive_errors = 0
+    loop = asyncio.get_running_loop()
+    _last_activity = loop.time()
 
-    def _stop(self):
-        """Stop scheduler."""
-        self._running = False
-        logger.info("Job scheduler stopped (idle timeout)")
-
-    def _run(self):
-        """Main scheduler loop - stops after idle timeout."""
-        # Process immediately on start (no initial delay)
-        first_run = True
-
-        while self._running:
+    try:
+        while True:
             try:
-                if not first_run:
-                    time.sleep(self._poll_interval)
-                first_run = False
-
-                logger.debug(f"Scheduler poll: executor capacity={job_executor.has_capacity()}, active={job_executor.get_active_count()}")
-
-                had_work = self._process_pending()
-                self._retry_sync_pending()  # STAB-07: retry failed Azure uploads
-                self._check_timeouts()  # STAB-06: timeout watchdog
-
+                had_work = await _process_pending()
+                await _check_timeouts()
+                _consecutive_errors = 0
                 if had_work:
-                    self._last_activity = datetime.now(timezone.utc)
-
-                # Check idle timeout
-                if self._should_stop():
-                    self._run_maintenance()  # STAB-09, STAB-17: WAL + VACUUM on idle
-                    self._stop()
-                    break
-
+                    _last_activity = loop.time()
+                # Idle timeout check
+                if _last_activity and (loop.time() - _last_activity) > IDLE_TIMEOUT_SECONDS:
+                    try:
+                        with get_db_session() as db:
+                            if job_repo.get_pending_processing_count(db) == 0:
+                                logger.info("scheduler_idle_stop")
+                                break
+                    except Exception:
+                        pass  # Keep running on DB error
+            except asyncio.CancelledError:
+                raise  # Propagate cancellation
             except Exception as e:
-                logger.error(f"Scheduler error: {e}", exc_info=True)
+                _consecutive_errors += 1
+                _crash_reason = str(e)
+                logger.error("scheduler_error", error=str(e), consecutive=_consecutive_errors)
+            # Backoff on errors (per D-10)
+            backoff = (
+                min(60, _DEFAULT_POLL_INTERVAL * (2 ** _consecutive_errors))
+                if _consecutive_errors
+                else _DEFAULT_POLL_INTERVAL
+            )
+            await asyncio.sleep(backoff)
+    except asyncio.CancelledError:
+        logger.info("scheduler_cancelled")
 
-    def _should_stop(self) -> bool:
-        """Check if scheduler should stop due to idle timeout."""
-        if not self._last_activity:
-            return False
 
-        # Check if any jobs are still pending/processing
-        try:
+async def _process_pending() -> bool:
+    """Claim PENDING jobs in batch and submit to executor (D-59).
+
+    Single DB round-trip claims up to N jobs (where N = available executor slots),
+    replacing the previous per-job claiming loop.
+    """
+    from backend.core import executor
+    from backend.config import settings
+
+    slots = max(0, settings.MAX_CONCURRENT_JOBS - executor.get_active_count())
+    if slots <= 0:
+        return False
+
+    # Batch claim: one DB round-trip for N jobs
+    with get_db_session() as db:
+        jobs = job_repo.claim_pending_jobs(db, limit=slots)
+        db.commit()
+
+    if not jobs:
+        return False
+
+    # Extract job data outside DB session (expire_on_commit=False keeps attrs)
+    job_params = []
+    for job in jobs:
+        if not job.compound_name or not job.smiles:
+            # Mark invalid jobs as failed
             with get_db_session() as db:
-                active_count = job_repo.get_pending_processing_count(db)
-                if active_count > 0:
-                    return False
+                from backend.repositories import job_repo as jr
+                jr.update_status(
+                    db, job.id, JobStatus.FAILED,
+                    error_message="Missing required parameters",
+                    completed_at=datetime.now(timezone.utc),
+                )
+                db.commit()
+            continue
+        workflow_meta = job.result_summary or {}
+        job_params.append({
+            "job_id": job.id,
+            "compound_name": job.compound_name,
+            "smiles": job.smiles,
+            "similarity_threshold": job.similarity_threshold,
+            "activity_types": list(job.activity_types) if job.activity_types else None,
+            "author_name": workflow_meta.get("author_name"),
+        })
+
+    # Submit outside DB session
+    from backend.services.compound_service import process_compound_job
+
+    for params in job_params:
+        try:
+            # Set contextvars for log correlation (per D-12)
+            structlog.contextvars.clear_contextvars()
+            request_id_var.set(f"scheduler-{uuid.uuid4()}")
+            session_id_var.set("scheduler")
+            structlog.contextvars.bind_contextvars(
+                request_id=request_id_var.get(),
+                session_id="scheduler",
+            )
+
+            await executor.submit(
+                params["job_id"],
+                process_compound_job,
+                compound_name=params["compound_name"],
+                smiles=params["smiles"],
+                similarity_threshold=params["similarity_threshold"],
+                activity_types=params["activity_types"],
+                author_name=params["author_name"],
+            )
         except Exception as e:
-            logger.error(f"Error checking active jobs: {e}")
-            return False
+            logger.error("scheduler_submit_error", error=str(e), job_id=str(params["job_id"]))
 
-        # No active jobs - check timeout
-        elapsed = (datetime.now(timezone.utc) - self._last_activity).total_seconds()
-        return elapsed >= IDLE_TIMEOUT_SECONDS
+    return bool(job_params)
 
-    def _run_maintenance(self):
-        """Run SQLite maintenance during idle periods (STAB-09, STAB-17).
 
-        Runs WAL checkpoint + VACUUM + ANALYZE at most once per day,
-        only when no jobs are active. Uses raw sqlite3 connection
-        (bypasses SQLAlchemy) since VACUUM needs exclusive access.
-        """
-        global _last_vacuum_time
-        import os
-        import sqlite3
+async def _check_timeouts():
+    """Mark timed-out PROCESSING jobs as FAILED (async wrapper, D-58)."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _check_timeouts_sync)
 
-        from backend.config import settings
 
-        now = time.time()
-        if now - _last_vacuum_time < _VACUUM_INTERVAL:
-            return  # Already ran today
+def _check_timeouts_sync():
+    """Sync timeout check — SQL already filters by timeout threshold (D-57)."""
+    from backend.config import settings
 
-        # Double-check no active jobs
-        try:
-            with get_db_session() as db:
-                active = job_repo.get_pending_processing_count(db)
-                if active > 0:
-                    return  # Jobs active, skip maintenance
-        except Exception:
-            return
-
-        db_path = str(settings.DATA_DIR / "impulator.db")
-        if not os.path.exists(db_path):
-            return
-
-        try:
-            conn = sqlite3.connect(db_path, timeout=10)
-            try:
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                logger.info("WAL checkpoint completed")
-                conn.execute("VACUUM")
-                logger.info("VACUUM completed")
-                conn.execute("ANALYZE")
-                logger.info("ANALYZE completed")
-                _last_vacuum_time = time.time()
-            finally:
-                conn.close()
-        except Exception as e:
-            logger.warning(f"SQLite maintenance failed (non-fatal): {e}")
-
-    def _check_timeouts(self):
-        """Mark timed-out PROCESSING jobs as FAILED (STAB-06).
-
-        Jobs exceeding settings.JOB_TIMEOUT are marked FAILED. The thread
-        cannot be killed but complete_job() will no-op because status is FAILED.
-        """
-        from backend.config import settings
-        from backend.core.exceptions import ErrorCode
-
-        try:
-            with get_db_session() as db:
-                now = datetime.now(timezone.utc)
-                timeout_seconds = settings.JOB_TIMEOUT
-
-                processing_jobs = job_repo.get_stalled_processing_jobs(db, timeout_seconds)
-
-                for job in processing_jobs:
+    try:
+        with get_db_session() as db:
+            now = datetime.now(timezone.utc)
+            for job in job_repo.get_stalled_processing_jobs(db, settings.JOB_TIMEOUT):
+                db.refresh(job)
+                if job.status == JobStatus.PROCESSING:
                     started = job.started_at
-                    if started is None:
-                        continue
-                    if started.tzinfo is None:
-                        started = started.replace(tzinfo=timezone.utc)
-                    elapsed = (now - started).total_seconds()
-                    if elapsed > timeout_seconds:
-                        with _db_write_lock:
-                            db.refresh(job)
-                            if job.status == JobStatus.PROCESSING:
-                                job.status = JobStatus.FAILED
-                                job.error_message = f"Job timed out after {int(elapsed)}s (limit: {timeout_seconds}s)"
-                                job.error_code = str(ErrorCode.JOB_TIMEOUT)
-                                job.completed_at = now
-                                db.commit()
-                                logger.warning("job_timeout", extra={"job_id": job.id, "elapsed": elapsed})
-        except Exception as e:
-            logger.error(f"Timeout check error: {e}")
-
-    def _retry_sync_pending(self):  # pragma: no cover -- Azure retry lifecycle
-        """Retry Azure upload for SYNC_PENDING jobs (STAB-07).
-
-        Jobs enter SYNC_PENDING when Azure upload fails after all retries.
-        This method picks them up and retries the upload using the stored
-        result_path. On success -> COMPLETED. On failure -> stays SYNC_PENDING
-        (retried on next poll cycle, up to 10 total attempts tracked by
-        retry_count in result_summary).
-        """
-        from backend.core.azure_sync import upload_result_to_azure_by_entry_id
-
-        try:
-            with get_db_session() as db:
-                sync_jobs = job_repo.get_sync_pending_jobs(db)
-
-                for job in sync_jobs:
-                    # Parse retry count from result_summary
-                    retry_count = 0
-                    entry_id = None
-                    if job.result_summary:
-                        try:
-                            summary = ResultSummary.model_validate_json(job.result_summary)
-                            retry_count = summary.sync_retry_count
-                            entry_id = summary.entry_id
-                        except Exception:
-                            pass
-
-                    if retry_count >= 10:
-                        # Max retries exceeded -- mark as FAILED
-                        with _db_write_lock:
-                            db.refresh(job)
-                            if job.status == JobStatus.SYNC_PENDING:
-                                job.status = JobStatus.FAILED
-                                job.error_message = f"Azure upload failed permanently after {retry_count} retries"
-                                job.completed_at = datetime.now(timezone.utc)
-                                db.commit()
-                                logger.error("sync_pending_exhausted", extra={"job_id": job.id, "retries": retry_count})
-                        continue
-
-                    if not entry_id or not job.result_path:
-                        continue  # Missing data, can't retry
-
-                    # Attempt Azure upload
-                    success = upload_result_to_azure_by_entry_id(job.result_path, entry_id)
-
-                    with _db_write_lock:
-                        db.refresh(job)
-                        if job.status != JobStatus.SYNC_PENDING:
-                            continue  # Status changed while we were uploading
-
-                        if success:
-                            job.status = JobStatus.COMPLETED
-                            job.completed_at = datetime.now(timezone.utc)
-                            db.commit()
-                            logger.info("sync_pending_resolved", extra={"job_id": job.id, "retries": retry_count + 1})
-                        else:
-                            # Increment retry count
-                            try:
-                                summary_data = ResultSummary.model_validate_json(job.result_summary or "{}")
-                                # Use model_dump + update to preserve all fields
-                                dump = summary_data.model_dump()
-                                dump["sync_retry_count"] = retry_count + 1
-                                job.result_summary = ResultSummary(**dump).model_dump_json()
-                                db.commit()
-                            except Exception as exc:
-                                db.rollback()
-                                logger.warning("sync_pending_summary_update_failed", extra={"job_id": job.id, "error": str(exc)})
-                            logger.warning("sync_pending_retry_failed", extra={"job_id": job.id, "retry": retry_count + 1})
-
-        except Exception as e:
-            logger.error(f"SYNC_PENDING retry error: {e}")
-
-    def _process_pending(self) -> bool:  # pragma: no cover -- complex DB+executor interaction, tested via integration
-        """Check for pending jobs and submit to executor.
-
-        Submits jobs until executor is full (2 workers).
-        Returns True if any work was done.
-
-        Uses round-robin fair scheduling via job_repo.claim_next_pending_job
-        to prevent one session from starving others.
-        """
-        work_done = False
-
-        # Keep submitting until executor is full or no more pending jobs
-        while job_executor.has_capacity():
-            try:
-                with get_db_session() as db:
-                    # STAB-21: Round-robin fair scheduling by session_id
-                    job = job_repo.claim_next_pending_job(db)
-                    if not job:
-                        break  # No more pending jobs
-
-                    logger.debug(f"Fair scheduling: selected job {job.id} (round-robin)")
-
-                    # Claim the job under write lock to prevent cancel-vs-claim race
-                    with _db_write_lock:
-                        # Re-fetch job inside lock to check if it was cancelled
-                        db.refresh(job)
-                        if job.status != JobStatus.PENDING:
-                            logger.info(f"Job {job.id} no longer PENDING (status={job.status}), skipping")
-                            continue
-
-                        job.status = JobStatus.PROCESSING
-                        job.started_at = datetime.now(timezone.utc)
-                        job.current_step = "Starting..."
-                        db.commit()
-
-                    # Parse input params with typed model
-                    job_id = job.id
-                    try:
-                        params = InputParams.model_validate_json(job.input_params or "{}")
-                    except Exception as e:
-                        logger.error(f"Job {job_id} has malformed input_params: {e}")
-                        job.status = JobStatus.FAILED
-                        job.error_message = "Invalid input parameters (malformed JSON)"
-                        job.completed_at = datetime.now(timezone.utc)
-                        db.commit()
-                        continue
-
-                    # Validate required parameters
-                    compound_name = params.compound_name
-                    smiles = params.smiles
-                    if not compound_name or not smiles:
-                        logger.error(f"Job {job_id} missing required params: compound_name={compound_name}, smiles={bool(smiles)}")
-                        job.status = JobStatus.FAILED
-                        job.error_message = "Missing required parameters (compound_name or smiles)"
-                        job.completed_at = datetime.now(timezone.utc)
-                        db.commit()
-                        continue
-
-                # Import here to avoid circular imports
-                from backend.services.compound_service import process_compound_job
-
-                try:
-                    # Generate synthetic correlation ID for scheduler-initiated jobs
-                    # (no originating HTTP request, so we create one for log traceability)
-                    # clear_contextvars() must come first — calling it after set() would wipe
-                    # the values just stored in the ContextVars before bind_contextvars() runs.
-                    structlog.contextvars.clear_contextvars()
-                    request_id_var.set(f"scheduler-{uuid.uuid4()}")
-                    session_id_var.set("scheduler")
-                    structlog.contextvars.bind_contextvars(
-                        request_id=request_id_var.get(),
-                        session_id="scheduler",
-                    )
-
-                    job_executor.submit(
-                        job_id,
-                        process_compound_job,
-                        compound_name=compound_name,
-                        smiles=smiles,
-                        similarity_threshold=params.threshold if params.threshold is not None else 90,
-                        activity_types=params.activity_types or [],
-                        author_name=getattr(params, 'author_name', None),
-                    )
-                    logger.info(f"Scheduler claimed and submitted job {job_id}")
-                    work_done = True
-                except Exception as submit_error:
-                    # Executor submission failed - revert job status to PENDING for retry
-                    logger.error(f"Failed to submit job {job_id} to executor: {submit_error}")
-                    try:
-                        with get_db_session() as db_retry:
-                            job_to_revert = job_repo.get_by_job_id(db_retry, job_id)
-                            if job_to_revert:
-                                job_to_revert.status = JobStatus.PENDING
-                                job_to_revert.started_at = None
-                                job_to_revert.current_step = "Queued (executor submission failed, will retry)"
-                                db_retry.commit()
-                                logger.info(f"Reverted job {job_id} to PENDING after submit failure")
-                    except Exception as revert_error:
-                        logger.error(f"Failed to revert job {job_id} status: {revert_error}")
-
-                    # IMPORTANT: Break out of claiming loop to prevent tight retry
-                    # The job is back to PENDING and will be retried on the next poll cycle
-                    work_done = True  # Signal that we attempted work (prevents immediate re-poll)
-                    break
-
-            except OperationalError as e:
-                # Database locked or transient error - continue polling
-                logger.warning(f"Database busy, will retry: {e}")
-                time.sleep(0.5)  # Brief pause before retry
-                continue
-            except Exception as e:
-                logger.error(f"Error processing pending job: {e}", exc_info=True)
-                break
-
-        return work_done
-
-    def is_running(self) -> bool:
-        """Check if scheduler is currently running."""
-        return self._running
-
-    def stats(self) -> dict:
-        """Get scheduler statistics."""
-        return {
-            "running": self._running,
-            "poll_interval": self._poll_interval,
-            "idle_timeout": IDLE_TIMEOUT_SECONDS,
-            "last_activity": self._last_activity.isoformat() if self._last_activity else None,
-        }
+                    elapsed = int((now - started).total_seconds()) if started else 0
+                    job.status = JobStatus.FAILED
+                    job.error_message = f"Job timed out after {elapsed}s"
+                    job.completed_at = now
+                    db.commit()
+    except Exception as e:
+        logger.error("timeout_check_error", error=str(e))
 
 
-# Global scheduler instance
-job_scheduler = JobScheduler()
+def is_running() -> bool:
+    """Check if scheduler task is active."""
+    return _scheduler_task is not None and not _scheduler_task.done()
+
+
+def stats() -> dict:
+    """Get scheduler statistics (per D-62)."""
+    return {
+        "active": is_running(),
+        "poll_interval": _DEFAULT_POLL_INTERVAL,
+        "idle_timeout": IDLE_TIMEOUT_SECONDS,
+        "consecutive_errors": _consecutive_errors,
+        "crash_reason": _crash_reason,
+    }

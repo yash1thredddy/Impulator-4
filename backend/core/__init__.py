@@ -1,17 +1,15 @@
 """
 Core backend modules.
-- database: SQLite with SQLAlchemy
-- executor: ThreadPoolExecutor for background jobs
+- database: Postgres with SQLAlchemy
+- executor: Async task executor for background jobs
 - azure_sync: Azure Blob storage sync utilities
 """
 import hashlib
 import logging
 import re
 
-from backend.core.database import get_db, get_db_session, init_db
+from backend.core.database import get_db, get_db_session
 from backend.core.azure_sync import (
-    download_db_from_azure,
-    sync_db_to_azure,
     # UUID-based storage functions (only storage method supported)
     upload_result_to_azure_by_entry_id,
     download_result_from_azure_by_entry_id,
@@ -26,46 +24,6 @@ logger = logging.getLogger(__name__)
 
 # Maximum length for sanitized compound names (Windows path limit consideration)
 MAX_SANITIZED_NAME_LENGTH = 100
-
-# Lazy imports to avoid circular dependency with backend.models.database
-# The scheduler imports Job/JobStatus from models.database, which imports Base from core.database
-# If we import scheduler here at module level, we get circular import when models.database loads
-_job_executor = None
-_job_scheduler = None
-
-
-def get_job_executor():  # pragma: no cover -- lazy loader
-    """Lazy load job executor to avoid circular imports."""
-    global _job_executor
-    if _job_executor is None:
-        from backend.core.executor import job_executor
-        _job_executor = job_executor
-    return _job_executor
-
-
-def get_job_scheduler():  # pragma: no cover -- lazy loader
-    """Lazy load job scheduler to avoid circular imports."""
-    global _job_scheduler
-    if _job_scheduler is None:
-        from backend.core.scheduler import job_scheduler
-        _job_scheduler = job_scheduler
-    return _job_scheduler
-
-
-# For backwards compatibility - these will trigger lazy load on first access
-# Using property-like access through module __getattr__
-def __getattr__(name):  # pragma: no cover -- lazy loader
-    if name == "job_executor":
-        return get_job_executor()
-    elif name == "job_scheduler":
-        return get_job_scheduler()
-    elif name == "JobExecutor":
-        from backend.core.executor import JobExecutor
-        return JobExecutor
-    elif name == "JobScheduler":
-        from backend.core.scheduler import JobScheduler
-        return JobScheduler
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def sanitize_compound_name(name: str, add_hash_suffix: bool = False) -> str:
@@ -130,18 +88,7 @@ __all__ = [
     # Database
     "get_db",
     "get_db_session",
-    "init_db",
-    # Executor (lazy loaded to avoid circular imports)
-    "job_executor",
-    "JobExecutor",
-    "get_job_executor",
-    # Scheduler (lazy loaded to avoid circular imports)
-    "job_scheduler",
-    "JobScheduler",
-    "get_job_scheduler",
-    # Azure (database sync)
-    "download_db_from_azure",
-    "sync_db_to_azure",
+    # Azure (blob storage)
     "is_azure_configured",
     # Azure (UUID-based storage - only storage method supported)
     "upload_result_to_azure_by_entry_id",

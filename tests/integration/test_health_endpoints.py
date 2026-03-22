@@ -8,7 +8,6 @@ Tests:
 - GET /api/v1/health/executor (executor stats)
 - GET /api/v1/health/detailed (comprehensive health check)
 - GET /api/v1/health/metrics (application metrics)
-- POST /api/v1/health/migrate (admin-only migration endpoint)
 """
 from unittest.mock import MagicMock, patch
 
@@ -35,7 +34,8 @@ class TestBasicHealth:
         assert "version" in data
         assert "database" in data
         assert "azure_configured" in data
-        assert "executor_active_jobs" in data
+        assert "active_jobs" in data
+        assert "max_concurrent_jobs" in data
         assert "timestamp" in data
 
     def test_readiness_probe(self, client):
@@ -55,10 +55,31 @@ class TestBasicHealth:
         response = client.get("/api/v1/health/executor")
         assert response.status_code == 200
         data = response.json()
-        assert isinstance(data["max_workers"], int)
+        assert isinstance(data["max_concurrent_jobs"], int)
         assert isinstance(data["active_jobs"], int)
         assert isinstance(data["has_capacity"], bool)
-        assert isinstance(data["job_ids"], list)
+        assert isinstance(data["jobs"], list)
+
+    def test_health_check_has_latency(self, client):
+        """Health check response includes db_latency_ms field."""
+        response = client.get("/api/v1/health")
+        assert response.status_code == 200
+        data = response.json()
+        assert "db_latency_ms" in data
+        # Should be a number (float or None if DB is down)
+        if data["db_latency_ms"] is not None:
+            assert isinstance(data["db_latency_ms"], (int, float))
+            assert data["db_latency_ms"] >= 0
+
+    def test_detailed_health_has_backend_type(self, client):
+        """Detailed health shows database backend type."""
+        response = client.get("/api/v1/health/detailed")
+        assert response.status_code == 200
+        data = response.json()
+        db_check = data["checks"]["database"]
+        assert "backend" in db_check
+        assert db_check["backend"] in ("postgres", "sqlite")
+        assert "latency_ms" in db_check
 
     def test_health_check_has_latency(self, client):
         """Health check response includes db_latency_ms field."""
@@ -112,7 +133,7 @@ class TestDetailedHealth:
 
         assert "status" in executor
         assert "active_jobs" in executor
-        assert "max_workers" in executor
+        assert "max_concurrent_jobs" in executor
 
     def test_includes_azure_check(self, client):
         """Response includes Azure configuration status."""
@@ -148,42 +169,6 @@ class TestMetrics:
         assert "metrics" in data
         assert "timestamp" in data
         assert isinstance(data["metrics"], dict)
-
-
-class TestMigrate:
-    """Tests for POST /api/v1/health/migrate (admin-protected)."""
-
-    def test_requires_admin_key(self, client):
-        """Migration without admin key returns 401."""
-        response = client.post("/api/v1/health/migrate")
-        assert response.status_code in (401, 503)  # 401 if no key, 503 if not configured
-
-    @patch('backend.core.auth.settings')
-    def test_wrong_admin_key_returns_403(self, mock_settings, client):
-        """Wrong admin key returns 403."""
-        mock_settings.ADMIN_API_KEY = "correct-key"
-
-        response = client.post(
-            "/api/v1/health/migrate",
-            headers={"X-Admin-API-Key": "wrong-key"},
-        )
-        assert response.status_code == 403
-
-    @patch('backend.core.auth.settings')
-    @patch('backend.core.database._apply_migrations_with_lock')
-    def test_valid_admin_key_runs_migration(self, mock_migrate, mock_settings, client):
-        """Correct admin key triggers migration."""
-        mock_settings.ADMIN_API_KEY = "test-admin-key"
-
-        response = client.post(
-            "/api/v1/health/migrate",
-            headers={"X-Admin-API-Key": "test-admin-key"},
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "success"
-        assert data["migrations_applied"] is True
-        mock_migrate.assert_called_once()
 
 
 # ─────────────────────────────────────────────────
@@ -238,41 +223,3 @@ class TestHealthDegradedPaths:
         finally:
             pass
 
-    @patch('backend.core.auth.settings')
-    @patch('backend.core.database._apply_migrations_with_lock',
-           side_effect=Exception("migration lock timeout"))
-    def test_migration_failure_returns_error(self, mock_migrate, mock_settings, client):
-        """Migration failure returns error status with details."""
-        mock_settings.ADMIN_API_KEY = "test-admin-key"
-
-        response = client.post(
-            "/api/v1/health/migrate",
-            headers={"X-Admin-API-Key": "test-admin-key"},
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "error"
-        assert data["migrations_applied"] is False
-        assert any("migration lock timeout" in e for e in data["errors"])
-
-    @patch('backend.core.auth.settings')
-    @patch('backend.core.database._apply_migrations_with_lock')
-    @patch('backend.core.azure_sync.is_azure_configured', return_value=True)
-    @patch('backend.core.azure_sync.sync_db_to_azure',
-           side_effect=Exception("Azure blob timeout"))
-    def test_migration_azure_sync_failure_returns_partial(
-        self, mock_sync, mock_azure_cfg, mock_migrate, mock_settings, client,
-    ):
-        """Migration succeeds but Azure sync fails returns partial status."""
-        mock_settings.ADMIN_API_KEY = "test-admin-key"
-
-        response = client.post(
-            "/api/v1/health/migrate",
-            headers={"X-Admin-API-Key": "test-admin-key"},
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "partial"
-        assert data["migrations_applied"] is True
-        assert data["azure_synced"] is False
-        assert any("Azure blob timeout" in e for e in data["errors"])

@@ -11,7 +11,8 @@ class TestJobRepository:
 
     def _create_job(self, db_session, **overrides):
         """Helper to create a job record."""
-        from backend.models.database import Job, JobStatus, JobType
+        from backend.models.job import Job
+        from backend.models.enums import JobStatus, JobType
 
         defaults = {
             "id": str(uuid.uuid4()),
@@ -42,7 +43,7 @@ class TestJobRepository:
     def test_get_active_jobs(self, db_session):
         """Test getting active (pending/processing) jobs."""
         from backend.repositories.job_repository import job_repo
-        from backend.models.database import JobStatus
+        from backend.models.enums import JobStatus
 
         sid = str(uuid.uuid4())
         self._create_job(db_session, status=JobStatus.PENDING, session_id=sid)
@@ -55,7 +56,7 @@ class TestJobRepository:
     def test_get_active_jobs_no_session(self, db_session):
         """Test getting active jobs without session filter."""
         from backend.repositories.job_repository import job_repo
-        from backend.models.database import JobStatus
+        from backend.models.enums import JobStatus
 
         self._create_job(db_session, status=JobStatus.PENDING)
         self._create_job(db_session, status=JobStatus.PROCESSING)
@@ -78,7 +79,7 @@ class TestJobRepository:
     def test_get_jobs_paginated_with_status_filter(self, db_session):
         """Test paginated jobs with status filter."""
         from backend.repositories.job_repository import job_repo
-        from backend.models.database import JobStatus
+        from backend.models.enums import JobStatus
 
         self._create_job(db_session, status=JobStatus.PENDING)
         self._create_job(db_session, status=JobStatus.COMPLETED)
@@ -116,7 +117,7 @@ class TestJobRepository:
     def test_get_batch_summary(self, db_session):
         """Test batch summary aggregation."""
         from backend.repositories.job_repository import job_repo
-        from backend.models.database import JobStatus
+        from backend.models.enums import JobStatus
 
         batch_id = str(uuid.uuid4())
         self._create_job(db_session, batch_id=batch_id, status=JobStatus.COMPLETED,
@@ -139,7 +140,7 @@ class TestJobRepository:
     def test_count_by_status(self, db_session):
         """Test counting jobs by status."""
         from backend.repositories.job_repository import job_repo
-        from backend.models.database import JobStatus
+        from backend.models.enums import JobStatus
 
         self._create_job(db_session, status=JobStatus.PENDING)
         self._create_job(db_session, status=JobStatus.PENDING)
@@ -151,7 +152,7 @@ class TestJobRepository:
     def test_get_pending_processing_count(self, db_session):
         """Test pending+processing count."""
         from backend.repositories.job_repository import job_repo
-        from backend.models.database import JobStatus
+        from backend.models.enums import JobStatus
 
         self._create_job(db_session, status=JobStatus.PENDING)
         self._create_job(db_session, status=JobStatus.PROCESSING)
@@ -163,7 +164,7 @@ class TestJobRepository:
     def test_claim_next_pending_job(self, db_session):
         """Test round-robin fair scheduling claim."""
         from backend.repositories.job_repository import job_repo
-        from backend.models.database import JobStatus
+        from backend.models.enums import JobStatus
 
         job = self._create_job(db_session, status=JobStatus.PENDING)
 
@@ -179,7 +180,7 @@ class TestJobRepository:
     def test_create_job(self, db_session):
         """Test write-locked job creation."""
         from backend.repositories.job_repository import job_repo
-        from backend.models.database import JobStatus, JobType
+        from backend.models.enums import JobStatus, JobType
 
         job_id = str(uuid.uuid4())
         job = job_repo.create_job(
@@ -196,7 +197,7 @@ class TestJobRepository:
     def test_update_status(self, db_session):
         """Test write-locked status update."""
         from backend.repositories.job_repository import job_repo
-        from backend.models.database import JobStatus
+        from backend.models.enums import JobStatus
 
         job = self._create_job(db_session, status=JobStatus.PENDING)
         updated = job_repo.update_status(
@@ -210,7 +211,7 @@ class TestJobRepository:
     def test_update_status_resurrection_guard(self, db_session):
         """Test SD-13: cannot resurrect CANCELLED/FAILED jobs."""
         from backend.repositories.job_repository import job_repo
-        from backend.models.database import JobStatus
+        from backend.models.enums import JobStatus
 
         job = self._create_job(db_session, status=JobStatus.CANCELLED)
         result = job_repo.update_status(db_session, job.id, JobStatus.PENDING)
@@ -219,7 +220,7 @@ class TestJobRepository:
     def test_update_progress(self, db_session):
         """Test write-locked progress update."""
         from backend.repositories.job_repository import job_repo
-        from backend.models.database import JobStatus
+        from backend.models.enums import JobStatus
 
         job = self._create_job(db_session, status=JobStatus.PROCESSING)
         updated = job_repo.update_progress(db_session, job.id, 50.0, "Halfway")
@@ -230,7 +231,7 @@ class TestJobRepository:
     def test_cancel_batch_jobs(self, db_session):
         """Test cancelling all pending/processing jobs in a batch."""
         from backend.repositories.job_repository import job_repo
-        from backend.models.database import JobStatus
+        from backend.models.enums import JobStatus
 
         batch_id = str(uuid.uuid4())
         self._create_job(db_session, batch_id=batch_id, status=JobStatus.PENDING)
@@ -259,7 +260,7 @@ class TestJobRepository:
     def test_get_by_status(self, db_session):
         """Test getting all jobs by status."""
         from backend.repositories.job_repository import job_repo
-        from backend.models.database import JobStatus
+        from backend.models.enums import JobStatus
 
         self._create_job(db_session, status=JobStatus.FAILED)
         self._create_job(db_session, status=JobStatus.FAILED)
@@ -270,7 +271,7 @@ class TestJobRepository:
     def test_get_completed_jobs_since(self, db_session):
         """Test getting completed jobs after cutoff."""
         from backend.repositories.job_repository import job_repo
-        from backend.models.database import JobStatus
+        from backend.models.enums import JobStatus
 
         cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
         self._create_job(db_session, status=JobStatus.COMPLETED,
@@ -282,7 +283,7 @@ class TestJobRepository:
     def test_get_failed_jobs_since(self, db_session):
         """Test getting failed jobs after cutoff."""
         from backend.repositories.job_repository import job_repo
-        from backend.models.database import JobStatus
+        from backend.models.enums import JobStatus
 
         cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
         self._create_job(db_session, status=JobStatus.FAILED,
@@ -523,7 +524,7 @@ class TestBaseRepository:
     def test_add_entity(self, db_session):
         """Test add entity with write lock."""
         from backend.repositories.compound_repository import compound_repo
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
 
         comp = Compound(
             entry_id=str(uuid.uuid4()),

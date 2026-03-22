@@ -1,346 +1,306 @@
 """
-RCSB PDB Client Module
+RCSB PDB Client Module (Async)
+
 Provides integration with RCSB Protein Data Bank for structural evidence scoring.
 
-Component 4 of IMP scoring: PDB Structural Evidence Score (15% weight)
+Component 4 of IMP scoring: PDB Structural Evidence Score (5% weight)
 - Query PDB for compound or close analogs
 - Extract resolution data (X-ray crystallography quality)
 - Count structures with binding affinity data
 - Score based on structural validation
 
 Resolution Quality Classes:
-- *** Best: < 2.0 Å (high confidence)
-- ** Medium: 2.0-3.0 Å (moderate confidence)
-- * Poor: > 3.0 Å (low confidence)
+- *** Best: < 2.0 A (high confidence)
+- ** Medium: 2.0-3.0 A (moderate confidence)
+- * Poor: > 3.0 A (low confidence)
+
+All I/O functions are async and accept an httpx.AsyncClient as first parameter.
+Circuit breaker helpers are self-contained (no imports from api_client.py).
 """
 
-import json
-import logging
-import requests
-import threading
-from typing import Dict, List, Optional, Tuple
-from functools import lru_cache
+import asyncio
 import time
-from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
-# Try relative import first, then absolute
-try:
-    from .config import PDB_API_DELAY
-except ImportError:
-    try:
-        from config import PDB_API_DELAY
-    except ImportError:
-        PDB_API_DELAY = 0.2  # Default value
-
-# Try to import rcsbapi for official API (disabled but kept for future use)
-try:
-    from rcsbapi.data import DataQuery
-except ImportError:
-    DataQuery = None  # rcsb-api library not available/broken
+import httpx
+import structlog
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from backend.core.metrics import metrics
+from backend.modules.api_client import cache_non_none
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
+# --------------------------------------------------------------------------- #
+# Constants
+# --------------------------------------------------------------------------- #
 
-class RateLimiter:
-    """Simple thread-safe rate limiter for PDB API calls."""
-    def __init__(self, calls_per_second: float = 5.0):
-        self.min_interval = 1.0 / calls_per_second
-        self.last_call_time = 0.0
-        import threading
-        self._lock = threading.Lock()
-
-    def wait(self):
-        """Wait if necessary to respect rate limit."""
-        with self._lock:
-            current_time = time.time()
-            elapsed = current_time - self.last_call_time
-            if elapsed < self.min_interval:
-                time.sleep(self.min_interval - elapsed)
-            self.last_call_time = time.time()
-
-
-# Global rate limiter for PDB API (5 req/sec as per docs)
-_pdb_rate_limiter = RateLimiter(calls_per_second=5)
-
-
-# Disable the broken rcsb-api library and use direct REST API implementation
-# The rcsb-api library (v1.4.2) has hardcoded HTTP URLs that cause connection timeouts.
-# Our direct REST API implementation (below) uses HTTPS correctly.
-USE_OFFICIAL_API = False
-logger.info("Using direct REST API implementation (rcsb-api library disabled)")
-
-# RCSB PDB API endpoints (fallback for manual queries)
 SEARCH_API_URL = "https://search.rcsb.org/rcsbsearch/v2/query"
 DATA_API_URL = "https://data.rcsb.org/rest/v1/core"
+GRAPHQL_URL = "https://data.rcsb.org/graphql"
 
-# Configuration
-DEFAULT_SIMILARITY_THRESHOLD = 0.9  # Not used with official API (fixed at graph-relaxed)
-API_TIMEOUT = 30  # seconds (for REST API calls)
-SIMILARITY_QUERY_TIMEOUT = 45  # seconds (for chemical similarity searches, can be slower)
-CACHE_SIZE = 500
-BATCH_SIZE = 50  # Number of PDB IDs to query in one batch for optimal performance
-MAX_PDB_WORKERS = 3  # Capped per job (STAB-20): 3 x 2 concurrent jobs = 6 PDB threads max
+DEFAULT_SIMILARITY_THRESHOLD = 0.9
 
-
-def get_session():
-    """Create and return a requests session for PDB API calls."""
-    s = requests.Session()
-    s.headers.update({
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-    })
-    return s
+# --------------------------------------------------------------------------- #
+# Client factory
+# --------------------------------------------------------------------------- #
 
 
-# Thread-local sessions (requests.Session is NOT thread-safe)
-_thread_local = threading.local()
+def create_pdb_client() -> httpx.AsyncClient:
+    """Create httpx client for PDB API calls."""
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=5, read=30, write=10, pool=10),
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+    )
 
 
-def _get_thread_session():
-    """Get a thread-local requests session for PDB API calls."""
-    if not hasattr(_thread_local, 'session'):
-        _thread_local.session = get_session()
-    return _thread_local.session
+# --------------------------------------------------------------------------- #
+# Self-contained circuit breaker helpers (D-31, D-33)
+# --------------------------------------------------------------------------- #
+
+_circuits: dict[str, dict] = {}
 
 
-# Module-level session for backward compatibility
-session = get_session()
+def _make_circuit(threshold: int = 3, cooldown: int = 300) -> dict:
+    """Create a new circuit breaker state dict."""
+    return {"failures": 0, "open_until": 0.0, "threshold": threshold, "cooldown": cooldown}
 
 
-@lru_cache(maxsize=CACHE_SIZE)
-def search_similar_ligands(
+def _get_circuit(endpoint: str) -> dict:
+    """Get or create a circuit for the given endpoint."""
+    if endpoint not in _circuits:
+        _circuits[endpoint] = _make_circuit()
+    return _circuits[endpoint]
+
+
+def _is_circuit_open(circuit: dict) -> bool:
+    """Return True if the circuit is open (should skip call)."""
+    if circuit["failures"] < circuit["threshold"]:
+        return False
+    if time.monotonic() >= circuit["open_until"]:
+        circuit["failures"] = circuit["threshold"] - 1  # Half-open
+        return False
+    return True
+
+
+def _record_success(circuit: dict) -> None:
+    """Reset circuit on success."""
+    circuit["failures"] = 0
+    circuit["open_until"] = 0.0
+
+
+def _record_failure(circuit: dict) -> None:
+    """Increment failures; open circuit if threshold reached."""
+    circuit["failures"] += 1
+    if circuit["failures"] >= circuit["threshold"]:
+        circuit["open_until"] = time.monotonic() + circuit["cooldown"]
+
+
+# --------------------------------------------------------------------------- #
+# Retry decorator factory
+# --------------------------------------------------------------------------- #
+
+_RETRYABLE = (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)
+
+
+def _pdb_retry(max_attempts: int = 5):
+    """Tenacity retry for PDB calls: 5x exponential backoff (D-29)."""
+    return retry(
+        stop=stop_after_attempt(max_attempts),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=8),
+        retry=retry_if_exception_type(_RETRYABLE),
+        reraise=True,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Async I/O functions
+# --------------------------------------------------------------------------- #
+
+
+@cache_non_none(maxsize=500, ttl_seconds=86400)
+async def search_similar_ligands(
+    client: httpx.AsyncClient,
     smiles: str,
-    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD
-) -> List[str]:
+    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+) -> list[str]:
     """
-    Search RCSB PDB for ligands similar to the query compound using direct REST API.
+    Search RCSB PDB for ligands similar to the query compound.
+
+    Uses chemical similarity search via the RCSB Search API v2.
 
     Args:
+        client: httpx.AsyncClient instance
         smiles: SMILES string of query compound
-        similarity_threshold: Tanimoto similarity threshold (0.0-1.0) [NOTE: Not used, graph-relaxed match is always used]
+        similarity_threshold: Tanimoto similarity threshold (0.0-1.0)
+            Note: graph-relaxed match type is always used.
 
     Returns:
-        List of PDB IDs containing similar ligands
-
-    Note:
-        Uses direct HTTPS REST API calls to avoid connection timeout issues.
-        Uses graph-relaxed match type (structural similarity).
-        API Documentation: https://search.rcsb.org/index.html#search-api
+        List of PDB IDs containing similar ligands (max 100)
     """
+    circuit = _get_circuit("pdb_search")
+    if _is_circuit_open(circuit):
+        logger.warning("pdb_search_circuit_open", smiles=smiles[:50])
+        return []
+
+    query_payload = {
+        "query": {
+            "type": "terminal",
+            "service": "chemical",
+            "parameters": {
+                "value": smiles,
+                "type": "descriptor",
+                "descriptor_type": "SMILES",
+                "match_type": "graph-relaxed",
+            },
+        },
+        "request_options": {"return_all_hits": True},
+        "return_type": "entry",
+    }
+
+    @_pdb_retry(max_attempts=5)
+    async def _do_search() -> list[str]:
+        _start = time.time()
+        response = await client.post(SEARCH_API_URL, json=query_payload, timeout=45)
+        latency_ms = (time.time() - _start) * 1000
+
+        metrics.increment("api_calls_total")
+        metrics.record_latency("pdb", latency_ms)
+
+        if response.status_code == 204:
+            logger.info("pdb_search_no_results", smiles=smiles[:50])
+            return []
+
+        if response.status_code == 429:
+            retry_after = int(response.headers.get("Retry-After", "5"))
+            await asyncio.sleep(retry_after)
+            raise httpx.ReadTimeout(f"PDB 429 retry-after {retry_after}s")
+
+        if response.status_code >= 500:
+            metrics.increment("api_calls_failed")
+            raise httpx.ReadTimeout(f"PDB server error {response.status_code}")
+
+        if response.status_code != 200:
+            logger.warning("pdb_search_unexpected_status", status=response.status_code)
+            metrics.increment("api_calls_failed")
+            return []
+
+        result = response.json()
+        pdb_ids = [entry["identifier"] for entry in result.get("result_set", [])]
+        pdb_ids = pdb_ids[:100]
+        logger.info("pdb_search_found", count=len(pdb_ids), smiles=smiles[:50])
+        return pdb_ids
+
     try:
-        logger.info(f"Searching PDB for ligands similar to SMILES: {smiles[:50]}...")
-        _search_start = time.time()
-
-        # Construct RCSB PDB Search API v2 Query
-        # Reference: https://search.rcsb.org/index.html#chemical-search
-        query_payload = {
-            "query": {
-                "type": "terminal",
-                "service": "chemical",
-                "parameters": {
-                    "value": smiles,
-                    "type": "descriptor",
-                    "descriptor_type": "SMILES",
-                    "match_type": "graph-relaxed"  # Structural similarity
-                }
-            },
-            "request_options": {
-                "return_all_hits": True
-            },
-            "return_type": "entry"
-        }
-
-        # Execute query with timeout and retry logic
-        max_retries = 2
-        retry_delay = 2  # seconds
-
-        for attempt in range(max_retries + 1):
-            try:
-                _pdb_rate_limiter.wait()  # Apply rate limiting
-                logger.debug(f"Sending PDB query to {SEARCH_API_URL} (attempt {attempt + 1}/{max_retries + 1})")
-
-                response = requests.post(
-                    SEARCH_API_URL,
-                    json=query_payload,
-                    timeout=SIMILARITY_QUERY_TIMEOUT,
-                    headers={
-                        'Content-Type': 'application/json',
-                        'Accept': 'application/json'
-                    }
-                )
-
-                # Check response status
-                if response.status_code == 200:
-                    result = response.json()
-
-                    # Extract PDB IDs from response
-                    pdb_ids = []
-                    if 'result_set' in result:
-                        pdb_ids = [entry['identifier'] for entry in result['result_set']]
-
-                    # Limit to top 100 results
-                    pdb_ids = pdb_ids[:100]
-
-                    metrics.increment('api_calls_total')
-                    metrics.record_latency('pdb', (time.time() - _search_start) * 1000)
-                    logger.info(f"Found {len(pdb_ids)} PDB entries with similar ligands")
-                    return pdb_ids
-
-                elif response.status_code == 204:
-                    # No content - no results found
-                    metrics.increment('api_calls_total')
-                    metrics.record_latency('pdb', (time.time() - _search_start) * 1000)
-                    logger.info("No PDB entries found with similar ligands")
-                    return []
-
-                elif response.status_code == 500:
-                    # Server error - retry
-                    if attempt < max_retries:
-                        logger.warning(f"PDB server returned 500 error (attempt {attempt + 1}, retrying in {retry_delay}s)")
-                        time.sleep(retry_delay)
-                        continue
-                    else:
-                        logger.error("PDB server returned 500 error after all retry attempts")
-                        metrics.increment('api_calls_total')
-                        metrics.increment('api_calls_failed')
-                        return []
-
-                else:
-                    logger.error(f"PDB query failed with status {response.status_code}: {response.text}")
-                    metrics.increment('api_calls_total')
-                    metrics.increment('api_calls_failed')
-                    return []
-
-            except requests.exceptions.Timeout:
-                if attempt < max_retries:
-                    logger.warning(f"PDB query timed out (attempt {attempt + 1}, retrying in {retry_delay}s)")
-                    time.sleep(retry_delay)
-                else:
-                    logger.error(f"PDB query timed out after {max_retries + 1} attempts")
-                    metrics.increment('api_calls_total')
-                    metrics.increment('api_calls_failed')
-                    return []
-
-            except requests.exceptions.RequestException as req_error:
-                if attempt < max_retries:
-                    logger.warning(f"PDB query failed (attempt {attempt + 1}, retrying in {retry_delay}s): {str(req_error)}")
-                    time.sleep(retry_delay)
-                else:
-                    logger.error(f"PDB query failed after {max_retries + 1} attempts: {str(req_error)}")
-                    metrics.increment('api_calls_total')
-                    metrics.increment('api_calls_failed')
-                    return []
-
-            except json.JSONDecodeError as json_error:
-                logger.error(f"Invalid JSON response from PDB API: {str(json_error)}")
-                metrics.increment('api_calls_total')
-                metrics.increment('api_calls_failed')
-                return []
-
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"Error searching PDB for similar ligands: {error_msg}")
-        logger.error(f"SMILES: {smiles}")
-        logger.info("PDB evidence will not be available for this compound, but processing will continue.")
-        metrics.increment('api_calls_total')
-        metrics.increment('api_calls_failed')
+        result = await _do_search()
+        _record_success(circuit)
+        return result
+    except Exception as exc:
+        _record_failure(circuit)
+        logger.warning("pdb_search_failed", smiles=smiles[:50], error=str(exc))
+        metrics.increment("api_calls_failed")
         return []
 
 
-@lru_cache(maxsize=CACHE_SIZE)
-def get_structure_details(pdb_id: str) -> Dict[str, any]:
+@cache_non_none(maxsize=500, ttl_seconds=604800)
+async def get_structure_details(
+    client: httpx.AsyncClient,
+    pdb_id: str,
+) -> dict[str, Any]:
     """
     Retrieve detailed information for a PDB structure.
 
     Args:
+        client: httpx.AsyncClient instance
         pdb_id: PDB identifier (e.g., "4HHB")
 
     Returns:
-        Dictionary containing:
-        - pdb_id: PDB code
-        - title: Structure title/name
-        - resolution: Resolution in Ångströms (Å)
-        - doi: DOI of publication
-        - uniprot_ids: List of UniProt accession IDs
-        - url: Link to RCSB PDB structure page
-        - experimental_method: Experimental method used
+        Dictionary with pdb_id, title, resolution, doi, uniprot_ids, url,
+        experimental_method.
     """
-    result = {
-        'pdb_id': pdb_id,
-        'title': None,
-        'resolution': None,
-        'doi': None,
-        'uniprot_ids': [],
-        'url': f"https://www.rcsb.org/structure/{pdb_id}",
-        'experimental_method': None
+    circuit = _get_circuit("pdb_details")
+    result: dict[str, Any] = {
+        "pdb_id": pdb_id,
+        "title": None,
+        "resolution": None,
+        "doi": None,
+        "uniprot_ids": [],
+        "url": f"https://www.rcsb.org/structure/{pdb_id}",
+        "experimental_method": None,
     }
 
+    if _is_circuit_open(circuit):
+        logger.warning("pdb_details_circuit_open", pdb_id=pdb_id)
+        return result
+
+    @_pdb_retry(max_attempts=5)
+    async def _fetch_entry() -> dict:
+        resp = await client.get(f"{DATA_API_URL}/entry/{pdb_id}", timeout=30)
+        if resp.status_code != 200:
+            return {}
+        return resp.json()
+
+    @_pdb_retry(max_attempts=5)
+    async def _fetch_entity() -> dict:
+        resp = await client.get(f"{DATA_API_URL}/polymer_entity/{pdb_id}/1", timeout=30)
+        if resp.status_code != 200:
+            return {}
+        return resp.json()
+
     try:
-        # Fetch entry data
-        url = f"{DATA_API_URL}/entry/{pdb_id}"
-        response = _get_thread_session().get(url, timeout=API_TIMEOUT)
+        entry_data, entity_data = await asyncio.gather(
+            _fetch_entry(), _fetch_entity(), return_exceptions=True
+        )
 
-        if response.status_code == 200:
-            data = response.json()
+        # Process entry data
+        if isinstance(entry_data, dict) and entry_data:
+            if "struct" in entry_data and "title" in entry_data["struct"]:
+                result["title"] = entry_data["struct"]["title"]
 
-            # Extract title
-            if 'struct' in data and 'title' in data['struct']:
-                result['title'] = data['struct']['title']
+            if "rcsb_entry_info" in entry_data:
+                res_list = entry_data["rcsb_entry_info"].get("resolution_combined", [])
+                if res_list:
+                    result["resolution"] = float(res_list[0])
 
-            # Extract resolution
-            if 'rcsb_entry_info' in data:
-                if 'resolution_combined' in data['rcsb_entry_info']:
-                    resolution_list = data['rcsb_entry_info']['resolution_combined']
-                    if resolution_list and len(resolution_list) > 0:
-                        result['resolution'] = float(resolution_list[0])
+            if "exptl" in entry_data and entry_data["exptl"]:
+                result["experimental_method"] = entry_data["exptl"][0].get("method")
 
-            # Extract experimental method
-            if 'exptl' in data and len(data['exptl']) > 0:
-                result['experimental_method'] = data['exptl'][0].get('method', None)
+            if "rcsb_primary_citation" in entry_data:
+                result["doi"] = entry_data["rcsb_primary_citation"].get(
+                    "pdbx_database_id_DOI"
+                )
 
-            # Extract DOI from primary citation
-            if 'rcsb_primary_citation' in data:
-                result['doi'] = data['rcsb_primary_citation'].get('pdbx_database_id_DOI', None)
+        # Process entity data
+        if isinstance(entity_data, dict) and entity_data:
+            ids_container = entity_data.get("rcsb_polymer_entity_container_identifiers", {})
+            for ref in ids_container.get("reference_sequence_identifiers", []):
+                if ref.get("database_name") == "UniProt":
+                    uid = ref.get("database_accession")
+                    if uid and uid not in result["uniprot_ids"]:
+                        result["uniprot_ids"].append(uid)
 
-        # Fetch polymer entity data for UniProt IDs
-        # Try entity 1 (most structures have at least one polymer entity)
-        try:
-            entity_url = f"{DATA_API_URL}/polymer_entity/{pdb_id}/1"
-            entity_response = _get_thread_session().get(entity_url, timeout=API_TIMEOUT)
-
-            if entity_response.status_code == 200:
-                entity_data = entity_response.json()
-
-                # Extract UniProt IDs from database references
-                if 'rcsb_polymer_entity_container_identifiers' in entity_data:
-                    identifiers = entity_data['rcsb_polymer_entity_container_identifiers']
-                    if 'reference_sequence_identifiers' in identifiers:
-                        for ref in identifiers['reference_sequence_identifiers']:
-                            if ref.get('database_name') == 'UniProt':
-                                uniprot_id = ref.get('database_accession')
-                                if uniprot_id and uniprot_id not in result['uniprot_ids']:
-                                    result['uniprot_ids'].append(uniprot_id)
-
-        except Exception as e:
-            logger.debug(f"Could not fetch polymer entity for {pdb_id}: {str(e)}")
-
-    except Exception as e:
-        logger.error(f"Error retrieving details for {pdb_id}: {str(e)}")
+        _record_success(circuit)
+    except Exception as exc:
+        _record_failure(circuit)
+        logger.error("pdb_details_failed", pdb_id=pdb_id, error=str(exc))
 
     return result
 
 
-def get_batch_structure_resolutions_graphql(pdb_ids: List[str]) -> Dict[str, Optional[float]]:
+async def get_batch_structure_resolutions_graphql(
+    client: httpx.AsyncClient,
+    pdb_ids: list[str],
+) -> dict[str, float | None]:
     """
-    Fetch resolutions via single GraphQL query (9.5x faster than REST).
-
-    Validated in test_quercetin_verification.py:
-    - 64 PDB IDs in ~0.16s (vs 12.8s+ with REST)
-    - 100% data accuracy vs REST
+    Fetch resolutions via a single GraphQL query (9.5x faster than REST).
 
     Args:
+        client: httpx.AsyncClient instance
         pdb_ids: List of PDB identifiers
 
     Returns:
@@ -349,7 +309,11 @@ def get_batch_structure_resolutions_graphql(pdb_ids: List[str]) -> Dict[str, Opt
     if not pdb_ids:
         return {}
 
-    # Normalize IDs to uppercase
+    circuit = _get_circuit("pdb_graphql")
+    if _is_circuit_open(circuit):
+        logger.warning("pdb_graphql_circuit_open")
+        return {}
+
     pdb_ids_normalized = [pid.upper() for pid in pdb_ids]
 
     graphql_query = """
@@ -365,182 +329,148 @@ def get_batch_structure_resolutions_graphql(pdb_ids: List[str]) -> Dict[str, Opt
 
     try:
         _gql_start = time.time()
-        response = requests.post(
-            "https://data.rcsb.org/graphql",
+        response = await client.post(
+            GRAPHQL_URL,
             json={"query": graphql_query, "variables": {"ids": pdb_ids_normalized}},
-            headers={"Content-Type": "application/json"},
-            timeout=60
+            timeout=60,
         )
+        latency_ms = (time.time() - _gql_start) * 1000
 
-        resolutions = {}
-        metrics.increment('api_calls_total')
-        metrics.record_latency('pdb', (time.time() - _gql_start) * 1000)
+        metrics.increment("api_calls_total")
+        metrics.record_latency("pdb", latency_ms)
+
+        resolutions: dict[str, float | None] = {}
         if response.status_code == 200:
             data = response.json()
             for entry in data.get("data", {}).get("entries", []) or []:
-                pdb_id = entry.get("rcsb_id")
+                pid = entry.get("rcsb_id")
                 res_list = entry.get("rcsb_entry_info", {}).get("resolution_combined", [])
-                resolutions[pdb_id] = res_list[0] if res_list else None
-            logger.info(f"GraphQL fetched {len(resolutions)}/{len(pdb_ids)} resolutions")
+                resolutions[pid] = res_list[0] if res_list else None
+            logger.info(
+                "pdb_graphql_resolutions",
+                fetched=len(resolutions),
+                requested=len(pdb_ids),
+            )
+            _record_success(circuit)
         else:
-            metrics.increment('api_calls_failed')
-            logger.warning(f"GraphQL resolution fetch returned HTTP {response.status_code}")
+            metrics.increment("api_calls_failed")
+            logger.warning("pdb_graphql_error", status=response.status_code)
+            _record_failure(circuit)
+
         return resolutions
 
-    except Exception as e:
-        metrics.increment('api_calls_failed')
-        logger.error(f"GraphQL resolution fetch failed: {e}")
-        # Return empty - caller can use REST as fallback
+    except Exception as exc:
+        metrics.increment("api_calls_failed")
+        _record_failure(circuit)
+        logger.error("pdb_graphql_failed", error=str(exc))
         return {}
 
 
-def _fetch_resolutions_parallel_rest(pdb_ids: List[str]) -> Dict[str, Optional[float]]:
-    """Fetch resolutions via parallel REST calls with rate limiting."""
-    from concurrent.futures import as_completed
+async def _fetch_single_resolution(
+    client: httpx.AsyncClient,
+    pdb_id: str,
+) -> tuple[str, float | None]:
+    """Fetch resolution for a single PDB ID via REST (used as fallback)."""
 
-    results = {}
-    with ThreadPoolExecutor(max_workers=MAX_PDB_WORKERS) as executor:
-        futures = {
-            executor.submit(get_structure_resolution, pid): pid
-            for pid in pdb_ids
-        }
-        for future in as_completed(futures):
-            pid = futures[future]
-            try:
-                results[pid.upper()] = future.result(timeout=30)
-            except Exception as e:
-                logger.debug(f"REST fetch failed for {pid}: {e}")
-                results[pid.upper()] = None
-    return results
+    @_pdb_retry(max_attempts=5)
+    async def _do_fetch() -> float | None:
+        resp = await client.get(f"{DATA_API_URL}/entry/{pdb_id}", timeout=30)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        res_list = data.get("rcsb_entry_info", {}).get("resolution_combined", [])
+        return float(res_list[0]) if res_list else None
+
+    try:
+        resolution = await _do_fetch()
+        return (pdb_id.upper(), resolution)
+    except Exception as exc:
+        logger.debug("pdb_rest_resolution_failed", pdb_id=pdb_id, error=str(exc))
+        return (pdb_id.upper(), None)
 
 
-def get_batch_structure_resolutions(pdb_ids: List[str]) -> Dict[str, Optional[float]]:
+async def _fetch_resolutions_parallel_rest(
+    client: httpx.AsyncClient,
+    pdb_ids: list[str],
+) -> dict[str, float | None]:
+    """Fetch resolutions via parallel async REST calls using asyncio.gather."""
+    results = await asyncio.gather(
+        *[_fetch_single_resolution(client, pid) for pid in pdb_ids],
+        return_exceptions=True,
+    )
+    out: dict[str, float | None] = {}
+    for item in results:
+        if isinstance(item, tuple):
+            out[item[0]] = item[1]
+        # Exceptions are silently dropped (PDB is non-critical)
+    return out
+
+
+async def get_batch_structure_resolutions(
+    client: httpx.AsyncClient,
+    pdb_ids: list[str],
+) -> dict[str, float | None]:
     """
     Retrieve resolutions for multiple PDB structures.
 
-    OPTIMIZED: Uses GraphQL for 9.5x speedup over sequential REST.
-    Falls back to parallel REST if GraphQL fails.
+    Uses GraphQL primary, falls back to parallel REST if GraphQL fails (D-35).
 
     Args:
+        client: httpx.AsyncClient instance
         pdb_ids: List of PDB identifiers (e.g., ["4HHB", "3WHM", "2CPK"])
 
     Returns:
-        Dictionary mapping PDB ID to resolution (float or None if not available)
-        Example: {"4HHB": 1.74, "3WHM": 2.10, "2CPK": None}
+        Dictionary mapping PDB ID to resolution (float or None)
     """
     if not pdb_ids:
         return {}
 
-    logger.info(f"Fetching resolutions for {len(pdb_ids)} PDB structures (GraphQL)...")
+    logger.info("pdb_batch_resolutions_start", count=len(pdb_ids))
 
     # Try GraphQL first (fast)
-    resolutions = get_batch_structure_resolutions_graphql(pdb_ids)
+    resolutions = await get_batch_structure_resolutions_graphql(client, pdb_ids)
 
     if resolutions:
-        # GraphQL succeeded - check for any missing entries
         pdb_ids_upper = [pid.upper() for pid in pdb_ids]
         missing = [pid for pid in pdb_ids_upper if pid not in resolutions]
 
         if missing:
-            logger.debug(f"GraphQL missed {len(missing)} IDs, trying GraphQL retry...")
-            # Try GraphQL again for missing IDs (might be transient)
-            retry_results = get_batch_structure_resolutions_graphql(missing)
+            logger.debug("pdb_graphql_missing", count=len(missing))
+            # Retry GraphQL for missing IDs
+            retry_results = await get_batch_structure_resolutions_graphql(client, missing)
             resolutions.update(retry_results)
 
             # Still missing? Use parallel REST as final fallback
             still_missing = [pid for pid in missing if pid not in resolutions]
             if still_missing:
-                logger.debug(f"Using parallel REST for {len(still_missing)} remaining IDs...")
-                rest_results = _fetch_resolutions_parallel_rest(still_missing)
+                logger.debug("pdb_rest_fallback", count=len(still_missing))
+                rest_results = await _fetch_resolutions_parallel_rest(client, still_missing)
                 resolutions.update(rest_results)
 
-        logger.info(f"Successfully fetched {len([r for r in resolutions.values() if r is not None])}/{len(pdb_ids)} resolutions")
+        resolved = len([r for r in resolutions.values() if r is not None])
+        logger.info("pdb_batch_resolutions_done", resolved=resolved, total=len(pdb_ids))
         return resolutions
 
     # GraphQL failed completely, fall back to parallel REST
-    logger.warning("GraphQL failed, falling back to parallel REST...")
-    resolutions = _fetch_resolutions_parallel_rest(pdb_ids)
+    logger.warning("pdb_graphql_total_fail_rest_fallback")
+    resolutions = await _fetch_resolutions_parallel_rest(client, pdb_ids)
 
-    logger.info(f"Successfully fetched {len([r for r in resolutions.values() if r is not None])}/{len(pdb_ids)} resolutions")
+    resolved = len([r for r in resolutions.values() if r is not None])
+    logger.info("pdb_batch_resolutions_done", resolved=resolved, total=len(pdb_ids))
     return resolutions
 
 
-@lru_cache(maxsize=CACHE_SIZE)
-def get_structure_resolution(pdb_id: str) -> Optional[float]:
-    """
-    Retrieve X-ray crystallography resolution for a PDB structure.
-
-    Args:
-        pdb_id: PDB identifier (e.g., "4HHB")
-
-    Returns:
-        Resolution in Ångströms (Å), or None if not available
-
-    Note:
-        This is a lightweight function for backward compatibility.
-        Use get_structure_details() for comprehensive information.
-    """
-    if USE_OFFICIAL_API:
-        try:
-            # Use official Data API
-            data_query = DataQuery(
-                input_type="entries",
-                input_ids=[pdb_id],
-                return_data_list=["rcsb_entry_info.resolution_combined"]
-            )
-
-            result = data_query.exec()
-
-            # Result format: {'data': {'entries': [{'rcsb_id': '...', 'rcsb_entry_info': {...}}]}}
-            if result and 'data' in result and 'entries' in result['data']:
-                entries = result['data']['entries']
-                if len(entries) > 0:
-                    entry_data = entries[0]
-                    if 'rcsb_entry_info' in entry_data:
-                        if 'resolution_combined' in entry_data['rcsb_entry_info']:
-                            resolution_list = entry_data['rcsb_entry_info']['resolution_combined']
-                            if resolution_list and len(resolution_list) > 0:
-                                return float(resolution_list[0])
-
-            logger.debug(f"No resolution data found for {pdb_id}")
-            return None
-
-        except Exception as e:
-            logger.error(f"Error retrieving resolution for {pdb_id}: {str(e)}")
-            return None
-    else:
-        # Fallback to manual REST API query
-        try:
-            url = f"{DATA_API_URL}/entry/{pdb_id}"
-            response = _get_thread_session().get(url, timeout=API_TIMEOUT)
-
-            if response.status_code == 200:
-                data = response.json()
-
-                # Try rcsb_entry_info.resolution_combined
-                if 'rcsb_entry_info' in data:
-                    if 'resolution_combined' in data['rcsb_entry_info']:
-                        resolution_list = data['rcsb_entry_info']['resolution_combined']
-                        if resolution_list and len(resolution_list) > 0:
-                            return float(resolution_list[0])
-
-                logger.debug(f"No resolution data found for {pdb_id}")
-                return None
-            else:
-                logger.warning(f"Failed to retrieve data for {pdb_id}: {response.status_code}")
-                return None
-
-        except Exception as e:
-            logger.error(f"Error retrieving resolution for {pdb_id}: {str(e)}")
-            return None
+# --------------------------------------------------------------------------- #
+# Pure functions (sync, no I/O)
+# --------------------------------------------------------------------------- #
 
 
-def classify_resolution_quality(resolution: float) -> Tuple[str, float]:
+def classify_resolution_quality(resolution: float) -> tuple[str, float]:
     """
     Classify resolution quality and return quality score.
 
     Args:
-        resolution: Resolution in Ångströms (Å)
+        resolution: Resolution in Angstroms
 
     Returns:
         Tuple of (quality_class, quality_multiplier)
@@ -552,260 +482,215 @@ def classify_resolution_quality(resolution: float) -> Tuple[str, float]:
     elif resolution <= 3.0:
         return ("**", 0.75)  # Medium quality
     else:
-        return ("*", 0.5)    # Poor quality
+        return ("*", 0.5)  # Poor quality
 
 
-def get_pdb_evidence_score(
+# --------------------------------------------------------------------------- #
+# High-level scoring functions
+# --------------------------------------------------------------------------- #
+
+
+async def get_pdb_evidence_score(
+    client: httpx.AsyncClient,
     smiles: str,
-    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD
-) -> Dict[str, any]:
+    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+) -> dict[str, Any]:
     """
     Calculate PDB Structural Evidence Score (Component 4 of IMP scoring).
 
     Args:
+        client: httpx.AsyncClient instance
         smiles: SMILES string of query compound
         similarity_threshold: Tanimoto similarity threshold (default 0.9)
 
     Returns:
-        Dictionary containing:
-        - pdb_score: Final score (0.0-1.0)
-        - num_structures: Total number of similar structures found
-        - num_high_quality: Number of high-quality structures (< 2.0 Å)
-        - num_medium_quality: Number of medium-quality structures (2.0-3.0 Å)
-        - num_poor_quality: Number of poor-quality structures (> 3.0 Å)
-        - pdb_ids: List of PDB IDs found
-        - resolutions: List of resolutions (in Å)
-        - quality_classes: List of quality classifications
+        Dictionary containing pdb_score, num_structures, num_high_quality,
+        num_medium_quality, num_poor_quality, pdb_ids, resolutions, quality_classes.
 
     Scoring Logic:
         Base score = min(num_structures_with_resolution / 5.0, 1.0)
-        Quality-adjusted score = (sum of quality_multipliers) / (num_structures * max_multiplier)
-
-    Example:
-        5+ high-quality structures = score 1.0
-        3 medium-quality structures = score ~0.45
-        1 poor-quality structure = score ~0.10
+        Quality-adjusted = (sum of quality_multipliers) / num_with_resolution
+        Final = average of base and quality-adjusted
     """
-    logger.info(f"Calculating PDB evidence score for SMILES: {smiles[:50]}...")
+    logger.info("pdb_evidence_score_start", smiles=smiles[:50])
 
-    # Step 1: Search for similar ligands in PDB
-    pdb_ids = search_similar_ligands(smiles, similarity_threshold)
+    empty_result: dict[str, Any] = {
+        "pdb_score": 0.0,
+        "num_structures": 0,
+        "num_high_quality": 0,
+        "num_medium_quality": 0,
+        "num_poor_quality": 0,
+        "pdb_ids": [],
+        "resolutions": [],
+        "quality_classes": [],
+    }
 
+    # Step 1: Search for similar ligands
+    pdb_ids = await search_similar_ligands(client, smiles, similarity_threshold)
     if not pdb_ids:
-        logger.info("No similar structures found in PDB")
-        return {
-            'pdb_score': 0.0,
-            'num_structures': 0,
-            'num_high_quality': 0,
-            'num_medium_quality': 0,
-            'num_poor_quality': 0,
-            'pdb_ids': [],
-            'resolutions': [],
-            'quality_classes': []
-        }
+        logger.info("pdb_no_similar_structures")
+        return empty_result
 
-    # Step 2: Retrieve resolution data for all structures in batches (OPTIMIZED!)
-    # OLD: for loop with 100 individual API calls + 10 seconds of delays
-    # NEW: batched query with 2-3 API calls total (50 IDs per batch)
-    resolution_dict = get_batch_structure_resolutions(pdb_ids)
+    # Step 2: Fetch resolutions (GraphQL primary, REST fallback)
+    resolution_dict = await get_batch_structure_resolutions(client, pdb_ids)
 
-    resolutions = []
-    quality_classes = []
-    quality_multipliers = []
+    resolutions: list[float | None] = []
+    quality_classes: list[str] = []
+    quality_multipliers: list[float] = []
 
     for pdb_id in pdb_ids:
         resolution = resolution_dict.get(pdb_id.upper())
-
         if resolution is not None:
             resolutions.append(resolution)
             quality_class, quality_mult = classify_resolution_quality(resolution)
             quality_classes.append(quality_class)
             quality_multipliers.append(quality_mult)
         else:
-            # No resolution data available for this structure
             resolutions.append(None)
             quality_classes.append("N/A")
             quality_multipliers.append(0.0)
 
-    # Step 3: Calculate counts by quality
-    num_high_quality = sum(1 for q in quality_classes if q == "***")
-    num_medium_quality = sum(1 for q in quality_classes if q == "**")
-    num_poor_quality = sum(1 for q in quality_classes if q == "*")
-    num_with_resolution = num_high_quality + num_medium_quality + num_poor_quality
+    # Step 3: Counts
+    num_high = sum(1 for q in quality_classes if q == "***")
+    num_medium = sum(1 for q in quality_classes if q == "**")
+    num_poor = sum(1 for q in quality_classes if q == "*")
+    num_with_resolution = num_high + num_medium + num_poor
 
-    # Step 4: Calculate PDB score
+    # Step 4: Score
     if num_with_resolution == 0:
         pdb_score = 0.0
     else:
-        # Base score: count-based (5+ structures = 1.0)
         base_score = min(num_with_resolution / 5.0, 1.0)
+        quality_weighted = sum(quality_multipliers) / num_with_resolution
+        pdb_score = (base_score + quality_weighted) / 2.0
 
-        # Quality adjustment: weighted by resolution quality
-        quality_weighted_score = sum(quality_multipliers) / (num_with_resolution * 1.0)
-
-        # Final score: average of base and quality-weighted
-        pdb_score = (base_score + quality_weighted_score) / 2.0
-
-    logger.info(f"PDB Evidence Score: {pdb_score:.3f} ({num_with_resolution} structures, "
-                f"{num_high_quality} high, {num_medium_quality} medium, {num_poor_quality} poor)")
+    logger.info(
+        "pdb_evidence_score_done",
+        score=round(pdb_score, 3),
+        structures=num_with_resolution,
+        high=num_high,
+        medium=num_medium,
+        poor=num_poor,
+    )
 
     return {
-        'pdb_score': pdb_score,
-        'num_structures': len(pdb_ids),
-        'num_high_quality': num_high_quality,
-        'num_medium_quality': num_medium_quality,
-        'num_poor_quality': num_poor_quality,
-        'pdb_ids': pdb_ids,
-        'resolutions': resolutions,
-        'quality_classes': quality_classes
+        "pdb_score": pdb_score,
+        "num_structures": len(pdb_ids),
+        "num_high_quality": num_high,
+        "num_medium_quality": num_medium,
+        "num_poor_quality": num_poor,
+        "pdb_ids": pdb_ids,
+        "resolutions": resolutions,
+        "quality_classes": quality_classes,
     }
 
 
-def get_detailed_pdb_structures(smiles: str) -> List[Dict[str, any]]:
+async def get_detailed_pdb_structures(
+    client: httpx.AsyncClient,
+    smiles: str,
+) -> list[dict[str, Any]]:
     """
     Get detailed information for all PDB structures matching a compound.
 
     Args:
+        client: httpx.AsyncClient instance
         smiles: SMILES string of query compound
 
     Returns:
-        List of dictionaries, each containing:
-        - pdb_id: PDB code
-        - title: Structure title/name
-        - resolution: Resolution in Ångströms
-        - quality_class: Quality classification (***/**/*)
-        - uniprot_ids: Comma-separated UniProt IDs
-        - url: Link to RCSB PDB page
-        - experimental_method: Experimental method used
-
-    Note:
-        Results are sorted by quality (*** first) and then by resolution (best first)
+        List of dicts sorted by quality (*** first) then resolution (best first).
     """
-    logger.info(f"Fetching detailed PDB structures for SMILES: {smiles[:50]}...")
+    logger.info("pdb_detailed_structures_start", smiles=smiles[:50])
 
-    # Get basic PDB evidence
-    pdb_result = get_pdb_evidence_score(smiles)
-
-    if not pdb_result['pdb_ids']:
+    pdb_result = await get_pdb_evidence_score(client, smiles)
+    if not pdb_result["pdb_ids"]:
         return []
 
-    detailed_structures = []
+    # Fetch details in parallel via asyncio.gather
+    details_list = await asyncio.gather(
+        *[get_structure_details(client, pid) for pid in pdb_result["pdb_ids"]],
+        return_exceptions=True,
+    )
 
-    for i, pdb_id in enumerate(pdb_result['pdb_ids']):
-        try:
-            # Get detailed information for this structure
-            details = get_structure_details(pdb_id)
+    detailed_structures: list[dict[str, Any]] = []
+    for i, details in enumerate(details_list):
+        pdb_id = pdb_result["pdb_ids"][i]
+        resolution = pdb_result["resolutions"][i]
+        quality_class = pdb_result["quality_classes"][i]
 
-            # Add quality classification
-            resolution = pdb_result['resolutions'][i]
-            quality_class = pdb_result['quality_classes'][i]
-
-            structure_info = {
-                'PDB_ID': details['pdb_id'],
-                'Title': details['title'] if details['title'] else 'N/A',
-                'Resolution': resolution if resolution is not None else 999.0,  # Use high value for N/A to sort last
-                'Quality': quality_class,
-                'UniProt_IDs': ','.join(details['uniprot_ids']) if details['uniprot_ids'] else 'N/A',
-                'Experimental_Method': details['experimental_method'] if details['experimental_method'] else 'N/A',
-                'URL': details['url']
+        if isinstance(details, Exception):
+            details = {
+                "pdb_id": pdb_id,
+                "title": "Error fetching details",
+                "uniprot_ids": [],
+                "experimental_method": None,
+                "url": f"https://www.rcsb.org/structure/{pdb_id}",
             }
 
-            detailed_structures.append(structure_info)
+        detailed_structures.append({
+            "PDB_ID": details.get("pdb_id", pdb_id),
+            "Title": details.get("title") or "N/A",
+            "Resolution": resolution if resolution is not None else 999.0,
+            "Quality": quality_class,
+            "UniProt_IDs": ",".join(details.get("uniprot_ids", [])) or "N/A",
+            "Experimental_Method": details.get("experimental_method") or "N/A",
+            "URL": details.get("url", f"https://www.rcsb.org/structure/{pdb_id}"),
+        })
 
-            # Rate limiting using config
-            time.sleep(PDB_API_DELAY)
+    # Sort by quality then resolution
+    quality_order = {"***": 1, "**": 2, "*": 3, "N/A": 4}
+    detailed_structures.sort(
+        key=lambda x: (quality_order.get(x["Quality"], 4), x["Resolution"])
+    )
 
-        except Exception as e:
-            logger.error(f"Error fetching details for {pdb_id}: {str(e)}")
-            # Add minimal entry
-            detailed_structures.append({
-                'PDB_ID': pdb_id,
-                'Title': 'Error fetching details',
-                'Resolution': 999.0,  # Sort errors last
-                'Quality': pdb_result['quality_classes'][i] if i < len(pdb_result['quality_classes']) else 'N/A',
-                'UniProt_IDs': 'N/A',
-                'Experimental_Method': 'N/A',
-                'URL': f"https://www.rcsb.org/structure/{pdb_id}"
-            })
+    # Convert sentinel back to N/A for display
+    for s in detailed_structures:
+        if s["Resolution"] == 999.0:
+            s["Resolution"] = "N/A"
 
-    # Sort by quality (*** > ** > *) and then by resolution (lower is better)
-    quality_order = {'***': 1, '**': 2, '*': 3, 'N/A': 4}
-    detailed_structures.sort(key=lambda x: (quality_order.get(x['Quality'], 4), x['Resolution']))
-
-    # Convert Resolution back to 'N/A' for display if it was 999.0
-    for structure in detailed_structures:
-        if structure['Resolution'] == 999.0:
-            structure['Resolution'] = 'N/A'
-
-    logger.info(f"Retrieved and sorted {len(detailed_structures)} PDB structures (best quality first)")
+    logger.info("pdb_detailed_structures_done", count=len(detailed_structures))
     return detailed_structures
 
 
-def get_pdb_summary_for_compound(smiles: str) -> str:
+async def get_pdb_summary_for_compound(
+    client: httpx.AsyncClient,
+    smiles: str,
+) -> str:
     """
     Generate a human-readable summary of PDB evidence for a compound.
 
     Args:
+        client: httpx.AsyncClient instance
         smiles: SMILES string of query compound
 
     Returns:
         Formatted string summarizing PDB evidence
     """
-    result = get_pdb_evidence_score(smiles)
+    result = await get_pdb_evidence_score(client, smiles)
 
-    if result['num_structures'] == 0:
+    if result["num_structures"] == 0:
         return "No experimental structures found in PDB for this compound or close analogs."
 
-    summary_parts = []
-    summary_parts.append(f"Found {result['num_structures']} similar structure(s) in PDB")
-    summary_parts.append(f"PDB Evidence Score: {result['pdb_score']:.3f}/1.0")
+    parts: list[str] = []
+    parts.append(f"Found {result['num_structures']} similar structure(s) in PDB")
+    parts.append(f"PDB Evidence Score: {result['pdb_score']:.3f}/1.0")
 
-    if result['num_high_quality'] > 0:
-        summary_parts.append(f"- {result['num_high_quality']} high-quality (*** < 2.0 Å)")
-    if result['num_medium_quality'] > 0:
-        summary_parts.append(f"- {result['num_medium_quality']} medium-quality (** 2.0-3.0 Å)")
-    if result['num_poor_quality'] > 0:
-        summary_parts.append(f"- {result['num_poor_quality']} poor-quality (* > 3.0 Å)")
+    if result["num_high_quality"] > 0:
+        parts.append(f"- {result['num_high_quality']} high-quality (*** < 2.0 A)")
+    if result["num_medium_quality"] > 0:
+        parts.append(f"- {result['num_medium_quality']} medium-quality (** 2.0-3.0 A)")
+    if result["num_poor_quality"] > 0:
+        parts.append(f"- {result['num_poor_quality']} poor-quality (* > 3.0 A)")
 
-    # Show top 5 PDB IDs with resolution
-    summary_parts.append("\nTop PDB Entries:")
-    for i, (pdb_id, resolution, quality) in enumerate(zip(
-        result['pdb_ids'][:5],
-        result['resolutions'][:5],
-        result['quality_classes'][:5]
-    )):
+    parts.append("\nTop PDB Entries:")
+    for pdb_id, resolution, quality in zip(
+        result["pdb_ids"][:5],
+        result["resolutions"][:5],
+        result["quality_classes"][:5],
+    ):
         if resolution is not None:
-            summary_parts.append(f"  {pdb_id}: {resolution:.2f} Å ({quality})")
+            parts.append(f"  {pdb_id}: {resolution:.2f} A ({quality})")
         else:
-            summary_parts.append(f"  {pdb_id}: Resolution N/A")
+            parts.append(f"  {pdb_id}: Resolution N/A")
 
-    return "\n".join(summary_parts)
+    return "\n".join(parts)
 
-
-def shutdown_pdb_client():
-    """Close module-level session and reset thread-local sessions.
-
-    Called during application lifespan teardown (STAB-16).
-    """
-    global session, _thread_local
-    if session is not None:
-        try:
-            session.close()
-        except Exception:
-            pass
-    _thread_local = threading.local()
-    logger.info("PDB client sessions reset")
-
-
-# Example usage for testing
-if __name__ == "__main__":
-    # Test with a known compound (e.g., ATP)
-    test_smiles = "C1=NC(=C2C(=N1)N(C=N2)C3C(C(C(O3)COP(=O)(O)OP(=O)(O)OP(=O)(O)O)O)O)N"
-
-    print("Testing PDB Client Module")
-    print("=" * 60)
-    print(f"Query SMILES: {test_smiles}")
-    print()
-
-    summary = get_pdb_summary_for_compound(test_smiles)
-    print(summary)

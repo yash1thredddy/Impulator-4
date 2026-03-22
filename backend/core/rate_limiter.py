@@ -3,9 +3,11 @@ Rate limiting for API endpoints.
 
 Provides a RateLimiter class and FastAPI injectable dependencies
 for per-session, per-route rate limiting.
+
+Uses asyncio.Lock for async-safe concurrency (single event loop).
 """
+import asyncio
 import time
-import threading
 from collections import defaultdict
 from fastapi import Depends, HTTPException
 
@@ -21,7 +23,7 @@ RATE_LIMIT_MAX_BATCH = 3  # Max 3 batch submissions per minute per session
 class RateLimiter:
     """Simple in-memory rate limiter per session.
 
-    Thread-safe implementation using defaultdict and locks.
+    Async-safe implementation using defaultdict and asyncio.Lock.
     Automatically cleans up old entries to prevent memory leaks.
     Limited to MAX_SESSIONS to prevent unbounded growth.
     """
@@ -29,7 +31,7 @@ class RateLimiter:
 
     def __init__(self, window_seconds: int = RATE_LIMIT_WINDOW_SECONDS):
         self._requests: dict = defaultdict(list)  # session_id -> [timestamps]
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
         self._window_seconds = window_seconds
 
     def _cleanup_session(self, session_id: str, now: float) -> None:
@@ -57,7 +59,7 @@ class RateLimiter:
         """Return the number of active sessions being tracked."""
         return len(self._requests)
 
-    def check_rate_limit(self, session_id: str, limit: int) -> tuple[bool, int]:
+    async def check_rate_limit(self, session_id: str, limit: int) -> tuple[bool, int]:
         """Check if request is within rate limit.
 
         Args:
@@ -70,7 +72,7 @@ class RateLimiter:
         if not session_id:
             session_id = "anonymous"
 
-        with self._lock:
+        async with self._lock:
             now = time.time()
 
             # Clean this session's old entries
@@ -106,11 +108,14 @@ def get_rate_limiter() -> RateLimiter:
 def rate_limit(limit: int = RATE_LIMIT_MAX_JOBS, key_suffix: str = ""):
     """Factory for per-route rate limit dependency.
 
+    Returns a bare async callable suitable for both ``Depends()`` and
+    ``Annotated[None, Depends(...)]`` usage.
+
     Args:
         limit: Max requests per window per session
         key_suffix: Optional suffix for session key (e.g., "_batch")
     """
-    def dependency(
+    async def dependency(
         session_id: str = Depends(validate_session_id),
         limiter: RateLimiter = Depends(get_rate_limiter),
     ):
@@ -120,14 +125,21 @@ def rate_limit(limit: int = RATE_LIMIT_MAX_JOBS, key_suffix: str = ""):
             HTTPException: 429 if the session exceeds the configured rate limit.
         """
         effective_key = f"{session_id}{key_suffix}" if key_suffix else session_id
-        allowed, remaining = limiter.check_rate_limit(effective_key, limit)
+        allowed, remaining = await limiter.check_rate_limit(effective_key, limit)
         if not allowed:
             from backend.core.audit import log_rate_limit_exceeded
             from backend.core.auth import truncate_session_id
+            from backend.core.metrics import metrics
             log_rate_limit_exceeded(truncate_session_id(session_id), f"rate_limit_{limit}", limit)
+            metrics.increment("rate_limit_exceeded")
             raise HTTPException(
                 status_code=429,
                 detail=f"Rate limit exceeded. Max {limit} requests per minute.",
                 headers={"Retry-After": str(RATE_LIMIT_WINDOW_SECONDS)},
             )
-    return Depends(dependency)
+    return dependency
+
+
+# Pre-built dependency callables for Annotated usage
+job_rate_limit_dep = rate_limit(RATE_LIMIT_MAX_JOBS)
+batch_rate_limit_dep = rate_limit(RATE_LIMIT_MAX_BATCH, key_suffix="_batch")

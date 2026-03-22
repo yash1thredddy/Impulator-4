@@ -56,6 +56,15 @@ def main():
     session_id = SessionState.get_session_id()
     set_session_id(session_id)
 
+    # Deep linking: read URL params and navigate if present
+    params = st.query_params
+    if "compound_id" in params and not SessionState.get('_deep_link_applied'):
+        compound_id = params["compound_id"]
+        tab = params.get("tab", "overview")
+        # Navigate to compound detail (shows compound list with detail auto-opened)
+        SessionState.navigate_to_compound(compound_id, entry_id=compound_id)
+        SessionState.set('_deep_link_applied', True)
+
     # Render sidebar (includes fragment-based job polling)
     render_sidebar()
 
@@ -78,33 +87,41 @@ def main():
 
 
 def _apply_custom_css():
-    """Apply custom CSS styling."""
+    """Apply custom CSS styling.
+
+    Uses Streamlit CSS variables (var(--...)) for dark-mode compatibility.
+    """
     st.markdown("""
         <style>
+        /* WARNING: Targets Streamlit internal selectors -- may break on Streamlit upgrade */
         /* Improve card container styling */
         div[data-testid="stVerticalBlock"] > div[style*="border"]:has(> div > div > button) {
             padding: 0.75rem;
         }
 
+        /* WARNING: Targets Streamlit internal selectors -- may break on Streamlit upgrade */
         /* Better sidebar styling */
         section[data-testid="stSidebar"] > div {
             padding-top: 1rem;
         }
 
+        /* WARNING: Targets Streamlit internal selectors -- may break on Streamlit upgrade */
         /* Improve button consistency */
         .stButton > button {
             font-size: 0.875rem;
         }
 
-        /* Progress bar styling */
+        /* WARNING: Targets Streamlit internal selectors -- may break on Streamlit upgrade */
+        /* Progress bar styling — uses CSS variable for dark mode support */
         .stProgress > div > div > div {
-            background-color: #4CAF50;
+            background-color: var(--primary-color);
         }
 
-        /* Toast notifications */
+        /* WARNING: Targets Streamlit internal selectors -- may break on Streamlit upgrade */
+        /* Toast notifications — uses CSS variables for dark mode support */
         div[data-testid="stToast"] {
-            background-color: #1E1E1E;
-            color: white;
+            background-color: var(--secondary-background-color);
+            color: var(--text-color);
         }
 
         /* Code block styling */
@@ -114,6 +131,7 @@ def _apply_custom_css():
             overflow-y: auto;
         }
 
+        /* WARNING: Targets Streamlit internal selectors -- may break on Streamlit upgrade */
         /* Metric styling */
         div[data-testid="stMetricValue"] {
             font-size: 1.5rem;

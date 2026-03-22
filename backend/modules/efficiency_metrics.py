@@ -16,7 +16,6 @@ Metrics calculated:
 
 import numpy as np
 import pandas as pd
-from typing import Dict
 import logging
 
 logger = logging.getLogger(__name__)
@@ -152,7 +151,7 @@ def calculate_all_efficiency_metrics(
     molecular_weight: float,
     npol: float,
     heavy_atoms: float
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Calculate all ligand efficiency metrics for a single compound/bioactivity.
 
@@ -167,7 +166,7 @@ def calculate_all_efficiency_metrics(
         heavy_atoms: Number of heavy atoms (NHA)
 
     Returns:
-        Dict[str, float]: Dictionary containing all efficiency metrics
+        dict[str, float]: Dictionary containing all efficiency metrics
             - SEI: Surface Efficiency Index
             - BEI: Binding Efficiency Index
             - NSEI: Normalized Surface Efficiency Index
@@ -273,7 +272,7 @@ def calculate_efficiency_metrics_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def validate_efficiency_metrics(metrics: Dict[str, float]) -> bool:
+def validate_efficiency_metrics(metrics: dict[str, float]) -> bool:
     """
     Validate that efficiency metrics are within expected ranges.
 

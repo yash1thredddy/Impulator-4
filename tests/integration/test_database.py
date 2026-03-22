@@ -9,12 +9,13 @@ from sqlalchemy.orm import sessionmaker
 @pytest.fixture
 def db_session():
     """Create an in-memory test database session."""
-    from backend.core.database import Base
-    # Import models BEFORE create_all to register them with Base
-    from backend.models.database import Job, Compound  # noqa: F401
+    from backend.models._pg_base import PGBase
+    from backend.models.job import Job  # noqa: F401
+    from backend.models.compound import Compound  # noqa: F401
+    from backend.models.deleted_compound import DeletedCompound  # noqa: F401
 
     engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(bind=engine)
+    PGBase.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine)
     session = Session()
     yield session
@@ -27,7 +28,8 @@ class TestJobModel:
 
     def test_create_job(self, db_session):
         """Test creating a job record."""
-        from backend.models.database import Job, JobStatus, JobType
+        from backend.models.job import Job
+        from backend.models.enums import JobStatus, JobType
 
         job = Job(
             id="test-job-1",
@@ -45,7 +47,8 @@ class TestJobModel:
 
     def test_update_job_progress(self, db_session):
         """Test updating job progress."""
-        from backend.models.database import Job, JobStatus, JobType
+        from backend.models.job import Job
+        from backend.models.enums import JobStatus, JobType
 
         job = Job(id="test-job-2", job_type=JobType.SINGLE)
         db_session.add(job)
@@ -63,7 +66,8 @@ class TestJobModel:
 
     def test_job_defaults(self, db_session):
         """Test job default values."""
-        from backend.models.database import Job, JobStatus, JobType
+        from backend.models.job import Job
+        from backend.models.enums import JobStatus, JobType
 
         job = Job(id="test-job-3", job_type=JobType.SINGLE)
         db_session.add(job)
@@ -81,7 +85,7 @@ class TestCompoundModel:
 
     def test_create_compound(self, db_session):
         """Test creating a compound record."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
 
         compound = Compound(
             compound_name="Aspirin",
@@ -100,7 +104,7 @@ class TestCompoundModel:
 
     def test_compound_name_allows_duplicates(self, db_session):
         """Test that compound_name allows duplicates (by design for duplicate tracking)."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
 
         # Same name, different entry_id is allowed (duplicate tracking feature)
         compound1 = Compound(entry_id="entry-1", compound_name="SameName", smiles="CCO")
@@ -119,7 +123,7 @@ class TestCompoundModel:
 
     def test_compound_entry_id_unique(self, db_session):
         """Test that entry_id is unique."""
-        from backend.models.database import Compound
+        from backend.models.compound import Compound
         from sqlalchemy.exc import IntegrityError
 
         compound1 = Compound(entry_id="unique-entry-123", compound_name="Test1", smiles="CCO")
