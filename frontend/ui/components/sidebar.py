@@ -73,11 +73,11 @@ def _render_sidebar_logo() -> None:
     if light_b64 and dark_b64:
         st.components.v1.html(
             f"""
-            <div id="sidebar-logo" style="text-align:center;padding:4px 0;">
+            <div id="sidebar-logo" style="text-align:center;padding:8px 0;">
                 <img id="logo-l" src="data:image/png;base64,{light_b64}"
-                     style="height:40px;object-fit:contain;display:none;">
+                     style="width:100%;max-width:260px;object-fit:contain;display:none;">
                 <img id="logo-d" src="data:image/png;base64,{dark_b64}"
-                     style="height:40px;object-fit:contain;display:none;">
+                     style="width:100%;max-width:260px;object-fit:contain;display:none;">
             </div>
             <script>
             (function() {{
@@ -95,7 +95,7 @@ def _render_sidebar_logo() -> None:
             }})();
             </script>
             """,
-            height=55,
+            height=90,
         )
     else:
         st.markdown("## IMPULATOR")

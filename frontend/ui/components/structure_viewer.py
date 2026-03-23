@@ -1,9 +1,14 @@
 """
-Structure Viewer Component for Molecular Properties Calculator
+Structure Viewer Component for IMPULATOR
 
-This module provides a client-side 2D molecular structure viewer using SmilesDrawer.
-When users click on plot points, the molecular structure is displayed in a collapsible
-side panel without triggering Streamlit reruns.
+Renders 2D molecular structures in a floating panel when hovering over Plotly
+chart points. Uses OpenChemLib JS (pure JS, no WASM) for client-side SVG
+rendering from SMILES.
+
+Security note: All user-visible text is escaped via textContent or the esc()
+helper (createElement + textContent). SVG output from OCL.Molecule.toSVG() is
+a trusted library output rendered into a dedicated container. innerHTML usage
+is limited to trusted, pre-built HTML fragments with escaped user data.
 
 Developed by: Yashwanth Reddy for ITR-UIC
 Part of: Chemo-Informatics Toolkit
@@ -12,931 +17,497 @@ Part of: Chemo-Informatics Toolkit
 
 def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=None, z_col=None, name_col=None):
     """
-    Generate HTML/CSS/JS for the interactive structure viewer component.
-    
-    This component:
-    - Displays a collapsible side panel for molecular structures
-    - Uses SmilesDrawer to render 2D structures on HTML5 canvas
-    - Listens to Plotly click events without triggering Streamlit reruns
-    - Maintains data integrity across filtering and plot updates
-    
+    Generate HTML/JS for the hover-based molecular structure viewer.
+
+    Attaches to the nearest Plotly chart and shows a floating SVG structure
+    panel on hover (debounced 150ms). Uses OpenChemLib JS v8.18.0.
+
     Args:
-        chart_id: Identifier for the Plotly chart (for targeting specific charts)
+        chart_id: Identifier for the Plotly chart
         x_col: Name of X-axis column (optional)
         y_col: Name of Y-axis column (optional)
         z_col: Name of Z-axis column (optional, for 3D plots)
         name_col: Name of the name/ID column (optional)
-    
+
     Returns:
         HTML string containing the complete component
     """
-    
+
     html_component = f"""
     <script>
     (function() {{
         'use strict';
-        
-        console.debug('[Structure Viewer {chart_id}] Initializing component...');
-        
+
+        const CHART_ID = '{chart_id}';
         const parentDoc = window.parent.document;
         const parentWin = window.parent;
-        
-        // Load SmilesDrawer from CDN if not already loaded
-        if (typeof parentWin.SmilesDrawer === 'undefined') {{
-            console.debug('[Structure Viewer {chart_id}] Loading SmilesDrawer from jsDelivr CDN...');
+
+        // ── Load OpenChemLib JS ──────────────────────────────────────────
+        if (typeof parentWin.OCL === 'undefined') {{
             const script = parentDoc.createElement('script');
-            // Use jsDelivr CDN which is less likely to be blocked by tracking prevention
-            
-            // TODO: Upgrade to SmilesDrawer 2.1.7+ when compatibility issues are resolved
-            // PINNED TO v2.0.1 - DO NOT UPGRADE WITHOUT TESTING
-            // Reason: Version 2.1.7 has breaking changes that prevent molecule rendering
-            // Issue: Molecules render as blank canvases with v2.1.7 (tested 2025-12-09)
-            // Blockers:
-            //   - API changes in parse() or draw() methods
-            //   - Constructor signature changes
-            //   - Canvas rendering pipeline changes
-            // Next steps:
-            //   1. Check SmilesDrawer GitHub changelog for breaking changes
-            //   2. Test intermediate versions (2.1.0-2.1.6) to identify breaking version
-            //   3. Update our code to match new API if needed
-            //   4. Comprehensive testing before upgrading
-            // Revisit: Q1 2026 or when official migration guide is available
-            script.src = 'https://cdn.jsdelivr.net/npm/smiles-drawer@2.0.1/dist/smiles-drawer.min.js';
-            script.onload = function() {{
-                console.debug('[Structure Viewer {chart_id}] ✅ SmilesDrawer v2.0.1 loaded successfully from jsDelivr');
-                initViewer();
-            }};
-            script.onerror = function(err) {{
-                console.error('[Structure Viewer {chart_id}] ❌ Failed to load SmilesDrawer from CDN:', err);
-                console.error('[Structure Viewer {chart_id}] Try disabling tracking prevention in your browser');
-            }};
+            script.src = 'https://unpkg.com/openchemlib@8.18.0/dist/openchemlib-full.js';
+            script.onload = () => init();
+            script.onerror = () => console.error('[StructViewer] Failed to load OCL');
             parentDoc.head.appendChild(script);
         }} else {{
-            console.debug('[Structure Viewer {chart_id}] SmilesDrawer already loaded');
-            initViewer();
+            init();
         }}
-        
-        function initViewer() {{
-            // Inject CSS styles into parent document
-            if (!parentDoc.getElementById('structure-viewer-style-{chart_id}')) {{
-                const style = parentDoc.createElement('style');
-                style.id = 'structure-viewer-style-{chart_id}';
-                style.textContent = `
-                    #structure-panel-{chart_id} {{
-                        position: fixed;
-                        width: 300px;
-                        max-height: 480px;
-                        background: white;
-                        border: 1px solid #e0e0e0;
-                        border-radius: 10px;
-                        box-shadow: 0 4px 20px rgba(0,0,0,0.25);
-                        z-index: 9999;
-                        overflow-y: auto;
-                        display: none;
-                        flex-direction: column;
-                        cursor: default;
-                        opacity: 0;
-                        transform: scale(0.95);
-                        transition: opacity 0.2s ease-out, transform 0.2s ease-out;
-                    }}
 
-                    #structure-panel-{chart_id}.open {{
-                        display: flex;
-                        opacity: 1;
-                        transform: scale(1);
-                    }}
+        function init() {{
+            injectStyles();
+            injectPanel();
+            tryAttach(0);
+        }}
 
-                    #structure-panel-{chart_id}.dragging {{
-                        box-shadow: 0 8px 24px rgba(0,0,0,0.3);
-                        opacity: 0.95;
-                    }}
-
-                    .panel-header-{chart_id} {{
-                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                        color: white;
-                        padding: 12px 16px;
-                        display: flex;
-                        justify-content: space-between;
-                        align-items: center;
-                        border-bottom: 1px solid #5a67d8;
-                        border-radius: 10px 10px 0 0;
-                        flex-shrink: 0;
-                        cursor: grab;
-                        user-select: none;
-                    }}
-
-                    .panel-header-{chart_id}:active {{
-                        cursor: grabbing;
-                    }}
-
-                    .panel-header-{chart_id} h3 {{
-                        margin: 0;
-                        font-size: 15px;
-                        font-weight: 600;
-                    }}
-
-                    .close-btn-{chart_id} {{
-                        background: rgba(255,255,255,0.2);
-                        border: none;
-                        color: white;
-                        font-size: 22px;
-                        width: 28px;
-                        height: 28px;
-                        border-radius: 50%;
-                        cursor: pointer;
-                        display: flex;
-                        align-items: center;
-                        justify-content: center;
-                        line-height: 1;
-                        transition: all 0.2s;
-                        padding: 0;
-                    }}
-
-                    .close-btn-{chart_id}:hover {{
-                        background: rgba(255,255,255,0.3);
-                        transform: scale(1.1);
-                    }}
-
-                    .panel-content-{chart_id} {{
-                        padding: 14px;
-                        flex: 1;
-                        overflow-y: auto;
-                    }}
-
-                    .molecule-title-{chart_id} {{
-                        text-align: center;
-                        margin-bottom: 10px;
-                        padding-bottom: 10px;
-                        border-bottom: 1px solid #e9ecef;
-                    }}
-
-                    .molecule-name-{chart_id} {{
-                        font-size: 14px;
-                        font-weight: 600;
-                        color: #212529;
-                        margin: 0 0 4px 0;
-                        word-break: break-word;
-                    }}
-
-                    .molecule-id-{chart_id} {{
-                        font-size: 12px;
-                        color: #667eea;
-                        font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
-                        margin: 0;
-                    }}
-
-                    .structure-canvas-container-{chart_id} {{
-                        background: #f8f9fa;
-                        border: 1px solid #e9ecef;
-                        border-radius: 8px;
-                        padding: 10px;
-                        margin-bottom: 12px;
-                        display: flex;
-                        justify-content: center;
-                        align-items: center;
-                        min-height: 260px;
-                    }}
-
-                    #structure-canvas-{chart_id} {{
-                        max-width: 100%;
-                        height: auto;
-                    }}
-
-                    .structure-info-{chart_id} {{
-                        background: #ffffff;
-                        border: 1px solid #dee2e6;
-                        border-radius: 6px;
-                        padding: 12px;
-                    }}
-
-                    .info-row-{chart_id} {{
-                        margin-bottom: 10px;
-                        display: flex;
-                        flex-direction: column;
-                    }}
-
-                    .info-row-{chart_id}:last-child {{
-                        margin-bottom: 0;
-                    }}
-
-                    .info-label-{chart_id} {{
-                        font-weight: 600;
-                        color: #495057;
-                        font-size: 11px;
-                        margin-bottom: 3px;
-                        text-transform: uppercase;
-                        letter-spacing: 0.3px;
-                    }}
-
-                    .info-value-{chart_id} {{
-                        font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
-                        background: #f1f3f5;
-                        padding: 6px 10px;
-                        border-radius: 4px;
-                        font-size: 11px;
-                        color: #212529;
-                        word-break: break-all;
-                        border: 1px solid #e9ecef;
-                        max-height: 60px;
-                        overflow-y: auto;
-                    }}
-                    
-                    .error-message-{chart_id} {{
-                        background: #fee;
-                        border: 1px solid #fcc;
-                        color: #c33;
-                        padding: 12px;
-                        border-radius: 6px;
-                        margin-top: 12px;
-                        font-size: 13px;
-                    }}
-                    
-                    .loading-message-{chart_id} {{
-                        text-align: center;
-                        padding: 40px 20px;
-                        color: #6c757d;
-                        font-size: 14px;
-                    }}
-                `;
-                parentDoc.head.appendChild(style);
-                console.debug('[Structure Viewer {chart_id}] ✅ Style injected');
-            }}
-            
-            // Inject panel HTML into parent document
-            if (!parentDoc.getElementById('structure-panel-{chart_id}')) {{
-                const panelHTML = `
-                <div id="structure-panel-{chart_id}">
-                    <div class="panel-header-{chart_id}" id="panel-header-{chart_id}">
-                        <h3>🧬 Molecular Structure</h3>
-                        <button class="close-btn-{chart_id}" id="close-panel-btn-{chart_id}" title="Close panel">×</button>
-                    </div>
-                    <div class="panel-content-{chart_id}">
-                        <div class="molecule-title-{chart_id}" id="molecule-title-{chart_id}" style="display: none;">
-                            <p class="molecule-name-{chart_id}" id="molecule-name-{chart_id}"></p>
-                            <p class="molecule-id-{chart_id}" id="molecule-id-{chart_id}"></p>
-                        </div>
-                        <div class="structure-canvas-container-{chart_id}">
-                            <canvas id="structure-canvas-{chart_id}" width="220" height="220"></canvas>
-                        </div>
-                        <div class="structure-info-{chart_id}" id="structure-info-{chart_id}">
-                            <div class="loading-message-{chart_id}">
-                                Click on a data point to view its molecular structure
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                `;
-                
-                const panelContainer = parentDoc.createElement('div');
-                panelContainer.innerHTML = panelHTML;
-                parentDoc.body.appendChild(panelContainer.firstElementChild);
-                console.debug('[Structure Viewer {chart_id}] ✅ Panel injected into parent document');
-            }} else {{
-                console.debug('[Structure Viewer {chart_id}] Panel already exists');
-            }}
-            
-            // Get references to panel elements
-            const panel = parentDoc.getElementById('structure-panel-{chart_id}');
-            const closeBtn = parentDoc.getElementById('close-panel-btn-{chart_id}');
-            const canvas = parentDoc.getElementById('structure-canvas-{chart_id}');
-            const infoDiv = parentDoc.getElementById('structure-info-{chart_id}');
-            
-            if (!panel || !canvas) {{
-                console.error('[Structure Viewer {chart_id}] Failed to create panel elements');
-                return;
-            }}
-            
-            console.debug('[Structure Viewer {chart_id}] ✅ Panel elements ready');
-            
-            // Initialize SmilesDrawer
-            let drawer = null;
-            if (typeof parentWin.SmilesDrawer !== 'undefined') {{
-                console.debug('[Structure Viewer {chart_id}] SmilesDrawer object:', Object.keys(parentWin.SmilesDrawer));
-                
-                // v2.0.1 uses SmilesDrawer.Drawer constructor
-                // Note: v2.1.7+ may use different constructor name
-                if (parentWin.SmilesDrawer.Drawer) {{
-                    drawer = new parentWin.SmilesDrawer.Drawer({{
-                        width: 220,
-                        height: 220,
-                        bondThickness: 1.2,
-                        fontFamily: 'Arial, sans-serif',
-                        fontSize: 12
-                    }});
-                    console.debug('[Structure Viewer {chart_id}] ✅ SmilesDrawer v2.0.1 initialized');
-                }} else {{
-                    console.error('[Structure Viewer {chart_id}] ❌ Drawer constructor not found');
-                    console.error('[Structure Viewer {chart_id}] Available constructors:', Object.keys(parentWin.SmilesDrawer));
-                    return;
+        // ── CSS ──────────────────────────────────────────────────────────
+        function injectStyles() {{
+            if (parentDoc.getElementById('sv-style-' + CHART_ID)) return;
+            const style = parentDoc.createElement('style');
+            style.id = 'sv-style-' + CHART_ID;
+            style.textContent = `
+                #sv-panel-${{CHART_ID}} {{
+                    position: fixed;
+                    width: 280px;
+                    background: white;
+                    border: 1px solid #e0e0e0;
+                    border-radius: 10px;
+                    box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+                    z-index: 9999;
+                    display: none;
+                    flex-direction: column;
+                    opacity: 0;
+                    transform: scale(0.95);
+                    transition: opacity 0.15s ease-out, transform 0.15s ease-out;
+                    pointer-events: auto;
+                    overflow: hidden;
                 }}
-            }} else {{
-                console.error('[Structure Viewer {chart_id}] ❌ SmilesDrawer library not loaded');
-                return;
-            }}
-            
-            // Close button handler (CRITICAL: prevent reruns)
-            closeBtn.onclick = function(e) {{
-                e.preventDefault();
-                e.stopPropagation();
+                #sv-panel-${{CHART_ID}}.open {{
+                    display: flex;
+                    opacity: 1;
+                    transform: scale(1);
+                }}
+                #sv-panel-${{CHART_ID}}.dragging {{
+                    box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+                    opacity: 0.95;
+                }}
+                .sv-header-${{CHART_ID}} {{
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    color: white;
+                    padding: 8px 12px;
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    cursor: grab;
+                    user-select: none;
+                    flex-shrink: 0;
+                }}
+                .sv-header-${{CHART_ID}}:active {{ cursor: grabbing; }}
+                .sv-header-${{CHART_ID}} h3 {{ margin: 0; font-size: 13px; font-weight: 600; }}
+                .sv-close-${{CHART_ID}} {{
+                    background: rgba(255,255,255,0.2);
+                    border: none; color: white; font-size: 18px;
+                    width: 24px; height: 24px; border-radius: 50%;
+                    cursor: pointer; display: flex; align-items: center;
+                    justify-content: center; padding: 0;
+                    transition: background 0.2s;
+                }}
+                .sv-close-${{CHART_ID}}:hover {{ background: rgba(255,255,255,0.35); }}
+                .sv-body-${{CHART_ID}} {{ padding: 10px; }}
+                .sv-title-${{CHART_ID}} {{
+                    text-align: center; margin-bottom: 6px;
+                    padding-bottom: 6px; border-bottom: 1px solid #e9ecef;
+                }}
+                .sv-name-${{CHART_ID}} {{
+                    font-size: 13px; font-weight: 600; color: #212529;
+                    margin: 0 0 2px 0; word-break: break-word;
+                }}
+                .sv-id-${{CHART_ID}} {{
+                    font-size: 11px; color: #667eea;
+                    font-family: 'Monaco','Menlo','Courier New',monospace; margin: 0;
+                }}
+                .sv-svg-${{CHART_ID}} {{
+                    background: #f8f9fa; border: 1px solid #e9ecef;
+                    border-radius: 8px; padding: 8px; margin-bottom: 8px;
+                    display: flex; justify-content: center; align-items: center;
+                    min-height: 200px;
+                }}
+                .sv-svg-${{CHART_ID}} svg {{ max-width: 100%; height: auto; }}
+                .sv-info-${{CHART_ID}} {{
+                    background: #fff; border: 1px solid #dee2e6;
+                    border-radius: 6px; padding: 8px; font-size: 11px;
+                }}
+                .sv-row-${{CHART_ID}} {{ margin-bottom: 6px; }}
+                .sv-row-${{CHART_ID}}:last-child {{ margin-bottom: 0; }}
+                .sv-lbl-${{CHART_ID}} {{
+                    font-weight: 600; color: #495057; font-size: 10px;
+                    text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: 2px;
+                }}
+                .sv-val-${{CHART_ID}} {{
+                    font-family: 'Monaco','Menlo','Courier New',monospace;
+                    background: #f1f3f5; padding: 4px 8px; border-radius: 4px;
+                    font-size: 10px; color: #212529; word-break: break-all;
+                    border: 1px solid #e9ecef; max-height: 50px; overflow-y: auto;
+                }}
+            `;
+            parentDoc.head.appendChild(style);
+        }}
+
+        // ── Panel HTML ───────────────────────────────────────────────────
+        function injectPanel() {{
+            if (parentDoc.getElementById('sv-panel-' + CHART_ID)) return;
+            const panel = parentDoc.createElement('div');
+            panel.id = 'sv-panel-' + CHART_ID;
+
+            // Build panel DOM safely (no innerHTML with user data)
+            // Header
+            const header = parentDoc.createElement('div');
+            header.className = 'sv-header-' + CHART_ID;
+            header.id = 'sv-hdr-' + CHART_ID;
+            const h3 = parentDoc.createElement('h3');
+            h3.textContent = String.fromCodePoint(0x1F9EC) + ' Structure';
+            header.appendChild(h3);
+            const closeBtn = parentDoc.createElement('button');
+            closeBtn.className = 'sv-close-' + CHART_ID;
+            closeBtn.id = 'sv-close-' + CHART_ID;
+            closeBtn.title = 'Close';
+            closeBtn.textContent = 'x';
+            header.appendChild(closeBtn);
+            panel.appendChild(header);
+
+            // Body
+            const body = parentDoc.createElement('div');
+            body.className = 'sv-body-' + CHART_ID;
+
+            // Title section
+            const titleDiv = parentDoc.createElement('div');
+            titleDiv.className = 'sv-title-' + CHART_ID;
+            titleDiv.id = 'sv-title-' + CHART_ID;
+            titleDiv.style.display = 'none';
+            const nameP = parentDoc.createElement('p');
+            nameP.className = 'sv-name-' + CHART_ID;
+            nameP.id = 'sv-name-' + CHART_ID;
+            titleDiv.appendChild(nameP);
+            const idP = parentDoc.createElement('p');
+            idP.className = 'sv-id-' + CHART_ID;
+            idP.id = 'sv-id-' + CHART_ID;
+            titleDiv.appendChild(idP);
+            body.appendChild(titleDiv);
+
+            // SVG container
+            const svgDiv = parentDoc.createElement('div');
+            svgDiv.className = 'sv-svg-' + CHART_ID;
+            svgDiv.id = 'sv-svg-' + CHART_ID;
+            const placeholder = parentDoc.createElement('span');
+            placeholder.style.cssText = 'color:#adb5bd;font-size:12px;';
+            placeholder.textContent = 'Hover a data point';
+            svgDiv.appendChild(placeholder);
+            body.appendChild(svgDiv);
+
+            // Info section
+            const infoDiv = parentDoc.createElement('div');
+            infoDiv.className = 'sv-info-' + CHART_ID;
+            infoDiv.id = 'sv-info-' + CHART_ID;
+            body.appendChild(infoDiv);
+
+            panel.appendChild(body);
+            parentDoc.body.appendChild(panel);
+
+            // Close button handler
+            closeBtn.onclick = (e) => {{
+                e.preventDefault(); e.stopPropagation();
                 panel.classList.remove('open');
-                console.debug('[Structure Viewer {chart_id}] Panel closed');
-                return false;
             }};
 
-            // Get references to molecule title elements
-            const moleculeTitleDiv = parentDoc.getElementById('molecule-title-{chart_id}');
-            const moleculeNameEl = parentDoc.getElementById('molecule-name-{chart_id}');
-            const moleculeIdEl = parentDoc.getElementById('molecule-id-{chart_id}');
-            const panelHeader = parentDoc.getElementById('panel-header-{chart_id}');
+            // Drag support
+            let dragging = false, dx = 0, dy = 0, px = 0, py = 0;
 
-            // Drag functionality
-            let isDragging = false;
-            let dragStartX = 0;
-            let dragStartY = 0;
-            let panelStartX = 0;
-            let panelStartY = 0;
-
-            panelHeader.addEventListener('mousedown', function(e) {{
-                // Don't start drag if clicking close button
-                if (e.target === closeBtn) return;
-
-                isDragging = true;
-                panel.classList.add('dragging');
-
-                dragStartX = e.clientX;
-                dragStartY = e.clientY;
-
-                const rect = panel.getBoundingClientRect();
-                panelStartX = rect.left;
-                panelStartY = rect.top;
-
+            header.addEventListener('mousedown', (e) => {{
+                if (e.target.tagName === 'BUTTON') return;
+                dragging = true; panel.classList.add('dragging');
+                dx = e.clientX; dy = e.clientY;
+                const r = panel.getBoundingClientRect();
+                px = r.left; py = r.top;
                 e.preventDefault();
             }});
-
-            parentDoc.addEventListener('mousemove', function(e) {{
-                if (!isDragging) return;
-
-                const deltaX = e.clientX - dragStartX;
-                const deltaY = e.clientY - dragStartY;
-
-                const newX = panelStartX + deltaX;
-                const newY = panelStartY + deltaY;
-
-                // Constrain to viewport
-                const maxX = parentWin.innerWidth - panel.offsetWidth;
-                const maxY = parentWin.innerHeight - panel.offsetHeight;
-
-                panel.style.left = Math.max(0, Math.min(newX, maxX)) + 'px';
-                panel.style.top = Math.max(0, Math.min(newY, maxY)) + 'px';
+            parentDoc.addEventListener('mousemove', (e) => {{
+                if (!dragging) return;
+                const nx = px + (e.clientX - dx);
+                const ny = py + (e.clientY - dy);
+                panel.style.left = Math.max(0, Math.min(nx, parentWin.innerWidth - panel.offsetWidth)) + 'px';
+                panel.style.top = Math.max(0, Math.min(ny, parentWin.innerHeight - panel.offsetHeight)) + 'px';
             }});
-
-            parentDoc.addEventListener('mouseup', function() {{
-                if (isDragging) {{
-                    isDragging = false;
-                    panel.classList.remove('dragging');
-                }}
+            parentDoc.addEventListener('mouseup', () => {{
+                if (dragging) {{ dragging = false; panel.classList.remove('dragging'); }}
             }});
+        }}
 
-            // Find Plotly chart by key or fallback to closest chart
-            function findPlotlyChart() {{
-                const chartKey = '{chart_id}';
-
-                // Strategy 1: Find the iframe that contains this script
-                // The viewer is embedded via components.html which creates an iframe
-                // We need to find the iframe in the parent document first
-                let ourIframe = null;
-                const iframes = parentDoc.querySelectorAll('iframe');
-                for (const iframe of iframes) {{
-                    try {{
-                        if (iframe.contentWindow === window) {{
-                            ourIframe = iframe;
-                            break;
-                        }}
-                    }} catch (e) {{
-                        // Cross-origin iframe, skip
-                    }}
-                }}
-
-                if (ourIframe) {{
-                    console.debug('[Structure Viewer {chart_id}] Found our iframe');
-
-                    // Find all Plotly charts on the page
-                    const allCharts = Array.from(parentDoc.querySelectorAll('.js-plotly-plot'));
-                    if (allCharts.length === 0) {{
-                        console.debug('[Structure Viewer {chart_id}] No Plotly charts found on page');
-                        return null;
-                    }}
-
-                    // Get the iframe's position in the document
-                    const iframeRect = ourIframe.getBoundingClientRect();
-
-                    // Find the chart that is closest ABOVE our iframe (by Y position)
-                    // This ensures we get the chart that was rendered just before this viewer
-                    let closestChart = null;
-                    let closestDistance = Infinity;
-
-                    for (const chart of allCharts) {{
-                        const chartRect = chart.getBoundingClientRect();
-                        // Check if this chart is above our iframe
-                        if (chartRect.bottom <= iframeRect.top + 50) {{  // 50px tolerance for margin/padding
-                            const distance = iframeRect.top - chartRect.bottom;
-                            if (distance < closestDistance) {{
-                                closestDistance = distance;
-                                closestChart = chart;
-                            }}
-                        }}
-                    }}
-
-                    if (closestChart) {{
-                        // Verify this chart has customdata (set up for structure viewing)
-                        const hasCustomData = closestChart._fullData &&
-                            closestChart._fullData[0] &&
-                            closestChart._fullData[0].customdata &&
-                            closestChart._fullData[0].customdata.length > 0;
-
-                        if (hasCustomData) {{
-                            console.debug('[Structure Viewer {chart_id}] Found chart via position (distance: ' + closestDistance + 'px) with customdata');
-                            return closestChart;
-                        }} else {{
-                            console.debug('[Structure Viewer {chart_id}] Chart found by position has no customdata, checking others...');
-                        }}
-                    }}
-
-                    // Fallback: Find via DOM tree walk
-                    let el = ourIframe.closest('.stHtml, [data-testid="stHtml"], .element-container, div');
-                    if (el) {{
-                        let sibling = el.previousElementSibling;
-                        while (sibling) {{
-                            const plotlyDiv = sibling.querySelector('.js-plotly-plot');
-                            if (plotlyDiv) {{
-                                console.debug('[Structure Viewer {chart_id}] Found chart via sibling walk');
-                                return plotlyDiv;
-                            }}
-                            sibling = sibling.previousElementSibling;
-                        }}
-
-                        let parent = el.parentElement;
-                        while (parent && parent !== parentDoc.body) {{
-                            sibling = parent.previousElementSibling;
-                            while (sibling) {{
-                                const plotlyDiv = sibling.querySelector('.js-plotly-plot');
-                                if (plotlyDiv) {{
-                                    console.debug('[Structure Viewer {chart_id}] Found chart via parent sibling walk');
-                                    return plotlyDiv;
-                                }}
-                                sibling = sibling.previousElementSibling;
-                            }}
-                            parent = parent.parentElement;
-                        }}
-                    }}
-                }}
-
-                // Strategy 2: Find by Streamlit widget key using data-testid
-                const chartContainers = parentDoc.querySelectorAll('[data-testid="stPlotlyChart"]');
-
-                for (const container of chartContainers) {{
-                    let el = container;
-                    let found = false;
-
-                    while (el && el !== parentDoc.body) {{
-                        const keyAttr = el.getAttribute('key');
-                        const dataKey = el.getAttribute('data-key');
-                        const id = el.getAttribute('id');
-
-                        if ((keyAttr && keyAttr.includes(chartKey)) ||
-                            (dataKey && dataKey.includes(chartKey)) ||
-                            (id && id.includes(chartKey))) {{
-                            found = true;
-                            break;
-                        }}
-                        el = el.parentElement;
-                    }}
-
-                    if (found) {{
-                        const plotlyDiv = container.querySelector('.js-plotly-plot');
-                        if (plotlyDiv) {{
-                            console.debug('[Structure Viewer {chart_id}] Found chart by key:', chartKey);
-                            return plotlyDiv;
-                        }}
-                    }}
-                }}
-
-                // Strategy 3: Find charts without any viewer attached yet
-                const allPlotlyDivs = parentDoc.querySelectorAll('.js-plotly-plot');
-                for (const div of allPlotlyDivs) {{
-                    // Check if this chart doesn't have ANY structure viewer attached
-                    const hasAnyViewer = Object.keys(div).some(key => key.startsWith('_structureViewerAttached_'));
-                    if (!hasAnyViewer) {{
-                        // Check if it has customdata (indicating it was set up for structure viewing)
-                        if (div._fullData && div._fullData[0] && div._fullData[0].customdata) {{
-                            console.debug('[Structure Viewer {chart_id}] Found unattached chart with customdata');
-                            return div;
-                        }}
-                    }}
-                }}
-
-                // Strategy 4: Last resort - use the last chart without our specific viewer
-                for (let i = allPlotlyDivs.length - 1; i >= 0; i--) {{
-                    if (!allPlotlyDivs[i]._structureViewerAttached_{chart_id}) {{
-                        console.warn('[Structure Viewer {chart_id}] Using last unattached chart as fallback');
-                        return allPlotlyDivs[i];
-                    }}
-                }}
-
-                // Fallback: find by _fullLayout property
-                const allDivs = parentDoc.querySelectorAll('div');
-                for (let div of allDivs) {{
-                    if (div._fullLayout) {{
-                        return div;
-                    }}
-                }}
-
-                return null;
+        // ── Find nearest Plotly chart ────────────────────────────────────
+        function findChart() {{
+            // Strategy 1: Find our iframe, then closest chart above it
+            let ourIframe = null;
+            for (const iframe of parentDoc.querySelectorAll('iframe')) {{
+                try {{ if (iframe.contentWindow === window) {{ ourIframe = iframe; break; }} }}
+                catch (e) {{}}
             }}
-            
-            // Attach click listener
-            function attachClickListener() {{
-                const plotlyDiv = findPlotlyChart();
-                
-                if (!plotlyDiv) {{
-                    console.warn('[Structure Viewer {chart_id}] Plotly chart not found, retrying...');
-                    setTimeout(attachClickListener, 500);
-                    return;
-                }}
-                
-                if (typeof parentWin.Plotly === 'undefined') {{
-                    console.warn('[Structure Viewer {chart_id}] Plotly library not loaded, retrying...');
-                    setTimeout(attachClickListener, 500);
-                    return;
-                }}
-                
-                if (plotlyDiv._structureViewerAttached_{chart_id}) {{
-                    console.debug('[Structure Viewer {chart_id}] Listener already attached');
-                    return;
-                }}
-                plotlyDiv._structureViewerAttached_{chart_id} = true;
-                
-                console.debug('[Structure Viewer {chart_id}] ✅ Attaching click listener');
-                
-                // Track last mouse position for positioning the popup
-                let lastClickX = 0;
-                let lastClickY = 0;
 
-                // Capture mouse position on any click within the chart
-                plotlyDiv.addEventListener('click', function(e) {{
-                    lastClickX = e.clientX;
-                    lastClickY = e.clientY;
-                }}, true);
+            if (ourIframe) {{
+                const charts = Array.from(parentDoc.querySelectorAll('.js-plotly-plot'));
+                const iRect = ourIframe.getBoundingClientRect();
+                let best = null, bestDist = Infinity;
 
-                // Listen for Plotly click events
-                plotlyDiv.on('plotly_click', function(data) {{
-                    console.debug('[Structure Viewer {chart_id}] 🖱️ Click detected!', data);
-
-                    if (!data.points || data.points.length === 0) {{
-                        console.warn('[Structure Viewer {chart_id}] No points in click data');
-                        return;
+                for (const c of charts) {{
+                    const cRect = c.getBoundingClientRect();
+                    if (cRect.bottom <= iRect.top + 50) {{
+                        const d = iRect.top - cRect.bottom;
+                        if (d < bestDist) {{ bestDist = d; best = c; }}
                     }}
+                }}
+                if (best) return best;
 
-                    const point = data.points[0];
-                    console.debug('[Structure Viewer {chart_id}] Point data:', point);
-
-                    // Extract data from customdata
-                    // Format can be: [SMILES, name, index] or [SMILES, index]
-                    let smiles = null;
-                    let moleculeName = null;
-                    let pointIndex = null;
-
-                    if (point.customdata) {{
-                        console.debug('[Structure Viewer {chart_id}] customdata:', point.customdata);
-                        smiles = point.customdata[0];
-
-                        // Check format: if length is 3, we have [SMILES, name, index]
-                        if (point.customdata.length === 3) {{
-                            moleculeName = point.customdata[1];
-                            pointIndex = point.customdata[2];
-                        }} else if (point.customdata.length === 2) {{
-                            // Format: [SMILES, index]
-                            pointIndex = point.customdata[1];
-                        }}
-                    }} else {{
-                        console.warn('[Structure Viewer {chart_id}] No customdata found');
+                // Fallback: sibling walk
+                let el = ourIframe.closest('.stHtml, [data-testid="stHtml"], .element-container, div');
+                if (el) {{
+                    let sib = el.previousElementSibling;
+                    while (sib) {{
+                        const p = sib.querySelector('.js-plotly-plot');
+                        if (p) return p;
+                        sib = sib.previousElementSibling;
                     }}
+                }}
+            }}
 
-                    if (!smiles || smiles === null || smiles === 'null') {{
-                        console.warn('[Structure Viewer {chart_id}] Invalid SMILES:', smiles);
-                        positionPanelNearClick(lastClickX, lastClickY);
-                        infoDiv.innerHTML = `
-                            <div class="error-message-{chart_id}">
-                                No SMILES data available for this point<br>
-                                <small>Debug: ${{JSON.stringify(point.customdata || 'undefined')}}</small>
-                            </div>
-                        `;
+            // Strategy 2: Key-based search
+            const containers = parentDoc.querySelectorAll('[data-testid="stPlotlyChart"]');
+            for (const cont of containers) {{
+                let el = cont;
+                while (el && el !== parentDoc.body) {{
+                    const k = el.getAttribute('key') || el.getAttribute('data-key') || el.getAttribute('id') || '';
+                    if (k.includes(CHART_ID)) {{
+                        const p = cont.querySelector('.js-plotly-plot');
+                        if (p) return p;
+                    }}
+                    el = el.parentElement;
+                }}
+            }}
+
+            // Strategy 3: Any unattached chart with customdata
+            for (const div of parentDoc.querySelectorAll('.js-plotly-plot')) {{
+                if (!div['_sv_' + CHART_ID] && div._fullData && div._fullData[0] && div._fullData[0].customdata) {{
+                    return div;
+                }}
+            }}
+
+            return null;
+        }}
+
+        // ── Attach hover listeners ───────────────────────────────────────
+        function attachListeners() {{
+            const plotlyDiv = findChart();
+            if (!plotlyDiv || !parentWin.Plotly) return false;
+            if (plotlyDiv['_sv_' + CHART_ID]) return true;
+            plotlyDiv['_sv_' + CHART_ID] = true;
+
+            const panel = parentDoc.getElementById('sv-panel-' + CHART_ID);
+            const svgContainer = parentDoc.getElementById('sv-svg-' + CHART_ID);
+            const infoDiv = parentDoc.getElementById('sv-info-' + CHART_ID);
+            const titleDiv = parentDoc.getElementById('sv-title-' + CHART_ID);
+            const nameEl = parentDoc.getElementById('sv-name-' + CHART_ID);
+            const idEl = parentDoc.getElementById('sv-id-' + CHART_ID);
+
+            let hoverTimer = null;
+            let lastSmiles = '';
+            let mouseX = 0, mouseY = 0;
+
+            // Track mouse for panel positioning
+            plotlyDiv.addEventListener('mousemove', (e) => {{
+                mouseX = e.clientX; mouseY = e.clientY;
+            }}, true);
+
+            // Column names for display
+            const cols = {{
+                x: {repr(x_col) if x_col else 'null'},
+                y: {repr(y_col) if y_col else 'null'},
+                z: {repr(z_col) if z_col else 'null'},
+                name: {repr(name_col) if name_col else 'null'}
+            }};
+
+            // Debounced hover (150ms)
+            plotlyDiv.on('plotly_hover', function(data) {{
+                if (!data.points || data.points.length === 0) return;
+                const pt = data.points[0];
+
+                clearTimeout(hoverTimer);
+                hoverTimer = setTimeout(() => {{
+                    // Extract SMILES from customdata[0]
+                    if (!pt.customdata) return;
+                    const smiles = pt.customdata[0];
+                    if (!smiles || smiles === 'null') return;
+
+                    if (smiles === lastSmiles) {{
+                        // Same molecule, just reposition
+                        positionPanel(mouseX, mouseY);
                         panel.classList.add('open');
                         return;
                     }}
+                    lastSmiles = smiles;
 
-                    console.debug('[Structure Viewer {chart_id}] Rendering SMILES:', smiles, 'Name:', moleculeName);
+                    // Extract name and ID
+                    let molName = null, molId = null;
+                    if (pt.customdata.length >= 3) {{
+                        molName = pt.customdata[1];
+                        molId = pt.customdata[2];
+                    }} else if (pt.customdata.length === 2) {{
+                        molName = pt.customdata[1];
+                    }}
 
-                    // Pass column names for display
-                    const columnNames = {{
-                        x: {repr(x_col) if x_col else 'null'},
-                        y: {repr(y_col) if y_col else 'null'},
-                        z: {repr(z_col) if z_col else 'null'},
-                        name: {repr(name_col) if name_col else 'null'}
-                    }};
+                    // Render with OCL
+                    renderOCL(smiles, molName, molId, pt);
+                    positionPanel(mouseX, mouseY);
+                    panel.classList.add('open');
+                }}, 150);
+            }});
 
-                    renderStructure(smiles, moleculeName, pointIndex, point, columnNames, lastClickX, lastClickY);
-                }});
-                
-                console.debug('[Structure Viewer {chart_id}] ✅ Click listener attached successfully');
+            // Hide on unhover (with small delay to prevent flicker)
+            plotlyDiv.on('plotly_unhover', function() {{
+                clearTimeout(hoverTimer);
+                hoverTimer = null;
+                setTimeout(() => {{
+                    if (!hoverTimer) panel.classList.remove('open');
+                }}, 200);
+            }});
+
+            // ── Render molecule with OpenChemLib ─────────────────────────
+            function renderOCL(smiles, molName, molId, pointData) {{
+                try {{
+                    const mol = parentWin.OCL.Molecule.fromSmiles(smiles);
+                    // OCL.Molecule.toSVG() returns trusted SVG from the library
+                    const svgStr = mol.toSVG(240, 200, null, {{
+                        suppressChiralText: true,
+                        suppressESR: true,
+                        noStereoProblem: true,
+                    }});
+                    // Clear and set SVG (trusted library output, not user input)
+                    while (svgContainer.firstChild) svgContainer.removeChild(svgContainer.firstChild);
+                    const wrapper = parentDoc.createElement('div');
+                    wrapper.insertAdjacentHTML('afterbegin', svgStr);
+                    if (wrapper.firstChild) svgContainer.appendChild(wrapper.firstChild);
+                }} catch (err) {{
+                    while (svgContainer.firstChild) svgContainer.removeChild(svgContainer.firstChild);
+                    const errSpan = parentDoc.createElement('span');
+                    errSpan.style.cssText = 'color:#c33;font-size:11px;';
+                    errSpan.textContent = 'Invalid SMILES';
+                    svgContainer.appendChild(errSpan);
+                }}
+
+                // Update title (using textContent for safety)
+                if (molName) {{
+                    const nameStr = String(molName);
+                    const isChembl = nameStr.startsWith('CHEMBL');
+                    if (isChembl) {{
+                        nameEl.textContent = '';
+                        nameEl.style.display = 'none';
+                        idEl.textContent = nameStr;
+                        idEl.style.display = 'block';
+                    }} else {{
+                        nameEl.textContent = nameStr;
+                        nameEl.style.display = 'block';
+                        if (molId && String(molId).startsWith('CHEMBL')) {{
+                            idEl.textContent = String(molId);
+                            idEl.style.display = 'block';
+                        }} else {{
+                            idEl.style.display = 'none';
+                        }}
+                    }}
+                    titleDiv.style.display = 'block';
+                }} else {{
+                    titleDiv.style.display = 'none';
+                }}
+
+                // Update info section (build DOM safely)
+                while (infoDiv.firstChild) infoDiv.removeChild(infoDiv.firstChild);
+                appendInfoRow(infoDiv, 'SMILES', smiles);
+                if (pointData.x !== undefined) {{
+                    const lbl = cols.x ? 'X (' + cols.x + ')' : 'X';
+                    appendInfoRow(infoDiv, lbl, fmt(pointData.x));
+                }}
+                if (pointData.y !== undefined) {{
+                    const lbl = cols.y ? 'Y (' + cols.y + ')' : 'Y';
+                    appendInfoRow(infoDiv, lbl, fmt(pointData.y));
+                }}
+                if (pointData.z !== undefined) {{
+                    const lbl = cols.z ? 'Z (' + cols.z + ')' : 'Z';
+                    appendInfoRow(infoDiv, lbl, fmt(pointData.z));
+                }}
             }}
 
-            // Position panel near the clicked point
-            function positionPanelNearClick(clickX, clickY) {{
-                const panelWidth = 300;
-                const panelHeight = 480;
-                const padding = 15;  // Distance from click point
-                const edgePadding = 10;  // Distance from viewport edge
+            // Build an info row using safe DOM methods
+            function appendInfoRow(container, label, value) {{
+                const row = parentDoc.createElement('div');
+                row.className = 'sv-row-' + CHART_ID;
+                const lblDiv = parentDoc.createElement('div');
+                lblDiv.className = 'sv-lbl-' + CHART_ID;
+                lblDiv.textContent = label;
+                const valDiv = parentDoc.createElement('div');
+                valDiv.className = 'sv-val-' + CHART_ID;
+                valDiv.textContent = value;
+                row.appendChild(lblDiv);
+                row.appendChild(valDiv);
+                container.appendChild(row);
+            }}
 
-                const viewportWidth = parentWin.innerWidth;
-                const viewportHeight = parentWin.innerHeight;
-
-                // Default: position to the right and below the click
-                let left = clickX + padding;
-                let top = clickY + padding;
-
-                // If panel would go off right edge, position to the left of click
-                if (left + panelWidth > viewportWidth - edgePadding) {{
-                    left = clickX - panelWidth - padding;
-                }}
-
-                // If panel would go off left edge, clamp to left edge
-                if (left < edgePadding) {{
-                    left = edgePadding;
-                }}
-
-                // If panel would go off bottom edge, position above the click
-                if (top + panelHeight > viewportHeight - edgePadding) {{
-                    top = clickY - panelHeight - padding;
-                }}
-
-                // If panel would go off top edge, clamp to top edge
-                if (top < edgePadding) {{
-                    top = edgePadding;
-                }}
-
+            // ── Position panel near cursor ───────────────────────────────
+            function positionPanel(cx, cy) {{
+                const pw = 280, ph = 420, pad = 15, edge = 10;
+                const vw = parentWin.innerWidth, vh = parentWin.innerHeight;
+                let left = cx + pad, top = cy + pad;
+                if (left + pw > vw - edge) left = cx - pw - pad;
+                if (left < edge) left = edge;
+                if (top + ph > vh - edge) top = cy - ph - pad;
+                if (top < edge) top = edge;
                 panel.style.left = left + 'px';
                 panel.style.top = top + 'px';
                 panel.style.right = 'auto';
-
-                console.debug('[Structure Viewer {chart_id}] Positioned panel at:', left, top, 'from click:', clickX, clickY);
             }}
 
-            // Render molecular structure
-            function renderStructure(smiles, moleculeName, pointIndex, pointData, columnNames, clickX, clickY) {{
-                console.debug('[Structure Viewer {chart_id}] renderStructure called for:', smiles);
+            return true;
+        }}
 
-                // Position panel near the click point
-                positionPanelNearClick(clickX || 100, clickY || 100);
+        // ── Helpers ──────────────────────────────────────────────────────
+        function fmt(num) {{
+            return typeof num === 'number' ? num.toFixed(3) : String(num);
+        }}
 
-                infoDiv.innerHTML = '<div class="loading-message-{chart_id}">Rendering structure...</div>';
-                panel.classList.add('open');
-                
-                // Basic SMILES validation
-                if (!smiles || typeof smiles !== 'string' || smiles.trim() === '') {{
-                    console.error('[Structure Viewer {chart_id}] Invalid SMILES: empty or not a string');
-                    showError('Empty or invalid SMILES string', smiles, moleculeName);
-                    return;
-                }}
-                
-                // Check for obviously malformed SMILES (basic heuristics)
-                const trimmedSmiles = smiles.trim();
-                if (trimmedSmiles.length > 1000) {{
-                    console.warn('[Structure Viewer {chart_id}] SMILES unusually long (>1000 chars)');
-                }}
-                
-                try {{
-                    parentWin.SmilesDrawer.parse(smiles, function(tree) {{
-                        if (!tree) {{
-                            console.error('[Structure Viewer {chart_id}] Parse returned null/undefined tree');
-                            showError('Failed to parse SMILES - structure may be invalid', smiles, moleculeName);
-                            return;
-                        }}
-                        
-                        console.debug('[Structure Viewer {chart_id}] SMILES parsed, drawing...');
-                        
-                        // Clear canvas
-                        const ctx = canvas.getContext('2d');
-                        ctx.clearRect(0, 0, canvas.width, canvas.height);
-                        
-                        // Draw structure
-                        drawer.draw(tree, canvas, 'light', false);
-                        
-                        console.debug('[Structure Viewer {chart_id}] ✅ Structure drawn');
+        // ── Retry loop ───────────────────────────────────────────────────
+        function tryAttach(attempt) {{
+            if (attachListeners()) return;
+            if (attempt < 10) {{
+                setTimeout(() => tryAttach(attempt + 1), 500);
+            }}
+        }}
 
-                        // Update molecule title section (prominent display of name and ChEMBL ID)
-                        if (moleculeName !== null && moleculeName !== undefined && moleculeName !== '') {{
-                            const nameStr = String(moleculeName);
-                            // Check if this is a ChEMBL ID
-                            const isChemblId = nameStr.startsWith('CHEMBL');
+        // ── Re-attach on Streamlit updates ───────────────────────────────
+        let debounce;
+        const observer = new MutationObserver(() => {{
+            clearTimeout(debounce);
+            debounce = setTimeout(() => {{
+                const chart = findChart();
+                if (chart && !chart['_sv_' + CHART_ID]) attachListeners();
+            }}, 100);
+        }});
 
-                            if (isChemblId) {{
-                                // Show only ChEMBL ID
-                                moleculeNameEl.textContent = '';
-                                moleculeNameEl.style.display = 'none';
-                                moleculeIdEl.textContent = nameStr;
-                                moleculeIdEl.style.display = 'block';
-                            }} else {{
-                                // Show both name and potentially infer ChEMBL ID from customdata
-                                moleculeNameEl.textContent = nameStr;
-                                moleculeNameEl.style.display = 'block';
-                                // Check if there's a ChEMBL ID in the data
-                                if (pointData.customdata && pointData.customdata.length > 1) {{
-                                    const possibleId = String(pointData.customdata[1] || '');
-                                    if (possibleId.startsWith('CHEMBL')) {{
-                                        moleculeIdEl.textContent = possibleId;
-                                        moleculeIdEl.style.display = 'block';
-                                    }} else {{
-                                        moleculeIdEl.style.display = 'none';
-                                    }}
-                                }} else {{
-                                    moleculeIdEl.style.display = 'none';
-                                }}
-                            }}
-                            moleculeTitleDiv.style.display = 'block';
-                        }} else {{
-                            moleculeTitleDiv.style.display = 'none';
-                        }}
-
-                        // Update info panel - coordinates and SMILES
-                        let infoHTML = '';
-
-                        infoHTML += `
-                            <div class="info-row-{chart_id}">
-                                <div class="info-label-{chart_id}">SMILES</div>
-                                <div class="info-value-{chart_id}">${{escapeHtml(smiles)}}</div>
-                            </div>
-                        `;
-                        
-                        if (pointData.x !== undefined) {{
-                            const xLabel = columnNames.x ? `X (${{escapeHtml(columnNames.x)}})` : 'X Value';
-                            infoHTML += `
-                                <div class="info-row-{chart_id}">
-                                    <div class="info-label-{chart_id}">${{xLabel}}</div>
-                                    <div class="info-value-{chart_id}">${{formatNumber(pointData.x)}}</div>
-                                </div>
-                            `;
-                        }}
-                        
-                        if (pointData.y !== undefined) {{
-                            const yLabel = columnNames.y ? `Y (${{escapeHtml(columnNames.y)}})` : 'Y Value';
-                            infoHTML += `
-                                <div class="info-row-{chart_id}">
-                                    <div class="info-label-{chart_id}">${{yLabel}}</div>
-                                    <div class="info-value-{chart_id}">${{formatNumber(pointData.y)}}</div>
-                                </div>
-                            `;
-                        }}
-                        
-                        if (pointData.z !== undefined) {{
-                            const zLabel = columnNames.z ? `Z (${{escapeHtml(columnNames.z)}})` : 'Z Value';
-                            infoHTML += `
-                                <div class="info-row-{chart_id}">
-                                    <div class="info-label-{chart_id}">${{zLabel}}</div>
-                                    <div class="info-value-{chart_id}">${{formatNumber(pointData.z)}}</div>
-                                </div>
-                            `;
-                        }}
-                        
-                        infoDiv.innerHTML = infoHTML;
-                    }}, function(err) {{
-                        console.error('[Structure Viewer {chart_id}] Error parsing SMILES:', err);
-                        showError('Invalid SMILES string - parse failed', smiles, moleculeName, err);
-                    }});
-                }} catch (error) {{
-                    console.error('[Structure Viewer {chart_id}] Error rendering:', error);
-                    showError('Failed to render structure', smiles, moleculeName, error);
-                }}
-            }}
-            
-            // Show error message with helpful context
-            function showError(message, smiles, moleculeName, error = null) {{
-                let errorHTML = `
-                    <div class="error-message-{chart_id}">
-                        <strong>⚠️ ${{escapeHtml(message)}}</strong><br><br>
-                `;
-                
-                // Show molecule identification
-                if (moleculeName) {{
-                    errorHTML += `
-                        <div style="margin: 10px 0; padding: 8px; background: rgba(0,0,0,0.05); border-radius: 4px;">
-                            <strong>Molecule:</strong> ${{escapeHtml(String(moleculeName))}}
-                        </div>
-                    `;
-                }}
-                
-                // Show SMILES with truncation if too long
-                const maxSmilesDisplay = 100;
-                const displaySmiles = smiles && smiles.length > maxSmilesDisplay 
-                    ? smiles.substring(0, maxSmilesDisplay) + '...' 
-                    : smiles;
-                    
-                errorHTML += `
-                    <div style="margin: 10px 0; padding: 8px; background: rgba(0,0,0,0.05); border-radius: 4px;">
-                        <strong>SMILES:</strong><br>
-                        <code style="font-size: 11px; word-break: break-all;">${{escapeHtml(displaySmiles || 'N/A')}}</code>
-                    </div>
-                `;
-                
-                // Show technical error if available
-                if (error && error.message) {{
-                    errorHTML += `
-                        <div style="margin: 10px 0; font-size: 11px; color: #666;">
-                            <strong>Technical details:</strong> ${{escapeHtml(error.message)}}
-                        </div>
-                    `;
-                }}
-                
-                errorHTML += `
-                    <div style="margin-top: 15px; padding: 10px; background: #fff3cd; border-left: 3px solid #ffc107; font-size: 12px;">
-                        <strong>💡 Suggestions:</strong><br>
-                        • Check if the SMILES string is complete and valid<br>
-                        • Verify the source data doesn't have truncated/corrupted values<br>
-                        • Try validating the SMILES with an external tool<br>
-                        • Contact support if this persists for valid structures
-                    </div>
-                    </div>
-                `;
-                
-                infoDiv.innerHTML = errorHTML;
-            }}
-            
-            // Helper functions
-            function escapeHtml(text) {{
-                const div = parentDoc.createElement('div');
-                div.textContent = text;
-                return div.innerHTML;
-            }}
-            
-            function formatNumber(num) {{
-                if (typeof num === 'number') {{
-                    return num.toFixed(3);
-                }}
-                return String(num);
-            }}
-            
-            // Initialize with retries
-            let retryCount = 0;
-            const maxRetries = 10;
-            
-            function tryAttach() {{
-                const plotlyDiv = findPlotlyChart();
-                if (!plotlyDiv && retryCount < maxRetries) {{
-                    retryCount++;
-                    console.log(`[Structure Viewer {chart_id}] Retry ${{retryCount}}/${{maxRetries}} in 500ms`);
-                    setTimeout(tryAttach, 500);
-                }} else if (plotlyDiv) {{
-                    attachClickListener();
-                }} else {{
-                    console.error('[Structure Viewer {chart_id}] Failed to find Plotly chart after ${{maxRetries}} retries');
-                }}
-            }}
-            
-            tryAttach();
-            
-            // Re-attach listener when Streamlit updates (with debouncing for performance)
-            let debounceTimer;
-            const observer = new MutationObserver(function(mutations) {{
-                clearTimeout(debounceTimer);
-                debounceTimer = setTimeout(() => {{
-                    const plotlyDiv = findPlotlyChart();
-                    if (plotlyDiv && !plotlyDiv._structureViewerAttached_{chart_id}) {{
-                        console.debug('[Structure Viewer {chart_id}] Detected plot update, re-attaching');
-                        attachClickListener();
-                    }}
-                }}, 100);  // 100ms debounce
-            }});
-            
-            const container = parentDoc.querySelector('[data-testid="stAppViewContainer"]');
-            if (container) {{
-                observer.observe(container, {{ childList: true, subtree: true }});
-                console.debug('[Structure Viewer {chart_id}] ✅ Mutation observer active');
-            }}
+        const container = parentDoc.querySelector('[data-testid="stAppViewContainer"]');
+        if (container) {{
+            observer.observe(container, {{ childList: true, subtree: true }});
         }}
     }})();
     </script>
     """
-    
+
     return html_component
 
 
 def get_structure_viewer_hint():
-    """
-    Generate a hint message to display above charts that support structure viewing.
-    
-    Returns:
-        HTML string with hint message
-    """
+    """Hint message for charts with hover-to-view structure support."""
     return """
     <div style="
         background: linear-gradient(135deg, #667eea22 0%, #764ba222 100%);
@@ -950,7 +521,7 @@ def get_structure_viewer_hint():
         align-items: center;
         gap: 8px;
     ">
-        <span style="font-size: 16px;">📍</span>
-        <span><strong>Tip:</strong> Click on any data point to view its 2D molecular structure (popup appears near click)</span>
+        <span style="font-size: 16px;">&#x1F9EC;</span>
+        <span><strong>Tip:</strong> Hover over any data point to preview its 2D molecular structure</span>
     </div>
     """

@@ -1026,6 +1026,18 @@ async def _fetch_activities_async(
             target_chembl_id = act.get('target_chembl_id', '')
             target_name = target_name_cache.get(target_chembl_id, '')
 
+            # Map single-char assay_type to human-readable label
+            _assay_type_raw = act.get('assay_type', '')
+            _ASSAY_TYPE_MAP = {
+                'B': 'Binding', 'F': 'Functional', 'A': 'ADMET',
+                'T': 'Toxicity', 'P': 'Physicochemical', 'U': 'Unclassified',
+            }
+            assay_type_label = _ASSAY_TYPE_MAP.get(_assay_type_raw, _assay_type_raw or 'Unknown')
+
+            # Data quality flag
+            dvc = act.get('data_validity_comment')
+            data_quality = 'Clean' if dvc is None or dvc == 'Manually validated' else 'Flagged'
+
             all_results.append({
                 'ChEMBL_ID': chembl_id,
                 'Molecule_Name': mol_name,
@@ -1037,6 +1049,10 @@ async def _fetch_activities_async(
                 'pActivity': pActivity,
                 'Target_ChEMBL_ID': target_chembl_id,
                 'Target_Name': target_name,
+                'Assay_Type': assay_type_label,
+                'Document_Year': int(act['document_year']) if act.get('document_year') else None,
+                'Data_Quality': data_quality,
+                'Activity_Comment': act.get('activity_comment', ''),
             })
         except (ValueError, TypeError):
             continue

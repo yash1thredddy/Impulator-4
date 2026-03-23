@@ -32,6 +32,32 @@ logger = logging.getLogger(__name__)
 from scipy import stats as scipy_stats  # noqa: E402
 
 
+def _maybe_embed_structure_viewer(chart_id, df, x_col=None, y_col=None, z_col=None):
+    """Conditionally embed hover structure viewer with inline toggle."""
+    if 'SMILES' not in df.columns:
+        return
+
+    # Session-persisted toggle (default on)
+    if 'hover_structure_preview' not in st.session_state:
+        st.session_state['hover_structure_preview'] = True
+
+    enabled = st.toggle(
+        "🧬 Hover 2D Preview", value=st.session_state['hover_structure_preview'],
+        help="Show 2D molecular structure when hovering over data points",
+        key=f"hover_toggle_{chart_id}",
+    )
+    st.session_state['hover_structure_preview'] = enabled
+
+    if not enabled:
+        return
+
+    embed_structure_viewer(
+        chart_id=chart_id,
+        x_col=x_col, y_col=y_col, z_col=z_col,
+        name_col='Molecule_Name' if 'Molecule_Name' in df.columns else None,
+    )
+
+
 def render_compound_detail_page() -> None:
     """Render the compound detail page."""
     compound_name = SessionState.get('selected_compound')
@@ -562,6 +588,7 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
         'InChI', 'InChI_Key', 'Target', 'Assay_ID', 'Assay_Description',
         'Activity_Type', 'Activity_Value', 'Activity_Units', 'Activity_Relation',
         'Document_ID', 'Document_Year', 'Activity_Comment', 'Pchembl_Value',
+        'Assay_Type', 'Data_Quality',
         'Kingdom', 'Superclass', 'Class', 'Subclass', 'Parent_Level',
         'NP_Pathway', 'NP_Superclass', 'NP_Class', 'Index', '_row_index',
         'Query_SMILES', 'Similarity', 'IMP_Candidate', 'IMP_Reason',
@@ -740,12 +767,15 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
                 plot_data = unique_df[['Molecular_Weight', logp_col]].dropna()
                 if len(plot_data) > 0:
                     hover_cols = [c for c in ['ChEMBL_ID', 'Molecule_Name'] if c in unique_df.columns]
+                    mw_plot_df = unique_df.dropna(subset=['Molecular_Weight', logp_col]).copy()
+                    cd_cols = [c for c in ['SMILES', 'Molecule_Name', 'ChEMBL_ID'] if c in mw_plot_df.columns]
                     fig = px.scatter(
-                        unique_df.dropna(subset=['Molecular_Weight', logp_col]),
+                        mw_plot_df,
                         x='Molecular_Weight',
                         y=logp_col,
-                        color='QED' if 'QED' in unique_df.columns and unique_df['QED'].notna().any() else None,
+                        color='QED' if 'QED' in mw_plot_df.columns and mw_plot_df['QED'].notna().any() else None,
                         hover_data=hover_cols if hover_cols else None,
+                        custom_data=cd_cols if cd_cols else None,
                         title='MW vs LogP',
                         color_continuous_scale='RdYlGn'
                     )
@@ -755,7 +785,8 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
                     fig.add_vline(x=500, line_dash="dash", line_color="red", annotation_text="MW ≤ 500")
                     fig.update_layout(height=300, margin=dict(t=55, b=30, l=30, r=30))
                     apply_impulator_theme(fig)
-                    st.plotly_chart(fig, width='stretch')
+                    st.plotly_chart(fig, width='stretch', key="mw_logp_scatter")
+                    _maybe_embed_structure_viewer("mw_logp_scatter", mw_plot_df, x_col='Molecular_Weight', y_col=logp_col)
                 else:
                     st.caption("No MW/LogP data available for visualization")
             else:
@@ -768,13 +799,16 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
             has_tpsa = 'TPSA' in unique_df.columns and unique_df['TPSA'].notna().any()
 
             if has_tpsa and has_hbd and has_hba:
-                plot_df = unique_df.copy()
-                plot_df['HBD+HBA'] = plot_df['HBD'].fillna(0) + plot_df['HBA'].fillna(0)
+                abs_plot_df = unique_df.copy()
+                abs_plot_df['HBD+HBA'] = abs_plot_df['HBD'].fillna(0) + abs_plot_df['HBA'].fillna(0)
+                abs_plot_df = abs_plot_df.dropna(subset=['TPSA'])
+                cd_cols = [c for c in ['SMILES', 'Molecule_Name', 'ChEMBL_ID'] if c in abs_plot_df.columns]
                 fig = px.scatter(
-                    plot_df.dropna(subset=['TPSA']),
+                    abs_plot_df,
                     x='TPSA', y='HBD+HBA',
-                    color='QED' if 'QED' in unique_df.columns and unique_df['QED'].notna().any() else None,
-                    hover_data=['ChEMBL_ID'] if 'ChEMBL_ID' in unique_df.columns else None,
+                    color='QED' if 'QED' in abs_plot_df.columns and abs_plot_df['QED'].notna().any() else None,
+                    hover_data=['ChEMBL_ID'] if 'ChEMBL_ID' in abs_plot_df.columns else None,
+                    custom_data=cd_cols if cd_cols else None,
                     color_continuous_scale='RdYlGn',
                 )
                 # Veber rule boundaries
@@ -791,7 +825,8 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
                     xaxis_title='TPSA (Å²)', yaxis_title='HBD + HBA',
                 )
                 apply_impulator_theme(fig)
-                st.plotly_chart(fig, width='stretch')
+                st.plotly_chart(fig, width='stretch', key="absorption_scatter")
+                _maybe_embed_structure_viewer("absorption_scatter", abs_plot_df, x_col='TPSA', y_col='HBD+HBA')
             elif has_tpsa:
                 fig = px.histogram(unique_df['TPSA'].dropna(), nbins=25,
                                    color_discrete_sequence=['#3b82f6'])
@@ -927,15 +962,7 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
                     if stats_caption:
                         st.caption(stats_caption)
 
-                    # Embed structure viewer for click-to-view molecules
-                    if 'SMILES' in plot_df.columns:
-                        render_structure_viewer_hint()
-                        embed_structure_viewer(
-                            chart_id="psa_npol_scatter_chart",
-                            x_col='10xPSA_MW',
-                            y_col='NPOLoNHA',
-                            name_col='Molecule_Name' if 'Molecule_Name' in plot_df.columns else None
-                        )
+                    _maybe_embed_structure_viewer("psa_npol_scatter_chart", plot_df, x_col='10xPSA_MW', y_col='NPOLoNHA')
                 else:
                     st.caption("No data points for 10×PSA/MW vs NPOL/NHA plot")
             else:
@@ -1058,85 +1085,288 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
 
 
 def _render_activity_analysis(df: pd.DataFrame) -> None:
-    """Activity analysis with charts."""
+    """Bioactivity Profile — shows activity evidence and its trustworthiness for IMP detection."""
     if df is None or 'Activity_Type' not in df.columns:
         st.info("No activity data available")
         return
 
-    st.markdown("**Bioactivity Distribution**")
-    st.caption("Distribution of activity measurements across different assay types (IC50, Ki, Kd, EC50, etc.)")
+    theme = get_plotly_theme()
+    has_pact = 'pActivity' in df.columns
+    has_targets = 'Target_Name' in df.columns or 'Target_ChEMBL_ID' in df.columns
+    has_assay_type = 'Assay_Type' in df.columns
+    has_similarity = 'Similarity' in df.columns
+    has_quality = 'Data_Quality' in df.columns
+    target_col = 'Target_Name' if 'Target_Name' in df.columns else ('Target_ChEMBL_ID' if 'Target_ChEMBL_ID' in df.columns else None)
 
-    # Activity distribution table and pie chart
+    # ── Section 1: Summary Cards ──────────────────────────────────────────
+    total_records = len(df)
+    unique_compounds = df['ChEMBL_ID'].nunique() if 'ChEMBL_ID' in df.columns else 0
+    unique_targets = df[target_col].nunique() if target_col else 0
+    activity_types = df['Activity_Type'].nunique()
+    assay_types_crossed = df['Assay_Type'].nunique() if has_assay_type else 0
+
+    cols = st.columns(5 if has_assay_type else 4)
+    with cols[0]:
+        st.metric("Measurements", f"{total_records:,}",
+                  help="Total bioactivity data points from ChEMBL")
+    with cols[1]:
+        st.metric("Compounds", unique_compounds,
+                  help="Unique similar compounds with activity data")
+    with cols[2]:
+        st.metric("Targets", unique_targets,
+                  help="Unique biological targets tested. Many unrelated targets = pan-active (IMP risk)")
+    with cols[3]:
+        st.metric("Activity Types", activity_types,
+                  help="Distinct assay types (IC50, Ki, Kd, EC50, etc.)")
+    if has_assay_type:
+        with cols[4]:
+            # Color code: >3 assay type categories = promiscuity warning
+            at_delta = "⚠️ promiscuous" if assay_types_crossed >= 4 else None
+            st.metric("Assay Modalities", assay_types_crossed, delta=at_delta,
+                      delta_color="inverse" if assay_types_crossed >= 4 else "off",
+                      help="Binding, Functional, ADMET, Toxicity, etc. Compounds active across many modalities are more likely artifacts")
+
+    # Data quality badge
+    if has_quality:
+        flagged = (df['Data_Quality'] == 'Flagged').sum()
+        if flagged > 0:
+            pct = flagged / total_records * 100
+            st.caption(f"⚠️ {flagged} of {total_records} records ({pct:.0f}%) flagged by ChEMBL quality checks (transcription errors, out-of-range values)")
+
+    st.markdown("---")
+
+    # ── Section 2: Activity Type Breakdown (donut + stats) ────────────────
     counts = df['Activity_Type'].value_counts().reset_index()
     counts.columns = ['Type', 'Count']
     counts['%'] = (counts['Count'] / counts['Count'].sum() * 100).round(1)
 
-    col1, col2 = st.columns([1, 2])
+    st.markdown("**Bioactivity Distribution**")
+    st.caption("Distribution of activity measurements across assay types (IC50, Ki, Kd, EC50, etc.)")
 
-    with col1:
-        st.dataframe(counts, width='stretch', hide_index=True, height=300)
+    donut_col, stats_col = st.columns([3, 2])
 
-    with col2:
-        # Larger pie chart with legend
-        theme = get_plotly_theme()
+    with donut_col:
         fig = px.pie(counts, values='Count', names='Type', hole=0.4,
                      color_discrete_sequence=px.colors.qualitative.Set2)
         fig.update_layout(
-            title=dict(text='Bioactivity Distribution', subtitle=dict(text=f'{len(counts)} activity types')),
             template=theme["template"],
-            margin=dict(t=55, b=30, l=30, r=30),
-            height=370,
+            margin=dict(t=10, b=10, l=10, r=10),
+            height=300,
             showlegend=True,
             legend=dict(
-                orientation="v",
-                yanchor="middle",
-                y=0.5,
-                xanchor="left",
-                x=1.02,
+                orientation="v", yanchor="middle", y=0.5, xanchor="left", x=1.02,
                 title_text="Activity Types",
-                bgcolor=theme["legend_bgcolor"],
-                bordercolor=theme["legend_bordercolor"],
-                borderwidth=1
-            )
+                bgcolor=theme["legend_bgcolor"], bordercolor=theme["legend_bordercolor"], borderwidth=1,
+            ),
         )
         fig.update_traces(textposition='inside', textinfo='percent+label')
         apply_impulator_theme(fig)
         st.plotly_chart(fig, width='stretch')
 
-    # Statistics by type
-    if 'pActivity' in df.columns:
-        st.markdown("---")
-        st.markdown("**Statistics by Activity Type**")
-        st.caption("pActivity = -log10(Activity in M). Higher values indicate more potent compounds.")
-        stats = df.groupby('Activity_Type')['pActivity'].agg(['count', 'mean', 'std', 'min', 'max']).round(2)
-        stats.columns = ['Count', 'Mean pActivity', 'Std Dev', 'Min', 'Max']
-        st.dataframe(stats, width='stretch')
+    with stats_col:
+        if has_pact:
+            stats = df.groupby('Activity_Type')['pActivity'].agg(['count', 'mean', 'std', 'min', 'max']).round(2)
+            stats.columns = ['Count', 'Mean pAct', 'Std', 'Min', 'Max']
+            st.dataframe(stats, width='stretch', height=min(300, len(stats) * 35 + 40))
+        else:
+            st.dataframe(counts, width='stretch', hide_index=True, height=min(300, len(counts) * 35 + 40))
 
-    # Target distribution
-    if 'Target_Name' in df.columns or 'Target_ChEMBL_ID' in df.columns:
-        st.markdown("---")
-        st.markdown("**Target Distribution**")
-        st.caption("Top 10 biological targets with most activity data points")
-        target_col = 'Target_Name' if 'Target_Name' in df.columns else 'Target_ChEMBL_ID'
-        target_counts = df[target_col].value_counts().head(10)
+    st.markdown("---")
 
-        fig = px.bar(x=target_counts.values, y=target_counts.index, orientation='h',
-                     color=target_counts.values, color_continuous_scale='Blues')
-        fig.update_layout(
-            title=dict(text='Top Targets', subtitle=dict(text='By number of activity records')),
-            height=min(370, len(target_counts) * 35 + 70),
-            margin=dict(t=55, b=10, l=10, r=10),
-            xaxis_title="Number of Activity Records",
-            yaxis_title="",
-            showlegend=False,
-            coloraxis_showscale=False
-        )
-        apply_impulator_theme(fig)
-        st.plotly_chart(fig, width='stretch')
+    # ── Section 3: Potency by Activity Type (box plot) ────────────────────
+    if has_pact:
+        st.markdown("**Potency Distribution by Assay Type**")
+        st.caption("pActivity = −log₁₀(activity in M). Higher values = more potent. Consistent potency across types supports genuine activity.")
+
+        plot_df = df.dropna(subset=['pActivity']).copy()
+        if not plot_df.empty:
+            # Build customdata for structure viewer
+            customdata_cols = []
+            if 'SMILES' in plot_df.columns:
+                customdata_cols.append('SMILES')
+                if 'Molecule_Name' in plot_df.columns:
+                    customdata_cols.append('Molecule_Name')
+                if 'ChEMBL_ID' in plot_df.columns:
+                    customdata_cols.append('ChEMBL_ID')
+
+            fig = px.box(
+                plot_df, x='Activity_Type', y='pActivity',
+                color='Activity_Type', points='all',
+                hover_data=['ChEMBL_ID', 'Molecule_Name'] if all(c in plot_df.columns for c in ['ChEMBL_ID', 'Molecule_Name']) else None,
+                custom_data=customdata_cols if customdata_cols else None,
+            )
+            fig.update_layout(
+                template=theme["template"],
+                height=420,
+                margin=dict(t=40, b=60, l=10, r=10),
+                showlegend=True,
+                xaxis_title="", yaxis_title="pActivity",
+                legend=dict(
+                    orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+                    bgcolor=theme["legend_bgcolor"], bordercolor=theme["legend_bordercolor"], borderwidth=1,
+                ),
+            )
+            apply_impulator_theme(fig)
+            st.plotly_chart(fig, width='stretch', key="activity_potency_box")
+
+            _maybe_embed_structure_viewer("activity_potency_box", plot_df, x_col='Activity_Type', y_col='pActivity')
+
+        st.markdown("---")
+
+    # ── Section 3: Target Selectivity Profile ─────────────────────────────
+    if has_targets and has_pact and target_col:
+        st.markdown("**Target Selectivity Profile**")
+        st.caption("Mean potency per target. Compounds active against many unrelated targets are IMP red flags.")
+
+        target_stats = df.groupby(target_col).agg(
+            Mean_pActivity=('pActivity', 'mean'),
+            Count=('pActivity', 'count'),
+            Compounds=('ChEMBL_ID', 'nunique') if 'ChEMBL_ID' in df.columns else ('pActivity', 'count'),
+        ).round(2).sort_values('Mean_pActivity', ascending=True)
+
+        # Show top 12 targets by mean potency
+        plot_targets = target_stats.tail(12).copy()
+
+        if not plot_targets.empty:
+            fig = go.Figure()
+
+            # Lollipop chart: line + marker
+            for i, (tgt, row) in enumerate(plot_targets.iterrows()):
+                color = '#3b82f6' if row['Mean_pActivity'] < 7 else '#ef4444' if row['Mean_pActivity'] >= 8 else '#f59e0b'
+                fig.add_trace(go.Scatter(
+                    x=[0, row['Mean_pActivity']], y=[str(tgt), str(tgt)],
+                    mode='lines', line=dict(color=color, width=2),
+                    showlegend=False, hoverinfo='skip',
+                ))
+                fig.add_trace(go.Scatter(
+                    x=[row['Mean_pActivity']], y=[str(tgt)],
+                    mode='markers+text',
+                    marker=dict(size=12, color=color, line=dict(width=1, color='white')),
+                    text=[f" {row['Mean_pActivity']:.1f}"],
+                    textposition='middle right',
+                    textfont=dict(size=11),
+                    showlegend=False,
+                    hovertemplate=f"<b>{html.escape(str(tgt))}</b><br>Mean pActivity: {row['Mean_pActivity']:.2f}<br>Records: {row['Count']}<extra></extra>",
+                ))
+
+            fig.update_layout(
+                template=theme["template"],
+                height=max(280, len(plot_targets) * 32 + 60),
+                margin=dict(t=10, b=30, l=10, r=60),
+                xaxis=dict(title="Mean pActivity", range=[0, None]),
+                yaxis=dict(title=""),
+            )
+            apply_impulator_theme(fig)
+            st.plotly_chart(fig, width='stretch')
+
+        st.markdown("---")
+
+    # ── Section 4: Assay Type Coverage ────────────────────────────────────
+    if has_assay_type and has_pact:
+        st.markdown("**Assay Modality Breakdown**")
+        st.caption("How bioactivity evidence is distributed across assay types. Cross-modality activity strengthens (or weakens) confidence.")
+
+        at_col1, at_col2 = st.columns([1, 2])
+
+        with at_col1:
+            # Assay type counts table
+            at_counts = df['Assay_Type'].value_counts().reset_index()
+            at_counts.columns = ['Assay Type', 'Count']
+            at_counts['%'] = (at_counts['Count'] / at_counts['Count'].sum() * 100).round(1)
+            st.dataframe(at_counts, width='stretch', hide_index=True, height=min(250, len(at_counts) * 35 + 40))
+
+        with at_col2:
+            # Donut chart
+            _assay_colors = {
+                'Binding': '#3b82f6', 'Functional': '#22c55e', 'ADMET': '#f59e0b',
+                'Toxicity': '#ef4444', 'Physicochemical': '#8b5cf6', 'Unclassified': '#6b7280', 'Unknown': '#9ca3af',
+            }
+            fig = px.pie(
+                at_counts, values='Count', names='Assay Type', hole=0.45,
+                color='Assay Type',
+                color_discrete_map=_assay_colors,
+            )
+            fig.update_layout(
+                template=theme["template"],
+                margin=dict(t=10, b=10, l=10, r=10),
+                height=250,
+                showlegend=True,
+                legend=dict(orientation="v", yanchor="middle", y=0.5, xanchor="left", x=1.02,
+                            bgcolor=theme["legend_bgcolor"], bordercolor=theme["legend_bordercolor"], borderwidth=1),
+            )
+            fig.update_traces(textposition='inside', textinfo='percent+label')
+            apply_impulator_theme(fig)
+            st.plotly_chart(fig, width='stretch')
+
+        st.markdown("---")
+
+    # ── Section 5: Activity Heatmap (Target × Activity Type) ─────────────
+    if has_pact and has_targets and target_col:
+        st.markdown("**Target × Activity Type Heatmap**")
+        st.caption("Mean pActivity per target and assay type. Bright cells = high potency. Compounds active across many cells = potential IMP (pan-active).")
+
+        # Build pivot: Target rows × Activity_Type columns, values = mean pActivity
+        heatmap_df = df.dropna(subset=['pActivity']).copy()
+        if len(heatmap_df) >= 3 and heatmap_df['Activity_Type'].nunique() >= 1 and heatmap_df[target_col].nunique() >= 1:
+            # Limit to top 15 targets by record count to keep readable
+            top_targets = heatmap_df[target_col].value_counts().head(15).index
+            heatmap_df = heatmap_df[heatmap_df[target_col].isin(top_targets)]
+
+            pivot = heatmap_df.pivot_table(
+                values='pActivity', index=target_col, columns='Activity_Type',
+                aggfunc='mean'
+            ).round(1)
+
+            if not pivot.empty and pivot.shape[0] >= 1 and pivot.shape[1] >= 1:
+                fig = px.imshow(
+                    pivot,
+                    color_continuous_scale='RdYlGn',
+                    aspect='auto',
+                    text_auto='.1f',
+                )
+                fig.update_layout(
+                    template=theme["template"],
+                    height=max(280, pivot.shape[0] * 32 + 80),
+                    margin=dict(t=10, b=10, l=10, r=10),
+                    xaxis_title="Activity Type",
+                    yaxis_title="",
+                    coloraxis_colorbar=dict(title="pActivity", len=0.6),
+                )
+                apply_impulator_theme(fig)
+                st.plotly_chart(fig, width='stretch')
+            else:
+                st.info("Not enough data dimensions for heatmap")
+        else:
+            st.info("Not enough data for activity heatmap (need ≥3 records across targets and types)")
+
+        st.markdown("---")
+
+    # ── Section 6: Activity Data Table ────────────────────────────────────
+    with st.expander("📋 Full Activity Data", expanded=False):
+        display_cols = ['ChEMBL_ID', 'Molecule_Name', 'Activity_Type', 'Activity_nM', 'pActivity']
+        if has_targets and target_col:
+            display_cols.append(target_col)
+        if has_assay_type:
+            display_cols.append('Assay_Type')
+        if has_quality:
+            display_cols.append('Data_Quality')
+        if 'Document_Year' in df.columns:
+            display_cols.append('Document_Year')
+        if 'Activity_Comment' in df.columns:
+            display_cols.append('Activity_Comment')
+
+        avail_cols = [c for c in display_cols if c in df.columns]
+        table_df = df[avail_cols].copy()
+        for c in ['Activity_nM', 'pActivity']:
+            if c in table_df.columns:
+                table_df[c] = table_df[c].round(2)
+
+        st.dataframe(table_df, width='stretch', hide_index=True,
+                     height=min(500, len(table_df) * 35 + 40))
 
 
 def _render_efficiency_analysis(df: pd.DataFrame) -> None:
-    """Efficiency metrics analysis with interactive filtering."""
+    """Ligand Efficiency & IMP Evidence — shows how efficiency metrics feed into IMP scoring."""
     metrics = ['SEI', 'BEI', 'NSEI', 'NBEI']
     avail = [m for m in metrics if m in df.columns]
 
@@ -1144,216 +1374,366 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
         st.info("No efficiency metrics available")
         return
 
-    # Overall stats table
-    st.markdown("**Overall Efficiency Metrics Summary**")
-    stats_data = []
-    for m in avail:
+    theme = get_plotly_theme()
+    has_sei_bei = 'SEI' in df.columns and 'BEI' in df.columns
+    has_pact = 'pActivity' in df.columns
+    has_targets = 'Target_Name' in df.columns or 'Target_ChEMBL_ID' in df.columns
+    target_col = 'Target_Name' if 'Target_Name' in df.columns else ('Target_ChEMBL_ID' if 'Target_ChEMBL_ID' in df.columns else None)
+    has_angle = 'Angle_SEI_BEI' in df.columns
+    has_modulus = 'Modulus_SEI_BEI' in df.columns
+
+    # ── Section 1: Efficiency Summary Cards ───────────────────────────────
+    # Color thresholds: green = normal, amber = elevated, red = outlier
+    def _eff_color(metric_name, value):
+        """Return color based on typical ranges for each metric."""
+        if pd.isna(value):
+            return "off"
+        return "off"  # st.metric delta_color, we use help text instead
+
+    card_cols = st.columns(4 if has_sei_bei else len(avail))
+    scored_metrics = [('SEI', 'pActivity × 100 / PSA', True), ('BEI', 'pActivity × 1000 / MW', True)]
+    ref_metrics = [('NSEI', 'pActivity / NPOL', False), ('NBEI', 'pActivity / NHA', False)]
+
+    for i, (m, formula, used_in_score) in enumerate(scored_metrics + ref_metrics):
+        if m not in df.columns or i >= len(card_cols):
+            continue
         vals = df[m].dropna()
-        if len(vals) > 0:
-            stats_data.append({
+        if len(vals) == 0:
+            continue
+
+        mean_val = vals.mean()
+        outlier_col = f'Is_{m}_Outlier'
+        n_outliers = int(df[outlier_col].sum()) if outlier_col in df.columns else 0
+
+        with card_cols[i]:
+            delta_txt = f"{'✓ Used in score' if used_in_score else 'Reference only'}"
+            if n_outliers > 0:
+                delta_txt = f"⚠️ {n_outliers} outlier{'s' if n_outliers > 1 else ''}"
+            st.metric(
+                m, f"{mean_val:.2f}",
+                delta=delta_txt,
+                delta_color="inverse" if n_outliers > 0 else "off",
+                help=f"**{m}** = {formula}\nMean ± Std: {mean_val:.2f} ± {vals.std():.2f}\nRange: {vals.min():.2f} – {vals.max():.2f}\n{'**Contributes to IMP Score (45% weight)**' if used_in_score else 'Display only — not used in IMP scoring'}"
+            )
+
+    # Angle + Modulus summary if available
+    if has_angle and has_modulus:
+        angle_vals = df['Angle_SEI_BEI'].dropna()
+        mod_vals = df['Modulus_SEI_BEI'].dropna()
+        if len(angle_vals) > 0 and len(mod_vals) > 0:
+            mean_angle = angle_vals.mean()
+            mean_mod = mod_vals.mean()
+
+            # Angle interpretation
+            if 35 <= mean_angle <= 55:
+                angle_label = "Balanced"
+                angle_color = "#22c55e"
+            elif mean_angle < 35:
+                angle_label = "Hydrophobic-biased"
+                angle_color = "#f59e0b"
+            else:
+                angle_label = "Polar-biased"
+                angle_color = "#3b82f6"
+
+            geo_cols = st.columns(2)
+            with geo_cols[0]:
+                st.metric(
+                    "Mean Angle", f"{mean_angle:.1f}°",
+                    delta=angle_label,
+                    delta_color="off",
+                    help="**Efficiency Plane Angle** = arctan(BEI/SEI)\n0° = hydrophobic optimization only\n**45° = optimal** (balanced SEI + BEI)\n90° = polar optimization only\n\nAngles 35–55° indicate balanced drug development trajectory."
+                )
+            with geo_cols[1]:
+                st.metric(
+                    "Mean Modulus", f"{mean_mod:.2f}",
+                    delta=f"Best: {mod_vals.max():.2f}",
+                    delta_color="off",
+                    help="**Efficiency Modulus** = √(SEI² + BEI²)\nOverall efficiency magnitude. Higher = more efficient.\nThe best-in-class compound sets the distance benchmark for IMP scoring (20% weight)."
+                )
+
+    st.markdown("---")
+
+    # ── Section 2: SEI-BEI Efficiency Plane ───────────────────────────────
+    if has_sei_bei:
+        st.markdown("**SEI–BEI Efficiency Plane**")
+        st.caption("The canonical IMP visualization. 45° angle = balanced development. Outliers in this space drive 45% of the IMP score.")
+
+        plane_df = df.dropna(subset=['SEI', 'BEI']).copy()
+        if len(plane_df) >= 1:
+            # Color by Activity_Type (5-7 categories) — targets can be 20+ which overflows legend
+            color_col = None
+            if 'Activity_Type' in plane_df.columns:
+                color_col = 'Activity_Type'
+            elif 'IMP_Score_Interpretation' in plane_df.columns:
+                color_col = 'IMP_Score_Interpretation'
+
+            fig = go.Figure()
+
+            # 45° optimal angle reference line
+            max_val = max(plane_df['SEI'].max(), plane_df['BEI'].max()) * 1.15
+            fig.add_trace(go.Scatter(
+                x=[0, max_val], y=[0, max_val],
+                mode='lines', line=dict(color='rgba(128,128,128,0.4)', dash='dash', width=1.5),
+                name='45° Optimal', showlegend=True, hoverinfo='skip',
+            ))
+
+            # Compound points
+            hover_cols = []
+            if 'ChEMBL_ID' in plane_df.columns:
+                hover_cols.append('ChEMBL_ID')
+            if 'Molecule_Name' in plane_df.columns:
+                hover_cols.append('Molecule_Name')
+            if has_angle:
+                hover_cols.append('Angle_SEI_BEI')
+            if has_modulus:
+                hover_cols.append('Modulus_SEI_BEI')
+
+            # customdata layout: [SMILES, Molecule_Name, ChEMBL_ID, Angle, Modulus]
+            # Index 0-2 = structure viewer expects SMILES/Name/ID
+            # Index 3+ = angle/modulus for hover display
+            has_smiles = 'SMILES' in plane_df.columns
+            angle_idx = 3 if has_smiles else 0
+            mod_idx = angle_idx + (1 if has_angle else 0)
+
+            hover_template = "<b>%{text}</b><br>SEI: %{x:.2f}<br>BEI: %{y:.2f}"
+            if has_angle:
+                hover_template += "<br>Angle: %{customdata[" + str(angle_idx) + "]:.1f}" + chr(176)
+            if has_modulus:
+                hover_template += "<br>Modulus: %{customdata[" + str(mod_idx) + "]:.2f}"
+            hover_template += "<extra></extra>"
+
+            def _build_cd(sub_df):
+                """Build customdata array with SMILES first for structure viewer."""
+                cols = []
+                if has_smiles:
+                    cols.append(sub_df['SMILES'].values if 'SMILES' in sub_df.columns else [''] * len(sub_df))
+                    cols.append(sub_df['Molecule_Name'].values if 'Molecule_Name' in sub_df.columns else [''] * len(sub_df))
+                    cols.append(sub_df['ChEMBL_ID'].values if 'ChEMBL_ID' in sub_df.columns else [''] * len(sub_df))
+                if has_angle:
+                    cols.append(sub_df['Angle_SEI_BEI'].values)
+                if has_modulus:
+                    cols.append(sub_df['Modulus_SEI_BEI'].values)
+                return list(zip(*cols)) if cols else None
+
+            if color_col and color_col in plane_df.columns:
+                for grp_name, grp_df in plane_df.groupby(color_col):
+                    fig.add_trace(go.Scatter(
+                        x=grp_df['SEI'], y=grp_df['BEI'],
+                        mode='markers',
+                        marker=dict(size=9, opacity=0.8, line=dict(width=1, color='white')),
+                        name=str(grp_name),
+                        text=grp_df['Molecule_Name'] if 'Molecule_Name' in grp_df.columns else grp_df.index.astype(str),
+                        customdata=_build_cd(grp_df),
+                        hovertemplate=hover_template,
+                    ))
+            else:
+                fig.add_trace(go.Scatter(
+                    x=plane_df['SEI'], y=plane_df['BEI'],
+                    mode='markers',
+                    marker=dict(size=9, color='#3b82f6', opacity=0.8, line=dict(width=1, color='white')),
+                    name='Compounds',
+                    text=plane_df['Molecule_Name'] if 'Molecule_Name' in plane_df.columns else plane_df.index.astype(str),
+                    customdata=_build_cd(plane_df),
+                    hovertemplate=hover_template,
+                ))
+
+            # Mean point marker
+            mean_sei = plane_df['SEI'].mean()
+            mean_bei = plane_df['BEI'].mean()
+            fig.add_trace(go.Scatter(
+                x=[mean_sei], y=[mean_bei],
+                mode='markers',
+                marker=dict(size=14, color='#ef4444', symbol='diamond',
+                            line=dict(width=2, color='white')),
+                name=f'Mean ({mean_sei:.1f}, {mean_bei:.1f})',
+                hovertemplate=f"Mean SEI: {mean_sei:.2f}<br>Mean BEI: {mean_bei:.2f}<extra></extra>",
+            ))
+
+            fig.update_layout(
+                template=theme["template"],
+                height=460,
+                margin=dict(t=10, b=40, l=10, r=10),
+                xaxis=dict(title="SEI (Surface Efficiency)", range=[0, max_val], scaleanchor="y", scaleratio=1),
+                yaxis=dict(title="BEI (Binding Efficiency)", range=[0, max_val]),
+                legend=dict(
+                    orientation="v", yanchor="top", y=0.98, xanchor="left", x=1.02,
+                    bgcolor=theme["legend_bgcolor"], bordercolor=theme["legend_bordercolor"], borderwidth=1,
+                ),
+            )
+            apply_impulator_theme(fig)
+            st.plotly_chart(fig, width='stretch', key="sei_bei_plane")
+            _maybe_embed_structure_viewer("sei_bei_plane", plane_df, x_col='SEI', y_col='BEI')
+
+        st.markdown("---")
+
+    # ── Section 3: Efficiency vs Potency ──────────────────────────────────
+    if has_sei_bei and has_pact:
+        st.markdown("**Efficiency vs Potency**")
+        st.caption("Do efficiency and potency agree? High potency with low efficiency may indicate non-specific binding (aggregation).")
+
+        ep_col1, ep_col2 = st.columns(2)
+
+        for col_widget, metric, title in [(ep_col1, 'SEI', 'SEI vs pActivity'), (ep_col2, 'BEI', 'BEI vs pActivity')]:
+            with col_widget:
+                ep_df = df.dropna(subset=[metric, 'pActivity']).copy()
+                if len(ep_df) >= 2:
+                    ep_cd = [c for c in ['SMILES', 'Molecule_Name', 'ChEMBL_ID'] if c in ep_df.columns]
+                    ep_chart_key = f"eff_potency_{metric.lower()}"
+                    fig = px.scatter(
+                        ep_df, x='pActivity', y=metric,
+                        color='Activity_Type' if 'Activity_Type' in ep_df.columns else None,
+                        hover_data=['ChEMBL_ID', 'Molecule_Name'] if all(c in ep_df.columns for c in ['ChEMBL_ID', 'Molecule_Name']) else None,
+                        custom_data=ep_cd if ep_cd else None,
+                        opacity=0.7,
+                        trendline='ols',
+                    )
+                    fig.update_traces(marker=dict(size=7))
+                    fig.update_layout(
+                        template=theme["template"],
+                        height=370,
+                        margin=dict(t=30, b=40, l=10, r=10),
+                        xaxis_title="pActivity",
+                        yaxis_title=metric,
+                        showlegend=True,
+                        legend=dict(
+                            orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+                            bgcolor=theme["legend_bgcolor"], bordercolor=theme["legend_bordercolor"], borderwidth=1,
+                            font=dict(size=13),
+                        ),
+                    )
+                    apply_impulator_theme(fig)
+                    st.plotly_chart(fig, width='stretch', key=ep_chart_key)
+                    _maybe_embed_structure_viewer(ep_chart_key, ep_df, x_col='pActivity', y_col=metric)
+                else:
+                    st.info(f"Not enough data for {title}")
+
+        st.markdown("---")
+
+    # ── Section 4: Efficiency by Target ───────────────────────────────────
+    if has_targets and target_col and has_sei_bei:
+        st.markdown("**Efficiency by Target**")
+        st.caption("Which biological targets produce the most efficient ligands? Targets with consistently high efficiency may warrant closer IMP scrutiny.")
+
+        # Build target efficiency summary
+        target_eff = df.groupby(target_col).agg(
+            SEI_Mean=('SEI', 'mean'),
+            BEI_Mean=('BEI', 'mean'),
+            Records=('SEI', 'count'),
+        ).dropna().round(2).sort_values('SEI_Mean', ascending=True)
+
+        # Show top 10
+        plot_tgt = target_eff.tail(10).copy()
+        if not plot_tgt.empty:
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                y=plot_tgt.index.astype(str), x=plot_tgt['SEI_Mean'],
+                orientation='h', name='SEI', marker_color='#3b82f6',
+                hovertemplate='<b>%{y}</b><br>Mean SEI: %{x:.2f}<extra></extra>',
+            ))
+            fig.add_trace(go.Bar(
+                y=plot_tgt.index.astype(str), x=plot_tgt['BEI_Mean'],
+                orientation='h', name='BEI', marker_color='#22c55e',
+                hovertemplate='<b>%{y}</b><br>Mean BEI: %{x:.2f}<extra></extra>',
+            ))
+            fig.update_layout(
+                template=theme["template"],
+                barmode='group',
+                height=max(280, len(plot_tgt) * 40 + 60),
+                margin=dict(t=10, b=30, l=10, r=10),
+                xaxis_title="Mean Efficiency",
+                yaxis_title="",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            )
+            apply_impulator_theme(fig)
+            st.plotly_chart(fig, width='stretch')
+
+        st.markdown("---")
+
+    # ── Section 5: Outlier Status Panel ───────────────────────────────────
+    outlier_cols = [f'Is_{m}_Outlier' for m in avail if f'Is_{m}_Outlier' in df.columns]
+    if outlier_cols:
+        st.markdown("**Outlier Detection (IQR Method)**")
+        st.caption("Compounds flagged as statistical outliers in efficiency metrics. Outlier status feeds directly into the IMP Efficiency Score (45% of total).")
+
+        outlier_data = []
+        for m in avail:
+            oc = f'Is_{m}_Outlier'
+            if oc not in df.columns:
+                continue
+            vals = df[m].dropna()
+            n_out = int(df[oc].sum())
+            q1, q3 = vals.quantile(0.25), vals.quantile(0.75)
+            iqr = q3 - q1
+            threshold = q3 + 1.5 * iqr
+            outlier_data.append({
                 'Metric': m,
-                'Count': len(vals),
-                'Mean': round(vals.mean(), 3),
-                'Std': round(vals.std(), 3),
-                'Min': round(vals.min(), 3),
-                'Max': round(vals.max(), 3)
+                'Used in Score': '✓' if m in ['SEI', 'BEI'] else '—',
+                'Q1': round(q1, 2),
+                'Q3': round(q3, 2),
+                'IQR': round(iqr, 2),
+                'Threshold': round(threshold, 2),
+                'Outliers': n_out,
+                '% Flagged': f"{n_out / len(vals) * 100:.0f}%" if len(vals) > 0 else "0%",
             })
 
-    if stats_data:
-        st.dataframe(pd.DataFrame(stats_data), width='stretch', hide_index=True)
+        if outlier_data:
+            st.dataframe(pd.DataFrame(outlier_data), width='stretch', hide_index=True)
 
-    # Controls for interactive plot
-    st.markdown("---")
-    ctrl_cols = st.columns([1, 1, 2])
+        st.markdown("---")
 
-    with ctrl_cols[0]:
-        _eid = SessionState.get('selected_compound_entry_id', '')
-        metric_choice = st.selectbox(
-            "Metric",
-            avail,
-            key=f"eff_metric_choice_{_eid}",
-            help="Select efficiency metric to display"
-        )
-
-    with ctrl_cols[1]:
-        # Color by options - categorical columns that make sense for grouping
-        color_options = ['None']
-        categorical_cols = ['Activity_Type', 'ChEMBL_ID', 'IMP_Classification', 'Target_Name']
-        color_options += [c for c in categorical_cols if c in df.columns]
-
-        color_by = st.selectbox(
-            "Color by",
-            color_options,
-            key="eff_color_by",
-            help="Click legend to show/hide groups"
-        )
-
-    # Prepare data for plotting
-    plot_df = df.dropna(subset=[metric_choice]).copy()
-
-    if plot_df.empty:
-        st.warning(f"No data available for {metric_choice}")
-        return
-
-    # Build customdata for structure viewer (box plots support click events)
-    customdata_cols = None
-    if 'SMILES' in plot_df.columns:
-        customdata_cols = ['SMILES']
-        if 'Molecule_Name' in plot_df.columns:
-            customdata_cols.append('Molecule_Name')
-        if 'ChEMBL_ID' in plot_df.columns:
-            customdata_cols.append('ChEMBL_ID')
-
-    # Layout: Chart takes most space, compact sidebar for outliers/groups
-    col1, col2 = st.columns([5, 1])
-
-    with col1:
-        # Box plot with optional coloring
-        if color_by != "None":
-            fig = px.box(
-                plot_df,
-                x=color_by,
-                y=metric_choice,
-                color=color_by,
-                points='all',  # Show all points for structure viewer clicks
-                hover_data=['ChEMBL_ID', 'Molecule_Name'] if all(c in plot_df.columns for c in ['ChEMBL_ID', 'Molecule_Name']) else None,
-                custom_data=customdata_cols
-            )
-            theme = get_plotly_theme()
-            fig.update_layout(
-                title=dict(text=f'{metric_choice} Distribution', subtitle=dict(text=f'Grouped by {color_by}')),
-                template=theme["template"],
-                height=470,
-                margin=dict(t=55, b=80, r=10),
-                xaxis_tickangle=-45,
-                legend=dict(
-                    orientation="v",
-                    yanchor="top",
-                    y=0.98,
-                    xanchor="left",
-                    x=1.02,
-                    title_text="",
-                    bgcolor=theme["legend_bgcolor"],
-                    bordercolor=theme["legend_bordercolor"],
-                    borderwidth=1
-                )
-            )
-            apply_impulator_theme(fig)
-            st.plotly_chart(fig, width='stretch', key="eff_box_chart")
-            st.caption("💡 **Click legend items** to show/hide groups. Double-click to isolate.")
-        else:
-            # Simple histogram without grouping
-            fig = px.histogram(plot_df, x=metric_choice, nbins=30)
-            fig.update_layout(
-                title=dict(text=f'{metric_choice} Distribution', subtitle=dict(text='Frequency distribution across compounds')),
-                height=420, margin=dict(t=55, b=30)
-            )
-            apply_impulator_theme(fig)
-            st.plotly_chart(fig, width='stretch', key="eff_hist_chart")
-
-        # Embed structure viewer for click-to-view molecules (box plots)
-        if color_by != "None" and 'SMILES' in plot_df.columns:
-            render_structure_viewer_hint()
-            embed_structure_viewer(
-                chart_id="eff_box_chart",
-                x_col=color_by,
-                y_col=metric_choice,
-                name_col='Molecule_Name' if 'Molecule_Name' in plot_df.columns else None
-            )
-
-    with col2:
-        # Compact outlier summary - smaller text, tighter spacing
-        st.markdown("<p style='font-size: 13px; font-weight: 600; margin-bottom: 4px;'>Outliers</p>", unsafe_allow_html=True)
-        for m in avail:
-            outlier_col = f'Is_{m}_Outlier'
-            if outlier_col in df.columns:
-                count = int(df[outlier_col].sum())
-                color = "#ff6b6b" if count > 0 else "#51cf66"
-                st.markdown(
-                    f"<div style='background: {color}; color: white; padding: 2px 6px; "
-                    f"border-radius: 4px; font-size: 11px; margin: 2px 0; text-align: center;'>"
-                    f"{html.escape(m)}: {count}</div>",
-                    unsafe_allow_html=True
-                )
-
-        # Show group counts when colored - compact
-        if color_by != "None":
-            st.markdown("<hr style='margin: 8px 0;'>", unsafe_allow_html=True)
-            st.markdown("<p style='font-size: 11px; font-weight: 600; margin-bottom: 2px;'>Groups</p>", unsafe_allow_html=True)
-            group_counts = plot_df[color_by].value_counts()
-            for grp, cnt in group_counts.head(6).items():
-                st.markdown(f"<p style='font-size: 10px; margin: 0; color: var(--text-color); opacity: 0.6;'>{html.escape(str(grp)[:12])}: {cnt}</p>", unsafe_allow_html=True)
-
-    # Efficiency Metrics by Target table (after visualization)
-    st.markdown("---")
-    st.markdown("**Efficiency Metrics by Target**")
-
-    # Determine target column
-    target_col = None
-    if 'Target_Name' in df.columns:
-        target_col = 'Target_Name'
-    elif 'Target_ChEMBL_ID' in df.columns:
-        target_col = 'Target_ChEMBL_ID'
-
+    # ── Section 6: Efficiency Metrics by Target Table ─────────────────────
     if target_col and any(m in df.columns for m in metrics):
-        # Build target metrics table
-        target_metrics = []
-        for target in df[target_col].dropna().unique():
-            target_df = df[df[target_col] == target]
-            row = {
-                'Target_ChEMBL_ID': target if target_col == 'Target_ChEMBL_ID' else target_df['Target_ChEMBL_ID'].iloc[0] if 'Target_ChEMBL_ID' in target_df.columns else '',
-                'Target_Name': target if target_col == 'Target_Name' else ''
-            }
-            for m in ['SEI', 'BEI', 'NSEI', 'NBEI']:
-                if m in target_df.columns:
-                    vals = target_df[m].dropna()
-                    row[f'{m} Count'] = len(vals)
-                    row[f'{m} Mean'] = round(vals.mean(), 3) if len(vals) > 0 else None
-                    row[f'{m} Median'] = round(vals.median(), 3) if len(vals) > 0 else None
-            target_metrics.append(row)
+        with st.expander("📋 Efficiency Metrics by Target", expanded=False):
+            target_metrics = []
+            for target in df[target_col].dropna().unique():
+                target_df = df[df[target_col] == target]
+                row = {
+                    'Target_ChEMBL_ID': target if target_col == 'Target_ChEMBL_ID' else (target_df['Target_ChEMBL_ID'].iloc[0] if 'Target_ChEMBL_ID' in target_df.columns else ''),
+                    'Target_Name': target if target_col == 'Target_Name' else '',
+                }
+                for m in ['SEI', 'BEI', 'NSEI', 'NBEI']:
+                    if m in target_df.columns:
+                        vals = target_df[m].dropna()
+                        row[f'{m} Mean'] = round(vals.mean(), 3) if len(vals) > 0 else None
+                        row[f'{m} Median'] = round(vals.median(), 3) if len(vals) > 0 else None
+                target_metrics.append(row)
 
-        if target_metrics:
-            target_metrics_df = pd.DataFrame(target_metrics)
-            # Sort by SEI Count if available
-            if 'SEI Count' in target_metrics_df.columns:
-                target_metrics_df = target_metrics_df.sort_values('SEI Count', ascending=False)
+            if target_metrics:
+                target_metrics_df = pd.DataFrame(target_metrics)
+                if 'SEI Mean' in target_metrics_df.columns:
+                    target_metrics_df = target_metrics_df.sort_values('SEI Mean', ascending=False)
 
-            # Make Target_ChEMBL_ID a clickable link to ChEMBL
-            if 'Target_ChEMBL_ID' in target_metrics_df.columns:
-                def _to_chembl_target_link(value):
-                    """Build safe ChEMBL target URL, skipping missing IDs."""
-                    if pd.isna(value):
-                        return ""
-                    chembl_id = str(value).strip()
-                    if not chembl_id or chembl_id.lower() == "nan":
-                        return ""
-                    return f"https://www.ebi.ac.uk/chembl/explore/target/{chembl_id}"
-
-                target_metrics_df['Target_ChEMBL_ID'] = target_metrics_df['Target_ChEMBL_ID'].apply(
-                    _to_chembl_target_link
-                )
-                col_config = {
-                    "Target_ChEMBL_ID": st.column_config.LinkColumn(
+                # Clickable ChEMBL target links
+                col_config = {}
+                if 'Target_ChEMBL_ID' in target_metrics_df.columns:
+                    target_metrics_df['Target_ChEMBL_ID'] = target_metrics_df['Target_ChEMBL_ID'].apply(
+                        lambda v: f"https://www.ebi.ac.uk/chembl/explore/target/{str(v).strip()}"
+                        if pd.notna(v) and str(v).strip() and str(v).strip().lower() != 'nan' else ""
+                    )
+                    col_config["Target_ChEMBL_ID"] = st.column_config.LinkColumn(
                         "Target ChEMBL ID",
                         display_text=r"https://www\.ebi\.ac\.uk/chembl/explore/target/(.*)",
                     )
-                }
-            else:
-                col_config = {}
 
-            st.dataframe(target_metrics_df, width='stretch', hide_index=True, height=300, column_config=col_config)
+                st.dataframe(target_metrics_df, width='stretch', hide_index=True, height=300, column_config=col_config)
 
-    # Explanation box
-    with st.expander("📖 Understanding Efficiency Metrics by Target", expanded=False):
+    # ── Explanation ───────────────────────────────────────────────────────
+    with st.expander("📖 Understanding Efficiency Metrics", expanded=False):
         st.markdown("""
-**This table shows efficiency metrics calculated for each target in the dataset.**
+**Efficiency metrics normalize potency by molecular size — critical for IMP detection.**
 
-- **SEI (Surface Efficiency Index)**: Measures activity relative to polar surface area. Formula: `SEI = pActivity / (PSA / 100)`
-- **BEI (Binding Efficiency Index)**: Measures activity relative to molecular weight. Formula: `BEI = pActivity / (MW / 1000)`
-- **NSEI (Normalized Surface Efficiency Index)**: Measures activity relative to polar atom count. Formula: `NSEI = pActivity / NPOL` (where NPOL = N + O atom count)
-- **NBEI (Normalized Binding Efficiency Index)**: Measures activity relative to heavy atom count. Formula: `NBEI = pActivity / NHA` (where NHA = heavy atom count)
+| Metric | Formula | IMP Role |
+|--------|---------|----------|
+| **SEI** | pActivity × 100 / PSA | ✓ Used in score (45% weight) |
+| **BEI** | pActivity × 1000 / MW | ✓ Used in score (45% weight) |
+| **NSEI** | pActivity / NPOL | Reference only |
+| **NBEI** | pActivity / NHA | Reference only |
 
-**Interpretation:** Higher values indicate more efficient compounds for that target. Compounds with high efficiency metrics achieve strong binding without excessive molecular size or polarity.
+**Efficiency Plane Geometry:**
+- **Angle** (0–90°): Development trajectory. 45° = optimal balanced development. <35° = hydrophobic-biased (aggregation risk). >55° = polar-biased (permeability issues).
+- **Modulus** √(SEI² + BEI²): Overall efficiency magnitude. Best-in-class sets the distance benchmark (20% of IMP score).
+
+**Outlier Detection:** IQR method flags compounds >Q3 + 1.5×IQR. Outliers in SEI/BEI → high efficiency Z-scores → high IMP Efficiency Score → higher IMP risk.
         """)
 
 
@@ -2255,19 +2635,17 @@ def _render_visualizations_tab(data: Dict[str, Any]) -> None:
         st.warning("No data available for visualization")
         return
 
-    # Plot type selector
+    # Plot type selector — Activity Distribution moved to Activity tab
     plot_type = st.radio(
         "Select Plot",
-        ["Activity Distribution", "Efficiency Scatter", "Efficiency by Compound", "Custom Plot"],
+        ["Efficiency Scatter", "Efficiency by Compound", "Custom Plot"],
         horizontal=True,
         label_visibility="hidden"
     )
 
     st.markdown("---")
 
-    if plot_type == "Activity Distribution":
-        _plot_activity_distribution(df)
-    elif plot_type == "Efficiency Scatter":
+    if plot_type == "Efficiency Scatter":
         _plot_efficiency_scatter(df)
     elif plot_type == "Efficiency by Compound":
         _plot_efficiency_by_compound(df)
@@ -2321,15 +2699,7 @@ def _plot_activity_distribution(df: pd.DataFrame) -> None:
     st.plotly_chart(fig, width='stretch', height=400, key="activity_dist_chart")
     st.caption("💡 **Click legend items** to show/hide activity types. Double-click to isolate.")
 
-    # Embed structure viewer for click-to-view molecules
-    if 'SMILES' in plot_df.columns:
-        render_structure_viewer_hint()
-        embed_structure_viewer(
-            chart_id="activity_dist_chart",
-            x_col='Activity_Type',
-            y_col='pActivity',
-            name_col='Molecule_Name' if 'Molecule_Name' in plot_df.columns else None
-        )
+    _maybe_embed_structure_viewer("activity_dist_chart", plot_df, x_col='Activity_Type', y_col='pActivity')
 
 
 def _plot_efficiency_scatter(df: pd.DataFrame) -> None:
@@ -2492,14 +2862,7 @@ def _plot_efficiency_scatter(df: pd.DataFrame) -> None:
     st.plotly_chart(fig, width='stretch', key="efficiency_scatter_chart")
 
     # Embed structure viewer for click-to-view molecules
-    if 'SMILES' in plot_df.columns:
-        render_structure_viewer_hint()
-        embed_structure_viewer(
-            chart_id="efficiency_scatter_chart",
-            x_col=x_col,
-            y_col=y_col,
-            name_col='Molecule_Name' if 'Molecule_Name' in plot_df.columns else None
-        )
+    _maybe_embed_structure_viewer("efficiency_scatter_chart", plot_df, x_col=x_col, y_col=y_col)
 
 
 def _plot_efficiency_by_compound(df: pd.DataFrame) -> None:
@@ -2525,10 +2888,13 @@ def _plot_efficiency_by_compound(df: pd.DataFrame) -> None:
     group_df = df[df['ChEMBL_ID'].isin(group_ids)].dropna(subset=[metric])
 
     if not group_df.empty:
-        fig = px.box(group_df, x='ChEMBL_ID', y=metric, color='ChEMBL_ID', points='all')
+        eby_cd = [c for c in ['SMILES', 'Molecule_Name', 'ChEMBL_ID'] if c in group_df.columns]
+        fig = px.box(group_df, x='ChEMBL_ID', y=metric, color='ChEMBL_ID', points='all',
+                     custom_data=eby_cd if eby_cd else None)
         fig.update_layout(height=450, xaxis_tickangle=-45, showlegend=False)
         apply_impulator_theme(fig)
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, width='stretch', key="eff_by_compound_box")
+        _maybe_embed_structure_viewer("eff_by_compound_box", group_df, x_col='ChEMBL_ID', y_col=metric)
         st.caption(f"Group {group_num} of {num_groups} ({len(unique_ids)} total compounds)")
 
 
@@ -2730,15 +3096,9 @@ def _plot_custom(df: pd.DataFrame) -> None:
         apply_impulator_theme(fig)
         st.plotly_chart(fig, width='stretch', key="custom_plot_chart")
 
-        # Embed structure viewer for click-to-view molecules (for scatter, box, violin)
-        if plot_type in ["Scatter", "Box", "Violin"] and 'SMILES' in plot_df.columns:
-            render_structure_viewer_hint()
-            embed_structure_viewer(
-                chart_id="custom_plot_chart",
-                x_col=x_axis,
-                y_col=y_axis if y_axis else x_axis,
-                name_col='Molecule_Name' if 'Molecule_Name' in plot_df.columns else None
-            )
+        # Embed structure viewer for hover-to-view molecules (for scatter, box, violin)
+        if plot_type in ["Scatter", "Box", "Violin"]:
+            _maybe_embed_structure_viewer("custom_plot_chart", plot_df, x_col=x_axis, y_col=y_axis if y_axis else x_axis)
 
     except Exception as e:
         st.error(f"Error creating plot: {e}")

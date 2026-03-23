@@ -67,10 +67,12 @@ CHEMBL_RESPONSE_KEYS = {
 POST_ID_THRESHOLD = 200
 
 # Only request the fields the pipeline actually uses (D-24/D-43).
-# ~80% smaller activity responses.
+# ~70% smaller activity responses.  Added assay_type, document_year,
+# activity_comment for richer Activity tab context (v2.2).
 ACTIVITY_ONLY_FIELDS = (
     "molecule_chembl_id,standard_type,standard_value,standard_units,"
-    "pchembl_value,target_chembl_id,assay_chembl_id,data_validity_comment"
+    "pchembl_value,target_chembl_id,assay_chembl_id,data_validity_comment,"
+    "assay_type,document_year,activity_comment"
 )
 
 CHEMBL_MAX_LIMIT = 1000  # Server-enforced hard cap across ALL endpoints
@@ -670,6 +672,9 @@ def _sync_activity_fetch(
             "target_chembl_id",
             "assay_chembl_id",
             "data_validity_comment",
+            "assay_type",
+            "document_year",
+            "activity_comment",
         ])
         raw = list(activities)
         filtered = [a for a in raw if a.get("standard_type") in activity_types_set]
