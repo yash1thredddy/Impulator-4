@@ -290,76 +290,119 @@ def _render_compound_info(data: Dict[str, Any], df: pd.DataFrame, summary: Dict)
         smiles = data.get('smiles', '')
         if smiles:
             render_2d_structure(smiles, size=(380, 300))
-            sc1, sc2 = st.columns([3, 1])
-            sc1.caption(f"Similarity: {summary.get('similarity_threshold', 90)}%")
-            with sc2:
-                if st.button("⛶", key="expand_overview_struct", type="primary", help="Expand structure"):
+            _, _ec = st.columns([1, 2])
+            with _ec:
+                if st.button("⛶ Expand Structure", key="expand_overview_struct"):
                     _show_expanded_structure(smiles, label=data.get('compound_name', ''))
 
-        # Processed date below structure
-        if summary.get('processing_date'):
-            st.markdown(f"**Processed:** {summary['processing_date']}")
+        # Metadata as styled cards
+        author_name = data.get('author_name', '')
+        proc_date = summary.get('processing_date', '')
+        sim_threshold = summary.get('similarity_threshold', 90)
 
-        # Author name
-        author_name = data.get('author_name', 'N/A')
+        meta_items = [
+            ('Similarity', f'{sim_threshold}%', '#2563eb'),
+        ]
+        if proc_date:
+            meta_items.append(('Processed', html.escape(str(proc_date)), '#7c3aed'))
         if author_name and author_name != 'N/A':
-            st.markdown(f"**Author:** {html.escape(author_name)}")
+            meta_items.append(('Author', html.escape(str(author_name)), '#16a34a'))
 
-        # Similar compounds breakdown
-        total_similar = summary.get('total_similar', 0)
-        compounds_with_data = summary.get('compounds_with_data', unique_count)
-        if total_similar > 0:
-            compounds_without_data = total_similar - compounds_with_data
-            st.markdown(f"**Similar Compounds with Biological Activity:** {compounds_with_data}")
-            st.markdown(f"**Similar Compounds with No Biological Activity:** {compounds_without_data}")
-        elif unique_count > 0:
-            st.markdown(f"**Similar Compounds:** {unique_count}")
+        cards_html = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0;">'
+        for label, value, color in meta_items:
+            cards_html += (
+                f'<div style="padding:6px 14px;border-radius:8px;border-left:3px solid {color};'
+                f'background:rgba(128,128,128,0.08);">'
+                f'<div style="font-size:10px;text-transform:uppercase;letter-spacing:0.5px;opacity:0.6;">{label}</div>'
+                f'<div style="font-size:15px;font-weight:600;">{value}</div>'
+                f'</div>'
+            )
+        cards_html += '</div>'
+        st.markdown(cards_html, unsafe_allow_html=True)
 
-        # ChEMBL ID list (ones with activity data)
+        # ChEMBL IDs — show first 5, rest in expander
         if unique_count > 0:
-            ids_display = ", ".join(unique_ids[:3]) if unique_ids else "None"
-            if unique_count > 3:
-                ids_display += f" (+{unique_count - 3})"
-            st.markdown(f"**ChEMBL IDs:** `{ids_display}`")
+            show_count = min(5, unique_count)
+            pills_html = ''.join(
+                f'<a href="https://www.ebi.ac.uk/chembl/explore/compound/{html.escape(cid)}" '
+                f'target="_blank" style="display:inline-block;padding:3px 8px;margin:2px;'
+                f'border-radius:4px;font-size:12px;font-weight:600;color:#3b82f6;'
+                f'border:1px solid rgba(59,130,246,0.3);text-decoration:none;">'
+                f'{html.escape(cid)}</a>'
+                for cid in unique_ids[:show_count]
+            )
+            st.markdown(
+                f'<div style="margin-top:4px;">'
+                f'<span style="font-size:13px;font-weight:600;opacity:0.7;">ChEMBL IDs ({unique_count}): </span>'
+                f'{pills_html}</div>',
+                unsafe_allow_html=True,
+            )
+            if unique_count > show_count:
+                with st.expander(f"Show all {unique_count} ChEMBL IDs"):
+                    # Render in columns of 4
+                    for row_start in range(0, unique_count, 4):
+                        row_ids = unique_ids[row_start:row_start + 4]
+                        row_cols = st.columns(4)
+                        for j, cid in enumerate(row_ids):
+                            row_cols[j].markdown(
+                                f'<a href="https://www.ebi.ac.uk/chembl/explore/compound/{html.escape(cid)}" '
+                                f'target="_blank" style="color:#3b82f6;text-decoration:none;font-size:13px;'
+                                f'font-weight:600;">{html.escape(cid)}</a>',
+                                unsafe_allow_html=True,
+                            )
 
     with col2:
-        # Key info in a clean grid
-        info_cols = st.columns(2)
+        # SMILES + identifiers
+        smiles_value = data.get('smiles', '')
+        st.markdown("**Query SMILES**")
+        st.code(smiles_value if smiles_value else 'N/A', language=None)
 
-        with info_cols[0]:
-            st.markdown("**Query SMILES**")
-            # Show full SMILES (scrollable code block) - don't truncate for copy-ability
-            smiles_value = data.get('smiles', '')
-            st.code(smiles_value if smiles_value else 'N/A', language=None)
-
-            # Display pre-computed InChI and InChIKey
-            inchikey = data.get('inchikey')
-            inchi = data.get('inchi')
+        id_col1, id_col2 = st.columns(2)
+        inchikey = data.get('inchikey')
+        inchi = data.get('inchi')
+        with id_col1:
             if inchikey:
                 st.markdown("**InChIKey**")
                 st.code(inchikey, language=None)
-            if inchi:
-                st.markdown("**InChI**")
-                st.code(inchi, language=None)
-
-        with info_cols[1]:
-            activity_types = summary.get('activity_types', '')
-            # Normalize: handle string, list, and [''] (empty default)
-            if isinstance(activity_types, str):
-                types = [t.strip() for t in activity_types.split(',') if t.strip()]
-            elif isinstance(activity_types, list):
-                types = [t for t in activity_types if t and t.strip()]
-            else:
-                types = []
-            if types:
-                st.markdown("#### Activity Types")
-                st.markdown(" ".join([f"**`{t}`**" for t in types[:7]]))
-
-            # Chemical Formula (pre-computed in _load_compound_data)
+        with id_col2:
             formula = data.get('mol_formula')
             if formula:
-                st.markdown("#### Chemical Formula")
-                st.markdown(f"### `{formula}`")
+                st.markdown("**Molecular Formula**")
+                st.markdown(
+                    f'<div style="font-size:20px;font-weight:700;font-family:monospace;'
+                    f'color:#16a34a;padding:8px 0;">{html.escape(formula)}</div>',
+                    unsafe_allow_html=True,
+                )
+
+        # InChI (full width — always long)
+        inchi = data.get('inchi')
+        if inchi:
+            st.markdown("**InChI**")
+            st.code(inchi, language=None)
+
+        # Activity types as colored pills
+        activity_types = summary.get('activity_types', '')
+        if isinstance(activity_types, str):
+            types = [t.strip() for t in activity_types.split(',') if t.strip()]
+        elif isinstance(activity_types, list):
+            types = [t for t in activity_types if t and t.strip()]
+        else:
+            types = []
+        if types:
+            type_colors = ['#2563eb', '#16a34a', '#d97706', '#dc2626', '#7c3aed', '#0e7490', '#ea580c']
+            pills = ''.join(
+                f'<span style="display:inline-block;padding:4px 12px;margin:2px;border-radius:12px;'
+                f'font-size:13px;font-weight:700;background:{type_colors[i % len(type_colors)]}18;'
+                f'color:{type_colors[i % len(type_colors)]};border:1.5px solid {type_colors[i % len(type_colors)]}55;">'
+                f'{html.escape(t)}</span>'
+                for i, t in enumerate(types[:7])
+            )
+            st.markdown(
+                f'<div style="margin-top:8px;margin-bottom:16px;">'
+                f'<span style="font-size:13px;font-weight:600;opacity:0.7;">Activity Types </span>'
+                f'{pills}</div>',
+                unsafe_allow_html=True,
+            )
 
         # View Compound Details - shows ALL similar compounds (not just those with bioactivity)
         if unique_count > 0 and df is not None:
@@ -429,40 +472,63 @@ def _render_classification_compact(df: pd.DataFrame) -> None:
 
     st.markdown("**Chemical Classification**")
 
-    # Side by side: ClassyFire | NPClassifier
     col1, col2 = st.columns(2)
 
     with col1:
         if cf_avail:
-            st.markdown("🧬 **ClassyFire**")
-            # Get unique values for each level (most common)
-            for col in cf_avail:
-                val_counts = df[col].value_counts()
+            # Breadcrumb taxonomy path
+            breadcrumb_parts = []
+            for col_name in cf_avail:
+                val_counts = df[col_name].value_counts()
                 if len(val_counts) > 0:
-                    top_val = val_counts.index[0]
-                    count = val_counts.iloc[0]
-                    unique = df[col].nunique()
-                    if unique > 1:
-                        st.caption(f"**{col}**: {top_val} ({count}, +{unique-1} more)")
-                    else:
-                        st.caption(f"**{col}**: {top_val}")
+                    top_val = str(val_counts.index[0])
+                    if top_val and top_val != 'nan':
+                        breadcrumb_parts.append((col_name, top_val))
+            if breadcrumb_parts:
+                crumbs_html = ' <span style="color:#2563eb;font-size:16px;">→</span> '.join(
+                    f'<span style="display:inline-block;padding:4px 10px;border-radius:6px;'
+                    f'font-size:13px;font-weight:600;background:rgba(37,99,235,{0.08 + i * 0.05});'
+                    f'border:1.5px solid rgba(37,99,235,{0.2 + i * 0.08});">'
+                    f'<span style="font-size:10px;opacity:0.6;text-transform:uppercase;">{html.escape(name)}</span><br>'
+                    f'{html.escape(val)}</span>'
+                    for i, (name, val) in enumerate(breadcrumb_parts)
+                )
+                st.markdown(
+                    f'<div style="margin:8px 0;">'
+                    f'<span style="font-size:14px;font-weight:600;">🧬 ClassyFire</span><br>'
+                    f'<div style="margin-top:6px;display:flex;align-items:center;flex-wrap:wrap;gap:4px;">'
+                    f'{crumbs_html}</div></div>',
+                    unsafe_allow_html=True,
+                )
         else:
             st.caption("ClassyFire: Not available")
 
     with col2:
         if np_avail:
-            st.markdown("🌿 **NPClassifier**")
-            for col in np_avail:
-                val_counts = df[col].value_counts()
+            breadcrumb_parts = []
+            for col_name in np_avail:
+                val_counts = df[col_name].value_counts()
                 if len(val_counts) > 0:
-                    top_val = val_counts.index[0]
-                    count = val_counts.iloc[0]
-                    unique = df[col].nunique()
-                    label = col.replace('NP_', '')
-                    if unique > 1:
-                        st.caption(f"**{label}**: {top_val} ({count}, +{unique-1} more)")
-                    else:
-                        st.caption(f"**{label}**: {top_val}")
+                    top_val = str(val_counts.index[0])
+                    if top_val and top_val != 'nan':
+                        label = col_name.replace('NP_', '')
+                        breadcrumb_parts.append((label, top_val))
+            if breadcrumb_parts:
+                crumbs_html = ' <span style="color:#16a34a;font-size:16px;">→</span> '.join(
+                    f'<span style="display:inline-block;padding:4px 10px;border-radius:6px;'
+                    f'font-size:13px;font-weight:600;background:rgba(22,163,74,{0.08 + i * 0.05});'
+                    f'border:1.5px solid rgba(22,163,74,{0.2 + i * 0.08});">'
+                    f'<span style="font-size:10px;opacity:0.6;text-transform:uppercase;">{html.escape(name)}</span><br>'
+                    f'{html.escape(val)}</span>'
+                    for i, (name, val) in enumerate(breadcrumb_parts)
+                )
+                st.markdown(
+                    f'<div style="margin:8px 0;">'
+                    f'<span style="font-size:14px;font-weight:600;">🌿 NPClassifier</span><br>'
+                    f'<div style="margin-top:6px;display:flex;align-items:center;flex-wrap:wrap;gap:4px;">'
+                    f'{crumbs_html}</div></div>',
+                    unsafe_allow_html=True,
+                )
         else:
             st.caption("NPClassifier: Not available")
 
@@ -536,126 +602,124 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
     )
 
     if view_mode == "Summary Statistics":
-        # Summary statistics view
-        col1, col2 = st.columns([1, 1])
+        property_display = {
+            'Molecular_Weight': ('Molecular Weight', 'g/mol', 500, True),
+            'MolLogP': ('LogP', '', 5, True), 'LogP': ('LogP', '', 5, True),
+            'HBD': ('H-Bond Donors', '', 5, True), 'HBA': ('H-Bond Acceptors', '', 10, True),
+            'TPSA': ('Topological PSA', 'Å²', 140, True),
+            'Heavy_Atoms': ('Heavy Atoms', '', 50, False),
+            'Rotatable_Bonds': ('Rotatable Bonds', '', 10, True),
+            'Aromatic_Rings': ('Aromatic Rings', '', 5, False),
+            'NPOL': ('Polar Atoms', '', 20, False),
+        }
 
-        with col1:
-            st.markdown("**📊 Physicochemical Properties**")
-            if physchem_cols:
-                # Build a clean property table like PubChem
-                prop_data = []
-                # Define property display names and order
-                property_display = {
-                    'Molecular_Weight': 'Molecular Weight',
-                    'MolLogP': 'XLogP3',
-                    'LogP': 'LogP',
-                    'HBD': 'H-Bond Donors',
-                    'HBA': 'H-Bond Acceptors',
-                    'TPSA': 'Topological PSA',
-                    'Heavy_Atoms': 'Heavy Atom Count',
-                    'Rotatable_Bonds': 'Rotatable Bonds',
-                    'Aromatic_Rings': 'Aromatic Rings',
-                    'NPOL': 'Polar Atoms (N+O)',
-                    'RO5_Violations': 'RO5 Violations',
-                    'NP_Likeness_Score': 'NP Likeness Score',
-                }
+        # Two columns: property table LEFT, drug-likeness RIGHT
+        prop_col, dl_col = st.columns([3, 2])
 
-                for col in physchem_cols:
-                    vals = unique_df[col].dropna()
-                    if len(vals) > 0:
-                        mean_val = vals.mean()
-                        std_val = vals.std() if len(vals) > 1 else 0
-                        min_val = vals.min()
-                        max_val = vals.max()
-                        display_name = property_display.get(col, col)
-                        prop_data.append({
-                            'Property': display_name,
-                            'Mean': round(mean_val, 2),
-                            'Min': round(min_val, 2),
-                            'Max': round(max_val, 2),
-                            'Std Dev': round(std_val, 2) if std_val > 0 else 0
-                        })
-                if prop_data:
-                    st.dataframe(pd.DataFrame(prop_data), width='stretch', hide_index=True, height=min(300, len(prop_data) * 35 + 40))
-            else:
-                st.caption("No physicochemical properties found")
+        with prop_col:
+            st.markdown("**Physicochemical Properties**")
+            table_html = (
+                '<table style="width:100%;border-collapse:collapse;font-size:15px;margin:8px 0;'
+                'table-layout:auto;">'
+                '<thead><tr style="border-bottom:2px solid rgba(128,128,128,0.3);">'
+                '<th style="text-align:left;padding:7px 10px;font-weight:600;opacity:0.7;">Property</th>'
+                '<th style="text-align:right;padding:7px 10px;font-weight:600;opacity:0.7;white-space:nowrap;">Mean</th>'
+                '<th style="text-align:right;padding:7px 10px;font-weight:600;opacity:0.7;white-space:nowrap;">Range</th>'
+                '<th style="text-align:center;padding:7px 4px;width:16px;"></th>'
+                '</tr></thead><tbody>'
+            )
+            row_idx = 0
+            for col_name in physchem_cols:
+                vals = unique_df[col_name].dropna()
+                if len(vals) == 0:
+                    continue
+                mean_val = vals.mean()
+                min_val = vals.min()
+                max_val = vals.max()
+                info = property_display.get(col_name)
+                if info:
+                    disp_name, unit, rule_max, has_rule = info
+                else:
+                    disp_name, unit, rule_max, has_rule = col_name, '', 100, False
 
-        with col2:
-            st.markdown("**💊 Drug-likeness**")
-            metrics_shown = False
+                if has_rule:
+                    dot = '●' if mean_val <= rule_max else '●'
+                    dot_color = '#22c55e' if mean_val <= rule_max else '#ef4444'
+                else:
+                    dot, dot_color = '●', '#3b82f6'
 
-            # Two columns side by side, each with vertical stacks
-            qed_col, other_col = st.columns(2)
+                unit_str = f' {unit}' if unit else ''
+                range_str = f'{min_val:.2f}–{max_val:.2f}' if min_val != max_val else '—'
+                bg = 'rgba(128,128,128,0.04)' if row_idx % 2 == 0 else 'transparent'
 
-            # QED metrics stacked vertically
-            with qed_col:
-                # QED Score (0-1 range, higher is better)
-                if 'QED' in unique_df.columns:
-                    vals = unique_df['QED'].dropna()
-                    if len(vals) > 0:
-                        mean_val = vals.mean()
-                        color = "🟢" if mean_val >= 0.5 else "🟡" if mean_val >= 0.3 else "🔴"
-                        st.metric(f"{color} QED Score", f"{mean_val:.3f}",
-                                  help="Quantitative Estimate of Drug-likeness (0-1, higher is better)")
-                        metrics_shown = True
+                table_html += (
+                    f'<tr style="background:{bg};border-bottom:1px solid rgba(128,128,128,0.08);">'
+                    f'<td style="padding:6px 10px;font-weight:500;">{html.escape(disp_name)}'
+                    f'<span style="font-size:11px;opacity:0.4;">{html.escape(unit_str)}</span></td>'
+                    f'<td style="padding:6px 10px;text-align:right;font-weight:700;font-family:monospace;white-space:nowrap;">'
+                    f'{mean_val:.2f}</td>'
+                    f'<td style="padding:6px 10px;text-align:right;opacity:0.5;font-family:monospace;font-size:12px;white-space:nowrap;">'
+                    f'{range_str}</td>'
+                    f'<td style="padding:6px 4px;text-align:center;color:{dot_color};">{dot}</td>'
+                    f'</tr>'
+                )
+                row_idx += 1
+            table_html += '</tbody></table>'
+            st.markdown(table_html, unsafe_allow_html=True)
 
-                # QED Multiplier (from IMP scoring: 0.75 + 0.25*QED)
-                if 'QED_Multiplier' in unique_df.columns:
-                    vals = unique_df['QED_Multiplier'].dropna()
-                    if len(vals) > 0:
-                        mean_val = vals.mean()
-                        color = "🟢" if mean_val >= 0.75 else "🟡" if mean_val >= 0.65 else "🔴"
-                        st.metric(f"{color} QED Multiplier", f"{mean_val:.3f}",
-                                  help="IMP Score QED multiplier (0.75 + 0.25×QED)")
-                        metrics_shown = True
+        with dl_col:
+            st.markdown("**Drug-likeness**")
+            # QED first, then others, Lipinski last — with help tooltips
+            dl_metrics = [
+                ('QED', 'QED Score', '{:.3f}',
+                 'Quantitative Estimate of Drug-likeness (0-1, higher is better)',
+                 lambda v: ('#22c55e', '🟢') if v >= 0.5 else ('#f59e0b', '🟡') if v >= 0.3 else ('#ef4444', '🔴')),
+                ('RO5_Violations', 'RO5 Violations', '{:.1f}',
+                 'Lipinski Rule of 5 violations (0-4, lower is better)',
+                 lambda v: ('#22c55e', '🟢') if v <= 1 else ('#f59e0b', '🟡') if v <= 2 else ('#ef4444', '🔴')),
+                ('QED_Multiplier', 'QED Multiplier', '{:.3f}',
+                 'IMP Score QED multiplier (0.75 + 0.25 × QED)',
+                 lambda v: ('#22c55e', '🟢') if v >= 0.85 else ('#f59e0b', '🟡') if v >= 0.75 else ('#ef4444', '🔴')),
+                ('Aromatic_Rings', 'Aromatic Rings', '{:.1f}',
+                 'Number of aromatic ring systems (≤3 preferred)',
+                 lambda v: ('#22c55e', '🟢') if v <= 3 else ('#f59e0b', '🟡') if v <= 4 else ('#ef4444', '🔴')),
+                ('QED_Impact', 'QED Impact', '{:.3f}',
+                 'QED penalty on IMP score (0 = best, negative = penalty)',
+                 lambda v: ('#22c55e', '🟢') if v >= -0.1 else ('#f59e0b', '🟡') if v >= -0.2 else ('#ef4444', '🔴')),
+                ('NP_Likeness_Score', 'NP Likeness', '{:.2f}',
+                 'Natural Product Likeness (-5 to +5, positive = more NP-like)',
+                 lambda v: ('#22c55e', '🟢') if v > 0 else ('#f59e0b', '🟡') if v > -1 else ('#94a3b8', '⚪')),
+            ]
 
-                # QED Impact (from IMP scoring)
-                if 'QED_Impact' in unique_df.columns:
-                    vals = unique_df['QED_Impact'].dropna()
-                    if len(vals) > 0:
-                        mean_val = vals.mean()
-                        color = "🟢" if mean_val >= -0.1 else "🟡" if mean_val >= -0.2 else "🔴"
-                        st.metric(f"{color} QED Impact", f"{mean_val:.3f}",
-                                  help="QED penalty on IMP score (0=best)")
-                        metrics_shown = True
+            # Use Streamlit metrics with help tooltips (native ? icon)
+            q1, q2 = st.columns(2)
+            for i, (col_name, label, fmt, tooltip, color_fn) in enumerate(dl_metrics):
+                if col_name not in unique_df.columns:
+                    continue
+                vals = unique_df[col_name].dropna()
+                if len(vals) == 0:
+                    continue
+                mean_val = vals.mean()
+                color, emoji = color_fn(mean_val)
+                formatted = fmt.format(mean_val)
+                target_col = q1 if i % 2 == 0 else q2
+                target_col.metric(f"{emoji} {label}", formatted, help=tooltip)
 
-            # Other metrics stacked vertically beside QED
-            with other_col:
-                # RO5 Violations (0-4, lower is better)
-                if 'RO5_Violations' in unique_df.columns:
-                    vals = unique_df['RO5_Violations'].dropna()
-                    if len(vals) > 0:
-                        mean_val = vals.mean()
-                        color = "🟢" if mean_val <= 1 else "🟡" if mean_val <= 2 else "🔴"
-                        st.metric(f"{color} RO5 Violations", f"{mean_val:.1f}",
-                                  help="Lipinski Rule of 5 violations (0-4)")
-                        metrics_shown = True
+            # Lipinski RO5 last
+            logp_col_name = 'LogP' if 'LogP' in unique_df.columns else 'MolLogP' if 'MolLogP' in unique_df.columns else None
+            lip_checks = [
+                ('Molecular_Weight', lambda v: v <= 500), ('HBD', lambda v: v <= 5),
+                ('HBA', lambda v: v <= 10), ('TPSA', lambda v: v <= 140),
+            ]
+            if logp_col_name:
+                lip_checks.append((logp_col_name, lambda v: v <= 5))
+            lp = sum(1 for c, fn in lip_checks if c in unique_df.columns and fn(unique_df[c].dropna().mean()))
+            lt = sum(1 for c, _ in lip_checks if c in unique_df.columns)
+            lc = '#22c55e' if lp == lt else '#f59e0b' if lp >= lt - 1 else '#ef4444'
+            le = '🟢' if lp == lt else '🟡' if lp >= lt - 1 else '🔴'
+            st.metric(f"{le} Lipinski RO5", f"{lp}/{lt} passed",
+                      help="Lipinski Rule of 5 — oral bioavailability filter (MW≤500, LogP≤5, HBD≤5, HBA≤10)")
 
-                # Aromatic Rings
-                if 'Aromatic_Rings' in unique_df.columns:
-                    vals = unique_df['Aromatic_Rings'].dropna()
-                    if len(vals) > 0:
-                        mean_val = vals.mean()
-                        color = "🟢" if mean_val <= 3 else "🟡" if mean_val <= 4 else "🔴"
-                        st.metric(f"{color} Aromatic Rings", f"{mean_val:.1f}",
-                                  help="Number of aromatic ring systems (≤3 preferred)")
-                        metrics_shown = True
-
-                # NP Likeness Score (-5 to +5, positive = more natural product-like)
-                if 'NP_Likeness_Score' in unique_df.columns:
-                    vals = unique_df['NP_Likeness_Score'].dropna()
-                    if len(vals) > 0:
-                        mean_val = vals.mean()
-                        color = "🟢" if mean_val > 0 else "🟡" if mean_val > -1 else "⚪"
-                        st.metric(f"{color} NP Likeness", f"{mean_val:.2f}",
-                                  help="Natural Product Likeness (-5 to +5)")
-                        metrics_shown = True
-                    else:
-                        st.metric("⚪ NP Likeness", "N/A",
-                                  help="Reprocess to calculate NP Score")
-
-            if not metrics_shown:
-                st.caption("No drug-likeness properties found")
 
         # Key visualizations
         st.markdown("---")
@@ -698,7 +762,7 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
                 st.caption("MW vs LogP plot requires LogP data (reprocess compounds to generate)")
 
         with viz_col2:
-            # TPSA vs HBD+HBA scatter plot
+            # TPSA vs HBD+HBA — absorption/permeability space
             has_hbd = 'HBD' in unique_df.columns and unique_df['HBD'].notna().any()
             has_hba = 'HBA' in unique_df.columns and unique_df['HBA'].notna().any()
             has_tpsa = 'TPSA' in unique_df.columns and unique_df['TPSA'].notna().any()
@@ -708,51 +772,100 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
                 plot_df['HBD+HBA'] = plot_df['HBD'].fillna(0) + plot_df['HBA'].fillna(0)
                 fig = px.scatter(
                     plot_df.dropna(subset=['TPSA']),
-                    x='TPSA',
-                    y='HBD+HBA',
+                    x='TPSA', y='HBD+HBA',
                     color='QED' if 'QED' in unique_df.columns and unique_df['QED'].notna().any() else None,
                     hover_data=['ChEMBL_ID'] if 'ChEMBL_ID' in unique_df.columns else None,
-                    title='TPSA vs H-Bond Donors+Acceptors',
-                    color_continuous_scale='RdYlGn'
+                    color_continuous_scale='RdYlGn',
                 )
-                fig.update_layout(title=dict(text='TPSA vs H-Bond Donors+Acceptors', subtitle=dict(text='Dashed lines = Lipinski boundaries')))
-                fig.add_hline(y=10, line_dash="dash", line_color="red", annotation_text="HBD+HBA ≤ 10")
-                fig.add_vline(x=140, line_dash="dash", line_color="red", annotation_text="TPSA ≤ 140")
-                fig.update_layout(height=300, margin=dict(t=55, b=30, l=30, r=30))
+                # Veber rule boundaries
+                fig.add_hline(y=10, line_dash="dash", line_color="#ef4444", line_width=1.5,
+                              annotation_text="HBD+HBA ≤ 10", annotation_font_color="#ef4444")
+                fig.add_vline(x=140, line_dash="dash", line_color="#ef4444", line_width=1.5,
+                              annotation_text="TPSA ≤ 140 Å²", annotation_font_color="#ef4444")
+                # Good oral absorption zone
+                fig.add_vrect(x0=0, x1=140, fillcolor='#22c55e', opacity=0.03)
+                fig.update_layout(
+                    title=dict(text='Absorption Space',
+                               subtitle=dict(text='TPSA vs H-bond count — oral bioavailability zone')),
+                    height=300, margin=dict(t=55, b=30, l=30, r=30),
+                    xaxis_title='TPSA (Å²)', yaxis_title='HBD + HBA',
+                )
                 apply_impulator_theme(fig)
                 st.plotly_chart(fig, width='stretch')
             elif has_tpsa:
-                # Fallback: TPSA distribution
-                fig = px.histogram(unique_df['TPSA'].dropna(), nbins=25, title='TPSA Distribution')
-                fig.add_vline(x=140, line_dash="dash", line_color="red", annotation_text="TPSA ≤ 140")
-                fig.update_layout(height=300, margin=dict(t=40, b=30, l=30, r=30))
+                fig = px.histogram(unique_df['TPSA'].dropna(), nbins=25,
+                                   color_discrete_sequence=['#3b82f6'])
+                fig.add_vline(x=140, line_dash="dash", line_color="#ef4444",
+                              annotation_text="TPSA ≤ 140", annotation_font_color="#ef4444")
+                fig.update_layout(title='TPSA Distribution', height=300,
+                                  margin=dict(t=40, b=30, l=30, r=30))
                 apply_impulator_theme(fig)
                 st.plotly_chart(fig, width='stretch')
             else:
-                st.caption("TPSA vs HBD+HBA requires HBD/HBA data (reprocess compounds)")
+                st.caption("Absorption space plot requires TPSA + HBD/HBA data")
 
-        # Second row: TPSA vs QED and QED Distribution
+        # Second row: Lipinski Radar + 10xPSA/MW vs NPOL/NHA
         viz_col3, viz_col4 = st.columns(2)
 
         with viz_col3:
-            # TPSA vs QED scatter plot
-            has_qed = 'QED' in unique_df.columns and unique_df['QED'].notna().any()
-            if has_tpsa and has_qed:
-                fig = px.scatter(
-                    unique_df.dropna(subset=['TPSA', 'QED']),
-                    x='TPSA',
-                    y='QED',
-                    color='RO5_Violations' if 'RO5_Violations' in unique_df.columns else None,
-                    hover_data=['ChEMBL_ID'] if 'ChEMBL_ID' in unique_df.columns else None,
-                    title='TPSA vs QED',
-                    color_continuous_scale='RdYlGn_r'  # Reversed: lower violations = greener
+            # Lipinski spider/radar chart — normalized to rule limits
+            radar_props = [
+                ('Molecular_Weight', 'MW', 500),
+                ('HBD', 'HBD', 5),
+                ('HBA', 'HBA', 10),
+                ('TPSA', 'TPSA', 140),
+                ('Rotatable_Bonds', 'Rot. Bonds', 10),
+            ]
+            if logp_col:
+                radar_props.insert(1, (logp_col, 'LogP', 5))
+
+            radar_names = []
+            radar_vals = []
+            for col_name, label, limit in radar_props:
+                if col_name in unique_df.columns and unique_df[col_name].notna().any():
+                    val = unique_df[col_name].dropna().mean()
+                    radar_names.append(label)
+                    radar_vals.append(min(val / limit, 1.5))
+
+            if len(radar_names) >= 3:
+                fig = go.Figure()
+                # Rule limit circle (1.0 = at limit)
+                fig.add_trace(go.Scatterpolar(
+                    r=[1.0] * len(radar_names) + [1.0],
+                    theta=radar_names + [radar_names[0]],
+                    line=dict(color='rgba(239,68,68,0.5)', width=2, dash='dot'),
+                    fill='toself', fillcolor='rgba(239,68,68,0.04)',
+                    name='Lipinski Limit',
+                ))
+                # Compound values
+                fig.add_trace(go.Scatterpolar(
+                    r=radar_vals + [radar_vals[0]],
+                    theta=radar_names + [radar_names[0]],
+                    fill='toself', fillcolor='rgba(99,102,241,0.15)',
+                    line=dict(color='#6366f1', width=2.5),
+                    marker=dict(size=7, color=['#22c55e' if v <= 1.0 else '#ef4444' for v in radar_vals] + ['#6366f1']),
+                    name='Mean Values',
+                    text=[f"{radar_names[i]}: {radar_vals[i]*100:.0f}% of limit" for i in range(len(radar_names))] + [''],
+                    hoverinfo='text',
+                ))
+                fig.update_layout(
+                    title=dict(text='Lipinski Profile',
+                               subtitle=dict(text='Normalized to rule limits — inside circle = pass')),
+                    polar=dict(
+                        radialaxis=dict(visible=True, range=[0, 1.5],
+                                        tickvals=[0.5, 1.0, 1.5],
+                                        ticktext=['50%', 'Limit', '150%'],
+                                        tickfont=dict(size=10),
+                                        gridcolor='rgba(128,128,128,0.2)'),
+                        angularaxis=dict(tickfont=dict(size=13)),
+                    ),
+                    height=320, margin=dict(t=55, b=40, l=50, r=50),
+                    legend=dict(orientation='h', y=-0.15, font=dict(size=11)),
                 )
-                fig.update_layout(title=dict(text='TPSA vs QED', subtitle=dict(text='Drug-likeness — green dashed = good QED threshold')))
-                fig.add_hline(y=0.5, line_dash="dash", line_color="green", annotation_text="Good QED (≥0.5)")
-                fig.add_vline(x=140, line_dash="dash", line_color="red", annotation_text="TPSA ≤ 140")
-                fig.update_layout(height=300, margin=dict(t=55, b=30, l=30, r=30))
                 apply_impulator_theme(fig)
                 st.plotly_chart(fig, width='stretch')
+            else:
+                st.caption("Lipinski profile requires ≥3 properties")
 
         with viz_col4:
             # 10xPSA_MW vs NPOLoNHA scatter plot (replaces QED distribution)
@@ -829,68 +942,119 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
                 st.caption("10×PSA/MW vs NPOL/NHA requires reprocessing compounds")
 
     else:
-        # Individual compounds view - PubChem-style table
-        st.markdown("**Computed Properties by Compound**")
-        st.caption("Each row represents one compound with its computed properties (like PubChem format)")
+        # Individual compounds view
+        st.markdown("**Individual Compound Properties**")
 
-        # Define key properties to show (PubChem-like order)
-        key_props = ['Molecular_Weight', 'MolLogP', 'LogP', 'TPSA', 'HBD', 'HBA',
-                     'Heavy_Atoms', 'Rotatable_Bonds', 'Aromatic_Rings', 'NPOL',
-                     'QED', 'RO5_Violations', 'NP_Likeness_Score',
-                     'PSAoMW', '10xPSA_MW', 'NPOLoNHA']
-
-        # Filter to only available properties
-        available_key_props = [p for p in key_props if p in unique_df.columns]
-
-        # Add other properties not in the key list
-        all_props = available_key_props + [c for c in (physchem_cols + druglike_cols + other_cols) if c not in available_key_props]
-
-        # Build display columns
-        display_cols = []
+        # Compound selector
         if 'ChEMBL_ID' in unique_df.columns:
-            display_cols.append('ChEMBL_ID')
-        if 'Molecule_Name' in unique_df.columns:
-            display_cols.append('Molecule_Name')
+            options = unique_df['ChEMBL_ID'].tolist()
+            if 'Molecule_Name' in unique_df.columns:
+                labels = [f"{cid} — {name}" if pd.notna(name) and name else cid
+                          for cid, name in zip(unique_df['ChEMBL_ID'], unique_df['Molecule_Name'])]
+            else:
+                labels = options
+            selected_idx = st.selectbox("Select compound", range(len(labels)),
+                                        format_func=lambda i: labels[i],
+                                        key=f"ind_prop_select_{_eid}")
+            row = unique_df.iloc[selected_idx]
+        else:
+            row = unique_df.iloc[0]
 
-        # Add property columns
-        display_cols.extend(all_props[:12])  # Limit to 12 properties for readability
+        # Two columns: property table LEFT, drug-likeness RIGHT
+        ind_prop_col, ind_dl_col = st.columns([3, 2])
 
-        display_df = unique_df[display_cols].copy()
+        with ind_dl_col:
+            st.markdown("**Drug-likeness**")
+            ind_dl_metrics = [
+                ('QED', 'QED Score', '{:.3f}', 'Quantitative Estimate of Drug-likeness (0-1)',
+                 lambda v: ('🟢') if v >= 0.5 else ('🟡') if v >= 0.3 else ('🔴')),
+                ('RO5_Violations', 'RO5 Violations', '{:.0f}', 'Lipinski Rule of 5 violations (0-4)',
+                 lambda v: ('🟢') if v <= 1 else ('🟡') if v <= 2 else ('🔴')),
+                ('QED_Multiplier', 'QED Multiplier', '{:.3f}', 'IMP Score QED multiplier (0.75 + 0.25×QED)',
+                 lambda v: ('🟢') if v >= 0.85 else ('🟡') if v >= 0.75 else ('🔴')),
+                ('Aromatic_Rings', 'Aromatic Rings', '{:.0f}', 'Aromatic ring systems (≤3 preferred)',
+                 lambda v: ('🟢') if v <= 3 else ('🟡') if v <= 4 else ('🔴')),
+                ('NP_Likeness_Score', 'NP Likeness', '{:.2f}', 'Natural Product Likeness (-5 to +5)',
+                 lambda v: ('🟢') if v > 0 else ('🟡') if v > -1 else ('⚪')),
+            ]
+            iq1, iq2 = st.columns(2)
+            idx_m = 0
+            for col_name, label, fmt, tooltip, emoji_fn in ind_dl_metrics:
+                if col_name not in row.index or pd.isna(row[col_name]):
+                    continue
+                v = float(row[col_name])
+                emoji = emoji_fn(v)
+                target = iq1 if idx_m % 2 == 0 else iq2
+                target.metric(f"{emoji} {label}", fmt.format(v), help=tooltip)
+                idx_m += 1
 
-        # Clean up molecule names
-        if 'Molecule_Name' in display_df.columns:
-            display_df['Molecule_Name'] = display_df['Molecule_Name'].apply(
-                lambda x: x[:25] if isinstance(x, str) else ''
+            # Lipinski last
+            logp_col_name = 'LogP' if 'LogP' in row.index else 'MolLogP' if 'MolLogP' in row.index else None
+            lip_checks = [
+                ('Molecular_Weight', lambda v: v <= 500), ('HBD', lambda v: v <= 5),
+                ('HBA', lambda v: v <= 10), ('TPSA', lambda v: v <= 140),
+            ]
+            if logp_col_name:
+                lip_checks.append((logp_col_name, lambda v: v <= 5))
+            lp = sum(1 for c, fn in lip_checks if c in row.index and pd.notna(row[c]) and fn(row[c]))
+            lt = sum(1 for c, _ in lip_checks if c in row.index and pd.notna(row.get(c)))
+            le = '🟢' if lp == lt else '🟡' if lp >= lt - 1 else '🔴'
+            st.metric(f"{le} Lipinski RO5", f"{lp}/{lt} passed",
+                      help="MW≤500, LogP≤5, HBD≤5, HBA≤10, TPSA≤140")
+
+        with ind_prop_col:
+            st.markdown("**Computed Properties**")
+            ind_props = [
+                ('Molecular_Weight', 'Molecular Weight', 'g/mol'),
+                ('MolLogP', 'LogP', ''), ('LogP', 'LogP', ''),
+                ('TPSA', 'Topological PSA', 'Å²'), ('HBD', 'H-Bond Donors', ''),
+                ('HBA', 'H-Bond Acceptors', ''), ('Heavy_Atoms', 'Heavy Atoms', ''),
+                ('Rotatable_Bonds', 'Rotatable Bonds', ''), ('Aromatic_Rings', 'Aromatic Rings', ''),
+                ('NPOL', 'Polar Atoms', ''), ('PSAoMW', 'PSA/MW', ''),
+                ('10xPSA_MW', '10×PSA/MW', ''), ('NPOLoNHA', 'NPOL/NHA', ''),
+            ]
+            seen = set()
+            table_html = (
+                '<table style="width:100%;border-collapse:collapse;font-size:15px;margin:8px 0;">'
+                '<thead><tr style="border-bottom:2px solid rgba(128,128,128,0.3);">'
+                '<th style="text-align:left;padding:6px 10px;font-weight:600;opacity:0.7;">Property</th>'
+                '<th style="text-align:right;padding:6px 10px;font-weight:600;opacity:0.7;">Value</th>'
+                '</tr></thead><tbody>'
             )
+            row_idx = 0
+            for col_name, label, unit in ind_props:
+                if col_name not in row.index or label in seen:
+                    continue
+                val = row[col_name]
+                if pd.isna(val):
+                    continue
+                seen.add(label)
+                unit_str = f' {unit}' if unit else ''
+                bg = 'rgba(128,128,128,0.04)' if row_idx % 2 == 0 else 'transparent'
+                table_html += (
+                    f'<tr style="background:{bg};border-bottom:1px solid rgba(128,128,128,0.08);">'
+                    f'<td style="padding:6px 10px;font-weight:500;">{html.escape(label)}'
+                    f'<span style="font-size:11px;opacity:0.4;">{html.escape(unit_str)}</span></td>'
+                    f'<td style="padding:6px 10px;text-align:right;font-weight:700;font-family:monospace;">'
+                    f'{val:.2f}</td>'
+                    f'</tr>'
+                )
+                row_idx += 1
+            table_html += '</tbody></table>'
+            st.markdown(table_html, unsafe_allow_html=True)
 
-        # Round numeric columns
-        for col in display_df.columns:
-            if pd.api.types.is_numeric_dtype(display_df[col]):
-                display_df[col] = display_df[col].round(2)
-
-        # Rename columns for display
-        column_renames = {
-            'Molecular_Weight': 'MW (g/mol)',
-            'MolLogP': 'XLogP3',
-            'LogP': 'LogP',
-            'TPSA': 'TPSA (Å²)',
-            'HBD': 'HBD',
-            'HBA': 'HBA',
-            'Heavy_Atoms': 'Heavy Atoms',
-            'Rotatable_Bonds': 'Rot. Bonds',
-            'Aromatic_Rings': 'Arom. Rings',
-            'NPOL': 'Polar Atoms',
-            'RO5_Violations': '#RO5 Viol.',
-            'NP_Likeness_Score': 'NP Likeness',
-        }
-        display_df = display_df.rename(columns=column_renames)
-
-        st.dataframe(
-            display_df,
-            width='stretch',
-            hide_index=True,
-            height=min(500, len(display_df) * 35 + 40)
-        )
+        # Full comparison table in expander
+        with st.expander("Compare All Compounds"):
+            all_props = [c for c in (physchem_cols + druglike_cols + other_cols)]
+            display_cols = (['ChEMBL_ID'] if 'ChEMBL_ID' in unique_df.columns else []) + \
+                           (['Molecule_Name'] if 'Molecule_Name' in unique_df.columns else []) + \
+                           all_props[:15]
+            display_df = unique_df[display_cols].copy()
+            for c in display_df.columns:
+                if pd.api.types.is_numeric_dtype(display_df[c]):
+                    display_df[c] = display_df[c].round(2)
+            st.dataframe(display_df, width='stretch', hide_index=True,
+                         height=min(400, len(display_df) * 35 + 40))
 
 
 def _render_activity_analysis(df: pd.DataFrame) -> None:
@@ -1285,7 +1449,7 @@ def _render_pains_analysis(df: pd.DataFrame) -> None:
     flag_emojis = {name: info[1] for name, info in flags.items()}
     flag_colors = {
         'PAINS': '#ef4444', 'Aggregator': '#f97316', 'Redox': '#eab308',
-        'Fluorescence': '#3b82f6', 'Thiol': '#a855f7', 'BRENK': '#78716c', 'NIH': '#94a3b8',
+        'Fluorescence': '#3b82f6', 'Thiol': '#a855f7', 'BRENK': '#d97706', 'NIH': '#0891b2',
     }
     available_flag_cols = [name for name, col in flag_col_names.items() if col in unique_df.columns]
 
@@ -1335,8 +1499,25 @@ def _render_pains_analysis(df: pd.DataFrame) -> None:
                 compound_cards = [c for c in compound_cards
                                   if any(f['name'] == selected_filter for f in c['flags'])]
 
-            # Render cards
-            for c in compound_cards:
+            # Pagination — 2 columns × 10 rows = 20 per page
+            PAGE_SIZE = 20
+            total = len(compound_cards)
+            total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+            assay_page_key = "assay_page"
+            if assay_page_key not in st.session_state:
+                st.session_state[assay_page_key] = 1
+            current_page = min(st.session_state[assay_page_key], total_pages)
+
+            if total_pages > 1:
+                _pdb_pagination("assay", assay_page_key, current_page, total_pages, "top")
+
+            start = (current_page - 1) * PAGE_SIZE
+            page_cards = compound_cards[start:start + PAGE_SIZE]
+
+            # Render cards in 2 columns
+            left_col, right_col = st.columns(2)
+            cols = [left_col, right_col]
+            for i, c in enumerate(page_cards):
                 chembl_id = html.escape(c['chembl_id'])
                 mol_name = html.escape(c['mol_name']) if c['mol_name'] else ''
                 chembl_url = f"https://www.ebi.ac.uk/chembl/explore/compound/{chembl_id}"
@@ -1362,19 +1543,25 @@ def _render_pains_analysis(df: pd.DataFrame) -> None:
                             f'{html.escape(f["name"])}:</b> {html.escape(f["detail"])}</div>'
                         )
 
-                st.markdown(
-                    f'<div style="padding:14px;border-bottom:1px solid rgba(128,128,128,0.2);">'
-                    f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;">'
-                    f'<a href="{chembl_url}" target="_blank" '
-                    f'style="font-size:16px;font-weight:700;color:#3b82f6;text-decoration:none;">'
-                    f'{chembl_id}</a>'
-                    f'{("<span style=&quot;font-size:15px;opacity:0.7;&quot;>" + mol_name + "</span>") if mol_name else ""}'
-                    f'</div>'
-                    f'<div style="margin-bottom:4px;">{pills_html}</div>'
-                    f'{details_html}'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
+                with cols[i % 2]:
+                    st.markdown(
+                        f'<div style="padding:12px;border:1px solid rgba(128,128,128,0.2);'
+                        f'border-radius:8px;margin-bottom:8px;">'
+                        f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">'
+                        f'<a href="{chembl_url}" target="_blank" '
+                        f'style="font-size:15px;font-weight:700;color:#3b82f6;text-decoration:none;">'
+                        f'{chembl_id}</a>'
+                        f'{("<span style=&quot;font-size:14px;opacity:0.7;&quot;>" + mol_name + "</span>") if mol_name else ""}'
+                        f'</div>'
+                        f'<div style="margin-bottom:4px;">{pills_html}</div>'
+                        f'{details_html}'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+            # Bottom pagination
+            if total_pages > 1:
+                _pdb_pagination("assay", assay_page_key, current_page, total_pages, "bot")
 
     # PAINS patterns breakdown (if available)
     if 'PAINS_Pattern' in unique_df.columns:
@@ -1654,18 +1841,18 @@ def _render_imp_score_breakdown(df: pd.DataFrame) -> None:
             pdb_s = row.get('PDB_Score', 0)
             st.markdown(f"""
 <div style="background-color: var(--secondary-background-color); padding: 16px 20px; border-radius: 8px; font-family: 'Courier New', monospace; font-size: 0.95rem; line-height: 1.8; white-space: pre-wrap; word-wrap: break-word;">
-<span style="color: #82aaff; font-weight: 600;">Base Score</span>
+<span style="color: #3b82f6; font-weight: 600;">Base Score</span>
   = 0.45 x Eff + 0.20 x Dist + 0.15 x Angle + 0.15 x Interf + 0.05 x PDB
-  = 0.45 x <span style="color: #c3e88d;">{eff_s:.3f}</span> + 0.20 x <span style="color: #c3e88d;">{dist_s:.3f}</span> + 0.15 x <span style="color: #c3e88d;">{ang_s:.3f}</span> + 0.15 x <span style="color: #c3e88d;">{int_s:.3f}</span> + 0.05 x <span style="color: #c3e88d;">{pdb_s:.3f}</span>
-  = <span style="color: #ffcb6b; font-weight: 600;">{base_score:.3f}</span>
+  = 0.45 x <span style="color: #22c55e; font-weight: 600;">{eff_s:.3f}</span> + 0.20 x <span style="color: #22c55e; font-weight: 600;">{dist_s:.3f}</span> + 0.15 x <span style="color: #22c55e; font-weight: 600;">{ang_s:.3f}</span> + 0.15 x <span style="color: #22c55e; font-weight: 600;">{int_s:.3f}</span> + 0.05 x <span style="color: #22c55e; font-weight: 600;">{pdb_s:.3f}</span>
+  = <span style="color: #f59e0b; font-weight: 700;">{base_score:.3f}</span>
 
-<span style="color: #82aaff; font-weight: 600;">QED Multiplier</span>
-  = 0.75 + 0.25 x {qed:.3f} = <span style="color: #ffcb6b; font-weight: 600;">{qed_mult:.3f}</span>
+<span style="color: #3b82f6; font-weight: 600;">QED Multiplier</span>
+  = 0.75 + 0.25 x {qed:.3f} = <span style="color: #f59e0b; font-weight: 700;">{qed_mult:.3f}</span>
 
-<span style="color: #82aaff; font-weight: 600;">Final Score</span>
+<span style="color: #3b82f6; font-weight: 600;">Final Score</span>
   = Base Score x QED Multiplier
   = {base_score:.3f} x {qed_mult:.3f}
-  = <span style="color: #f78c6c; font-size: 1.1em; font-weight: 700;">{final_score:.3f}</span>
+  = <span style="color: #ef4444; font-size: 1.1em; font-weight: 700;">{final_score:.3f}</span>
 </div>
             """, unsafe_allow_html=True)
 
@@ -1697,7 +1884,7 @@ def _render_imp_score_breakdown(df: pd.DataFrame) -> None:
 
 
 def _render_contribution_chart(row: pd.Series) -> None:
-    """Render a pie chart showing base score composition + QED multiplier annotation."""
+    """Render a radar chart showing component scores + weighted contribution bar chart."""
     components = [
         ('Efficiency', 0.45, 'Efficiency_Score'),
         ('Distance', 0.20, 'Distance_Score'),
@@ -1707,41 +1894,85 @@ def _render_contribution_chart(row: pd.Series) -> None:
     ]
 
     names = []
-    values = []
-    custom_text = []
+    raw_scores = []
+    weighted_scores = []
+    weights = []
     for name, weight, col in components:
         score = row.get(col, 0)
         score = float(score) if pd.notna(score) else 0.0
-        base_contrib = weight * score
         names.append(name)
-        values.append(max(base_contrib, 0.001))
-        custom_text.append(f"{name} ({weight*100:.0f}%)<br>{base_contrib:.3f}")
+        raw_scores.append(score)
+        weighted_scores.append(weight * score)
+        weights.append(weight)
 
-    if sum(values) <= 0.005:
+    if sum(weighted_scores) <= 0.005:
         return
 
-    qed_mult = row.get('QED_Multiplier', 1.0)
-    qed_mult = float(qed_mult) if pd.notna(qed_mult) else 1.0
-    base_score = sum(v for v in values if v > 0.001)
-    subtitle_text = f'Base Score = {base_score:.3f} | QED Multiplier = {qed_mult:.3f} | Final = {base_score * qed_mult:.3f}'
+    radar_col, bar_col = st.columns(2)
 
-    fig = px.pie(
-        values=values,
-        names=names,
-        title='Base Score Breakdown',
-        color_discrete_sequence=px.colors.qualitative.Set2
-    )
-    fig.update_layout(title=dict(text='Base Score Breakdown', subtitle=dict(text=subtitle_text)))
+    with radar_col:
+        # Radar/spider chart — raw component scores (0-1 scale)
+        fig_radar = go.Figure()
+        radar_colors = ['#3b82f6', '#22c55e', '#eab308', '#f97316', '#a855f7']
+        # Filled area
+        fig_radar.add_trace(go.Scatterpolar(
+            r=raw_scores + [raw_scores[0]],
+            theta=names + [names[0]],
+            fill='toself',
+            fillcolor='rgba(99, 102, 241, 0.2)',
+            line=dict(color='#6366f1', width=2.5),
+            marker=dict(size=8, color=radar_colors + [radar_colors[0]],
+                        line=dict(color='#fff', width=1.5)),
+            text=[f"<b>{n}</b>: {s:.3f}" for n, s in zip(names, raw_scores)] + [''],
+            hoverinfo='text',
+        ))
+        # Max reference ring
+        fig_radar.add_trace(go.Scatterpolar(
+            r=[1, 1, 1, 1, 1, 1], theta=names + [names[0]],
+            line=dict(color='rgba(255,255,255,0.1)', width=1, dash='dot'),
+            showlegend=False, hoverinfo='skip',
+        ))
+        fig_radar.update_layout(
+            title='Component Scores',
+            polar=dict(
+                radialaxis=dict(visible=True, range=[0, 1], tickfont=dict(size=10),
+                                gridcolor='rgba(128,128,128,0.2)'),
+                angularaxis=dict(tickfont=dict(size=13, color='#ddd')),
+                bgcolor='rgba(0,0,0,0)',
+            ),
+            showlegend=False,
+            height=300, margin=dict(t=40, b=20, l=50, r=50),
+        )
+        apply_impulator_theme(fig_radar)
+        st.plotly_chart(fig_radar, width='stretch')
 
-    fig.update_traces(
-        textposition='inside',
-        text=custom_text,
-        textinfo='text',
-    )
-    fig.update_layout(showlegend=False, height=300, margin=dict(t=55, b=10, l=10, r=10))
-    apply_impulator_theme(fig)
+    with bar_col:
+        # Horizontal bar — weighted contributions
+        qed_mult = row.get('QED_Multiplier', 1.0)
+        qed_mult = float(qed_mult) if pd.notna(qed_mult) else 1.0
+        base_score = sum(weighted_scores)
 
-    st.plotly_chart(fig, width='stretch')
+        contrib_colors = ['#3b82f6', '#22c55e', '#eab308', '#f97316', '#a855f7']
+        fig_bar = go.Figure()
+        fig_bar.add_trace(go.Bar(
+            y=names, x=weighted_scores,
+            orientation='h',
+            marker_color=contrib_colors,
+            text=[f"{w*100:.0f}% × {s:.3f} = {ws:.3f}"
+                  for w, s, ws in zip(weights, raw_scores, weighted_scores)],
+            textposition='auto',
+            textfont=dict(size=12),
+        ))
+        fig_bar.update_layout(
+            title=dict(text='Weighted Contributions',
+                       subtitle=dict(text=f'Base: {base_score:.3f} × QED {qed_mult:.3f} = {base_score * qed_mult:.3f}')),
+            xaxis_title='Contribution to Base Score',
+            yaxis=dict(autorange='reversed'),
+            height=300, margin=dict(t=55, b=30, l=10, r=10),
+            showlegend=False,
+        )
+        apply_impulator_theme(fig_bar)
+        st.plotly_chart(fig_bar, width='stretch')
 
 
 def _render_imp_score_analysis(df: pd.DataFrame) -> None:
@@ -1792,7 +2023,6 @@ since NSEI and NBEI are derived from the same underlying activity data.
 
     # IMP Scoring
     if has_imp_score:
-        st.markdown("**IMP Score Distribution**")
         st.caption("IMP Score rates each **activity record** using a composite of efficiency, distance, angle, interference, PDB evidence, and QED. "
                    "This is different from IMP Candidates below, which flags unique **compounds** by efficiency outlier detection.")
 
@@ -1814,38 +2044,58 @@ since NSEI and NBEI are derived from the same underlying activity data.
                       help="Number of activity records with IMP Score ≥ 0.5. "
                            "Each compound can have many activity records, so this count is per-record, not per-compound.")
 
-        # Score histogram with better styling
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            fig = px.histogram(df, x='IMP_Final_Score', nbins=25, color_discrete_sequence=['#636EFA'])
+        # Score histogram + classification donut
+        hist_col, donut_col = st.columns([2, 1])
+
+        with hist_col:
+            fig = px.histogram(df, x='IMP_Final_Score', nbins=30, color_discrete_sequence=['#3b82f6'])
+            # Classification zones — very subtle fill + dotted boundary lines
+            zones = [
+                (0, 0.3, '#22c55e', 'Not IMP'),
+                (0.3, 0.5, '#eab308', 'Weak'),
+                (0.5, 0.7, '#f97316', 'Moderate'),
+                (0.7, 0.9, '#ef4444', 'Strong'),
+                (0.9, 1.0, '#dc2626', 'Exceptional'),
+            ]
+            for x0, x1, color, label in zones:
+                fig.add_vrect(x0=x0, x1=x1, fillcolor=color, opacity=0.04,
+                              line_width=0)
+                fig.add_vline(x=x1, line_dash="dot", line_color=color, line_width=1.5,
+                              annotation_text=label, annotation_position='top left',
+                              annotation_font_size=11, annotation_font_color=color)
             fig.update_layout(
-                title=dict(text='IMP Score Distribution', subtitle=dict(text='Higher score = higher false positive risk')),
-                height=300,
+                title=dict(text='IMP Score Distribution',
+                           subtitle=dict(text='Higher score = higher false positive risk')),
+                height=320,
                 margin=dict(t=55, b=30, l=30, r=10),
-                xaxis_title="IMP Score",
-                yaxis_title="Count"
+                xaxis_title="IMP Score", yaxis_title="Count",
+                xaxis=dict(range=[0, 1]),
+                bargap=0.05,
             )
-            # Add vertical lines for thresholds - higher score = MORE IMP risk
-            fig.add_vline(x=0.3, line_dash="dash", line_color="orange", annotation_text="IMP Threshold")
-            fig.add_vline(x=0.5, line_dash="dash", line_color="red", annotation_text="Moderate+ IMP")
             apply_impulator_theme(fig)
             st.plotly_chart(fig, width='stretch')
 
-        with col2:
-            # Classification breakdown with color coding
+        with donut_col:
             if 'IMP_Classification' in df.columns:
-                st.markdown("**Quality Classification**")
-                st.caption("Per activity record (IMP Score)")
                 class_counts = df['IMP_Classification'].value_counts()
-                for cls, count in class_counts.items():
-                    pct = count / len(df) * 100
-                    # Color code based on classification
-                    if 'Not IMP' in str(cls) or 'Excellent' in str(cls) or 'Good' in str(cls):
-                        st.success(f"**{cls}**: {count} ({pct:.0f}%)")
-                    elif 'Weak' in str(cls) or 'Moderate' in str(cls):
-                        st.warning(f"**{cls}**: {count} ({pct:.0f}%)")
-                    else:
-                        st.error(f"**{cls}**: {count} ({pct:.0f}%)")
+                class_colors = {
+                    'Not IMP': '#22c55e', 'Weak IMP': '#eab308',
+                    'Moderate IMP': '#f97316', 'Strong IMP': '#ef4444',
+                    'Exceptional IMP': '#dc2626',
+                }
+                fig_donut = px.pie(
+                    values=class_counts.values, names=class_counts.index,
+                    hole=0.5, color=class_counts.index,
+                    color_discrete_map=class_colors,
+                )
+                fig_donut.update_traces(textinfo='value+percent', textfont_size=12)
+                fig_donut.update_layout(
+                    title='Classification',
+                    legend=dict(orientation='h', y=-0.2, font=dict(size=11)),
+                    margin=dict(t=40, b=50, l=10, r=10), height=320,
+                )
+                apply_impulator_theme(fig_donut)
+                st.plotly_chart(fig_donut, width='stretch')
 
         # Detailed Score Breakdown Section
         _render_imp_score_breakdown(df)
@@ -3388,6 +3638,81 @@ def _render_drug_indications(data: Dict[str, Any]) -> None:
     with cols[3]:
         st.metric("Max Phase", get_phase_badge(max_phase))
 
+    # Visualizations — right after metrics for attention
+    if len(indications_df) > 1:
+        viz1, viz2 = st.columns(2)
+
+        # Left: Phase pipeline donut
+        if 'Max_Phase' in indications_df.columns:
+            phase_labels_map = {
+                4.0: 'Approved', 3.0: 'Phase 3', 2.0: 'Phase 2',
+                1.0: 'Phase 1', 0.5: 'Early Phase 1', -1.0: 'Unknown',
+            }
+            phase_colors_map = {
+                'Approved': '#22c55e', 'Phase 3': '#3b82f6', 'Phase 2': '#eab308',
+                'Phase 1': '#f97316', 'Early Phase 1': '#94a3b8', 'Unknown': '#525252',
+            }
+            phase_counts = indications_df['Max_Phase'].map(
+                lambda p: phase_labels_map.get(p, f'Phase {p}')
+            ).value_counts()
+
+            with viz1:
+                fig_phase = px.pie(
+                    values=phase_counts.values, names=phase_counts.index,
+                    hole=0.45, color=phase_counts.index,
+                    color_discrete_map=phase_colors_map,
+                )
+                fig_phase.update_traces(textinfo='value+percent', textfont_size=13)
+                fig_phase.update_layout(
+                    title='Clinical Phase Pipeline',
+                    legend=dict(orientation='h', y=-0.15),
+                    margin=dict(t=40, b=50, l=10, r=10), height=300,
+                )
+                apply_impulator_theme(fig_phase)
+                st.plotly_chart(fig_phase, width='stretch')
+
+        # Right: Top diseases by indication count
+        if 'MESH_Heading' in indications_df.columns:
+            disease_counts = indications_df['MESH_Heading'].value_counts().head(10)
+            with viz2:
+                fig_disease = px.bar(
+                    x=disease_counts.values, y=disease_counts.index,
+                    orientation='h',
+                    color=disease_counts.values,
+                    color_continuous_scale=['#6366f1', '#3b82f6', '#06b6d4'],
+                    labels={'x': 'Indications', 'y': ''},
+                )
+                fig_disease.update_layout(
+                    title='Top Diseases',
+                    showlegend=False, coloraxis_showscale=False,
+                    yaxis=dict(autorange='reversed'),
+                    margin=dict(t=40, b=30, l=10, r=10), height=300,
+                )
+                apply_impulator_theme(fig_disease)
+                st.plotly_chart(fig_disease, width='stretch')
+
+        # Compound × Disease heatmap (if multiple compounds)
+        if unique_compounds > 1 and 'MESH_Heading' in indications_df.columns and 'ChEMBL_ID' in indications_df.columns:
+            top_diseases = indications_df['MESH_Heading'].value_counts().head(15).index.tolist()
+            heat_df = indications_df[indications_df['MESH_Heading'].isin(top_diseases)]
+            if 'Max_Phase' in heat_df.columns:
+                pivot = heat_df.pivot_table(
+                    index='ChEMBL_ID', columns='MESH_Heading',
+                    values='Max_Phase', aggfunc='max', fill_value=0,
+                )
+                if len(pivot) > 1 and len(pivot.columns) > 1:
+                    fig_heat = px.imshow(
+                        pivot, aspect='auto',
+                        color_continuous_scale=['#1e1b4b', '#3b82f6', '#22c55e'],
+                        labels=dict(x='Disease', y='Compound', color='Max Phase'),
+                    )
+                    fig_heat.update_layout(
+                        title='Compound × Disease Matrix (Max Phase)',
+                        margin=dict(t=40, b=10, l=10, r=10), height=max(250, len(pivot) * 30 + 80),
+                    )
+                    apply_impulator_theme(fig_heat)
+                    st.plotly_chart(fig_heat, width='stretch')
+
     st.markdown("---")
 
     # Search/filter
@@ -3437,10 +3762,27 @@ def _render_drug_indications(data: Dict[str, Any]) -> None:
 
     nct_pattern = re.compile(r'^NCT\d+$')
 
-    st.caption(f"{len(display_df)} indications")
+    # Pagination — 2 cols × 20 rows = 40 per page
+    indication_rows = list(display_df.iterrows())
+    PAGE_SIZE = 40
+    total = len(indication_rows)
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    ind_page_key = "indication_page"
+    if ind_page_key not in st.session_state:
+        st.session_state[ind_page_key] = 1
+    current_page = min(st.session_state[ind_page_key], total_pages)
 
-    # Render cards
-    for _, row in display_df.iterrows():
+    st.caption(f"{total} indications")
+    if total_pages > 1:
+        _pdb_pagination("indication", ind_page_key, current_page, total_pages, "top")
+
+    start = (current_page - 1) * PAGE_SIZE
+    page_rows = indication_rows[start:start + PAGE_SIZE]
+
+    # Render cards in 2 columns
+    left_col, right_col = st.columns(2)
+    ind_cols = [left_col, right_col]
+    for card_idx, (_, row) in enumerate(page_rows):
         mesh_id = str(row.get('MESH_ID', '')) if pd.notna(row.get('MESH_ID')) else ''
         mesh_heading = str(row.get('MESH_Heading', '')) if pd.notna(row.get('MESH_Heading')) else 'Unknown Disease'
         efo_id = str(row.get('EFO_ID', '')) if pd.notna(row.get('EFO_ID')) else ''
@@ -3506,61 +3848,27 @@ def _render_drug_indications(data: Dict[str, Any]) -> None:
             links_html += _grad_btn(ct_url, 'Trials', html.escape(ct_label),
                                     '#22c55e', '#06b6d4', 'rgba(34,197,94,0.3)')
 
-        st.markdown(
-            f'<div style="display:flex;padding:14px;border-bottom:1px solid rgba(128,128,128,0.2);'
-            f'align-items:flex-start;gap:16px;">'
-            f'<div style="flex:1;min-width:0;">'
-            f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap;">'
-            f'<span style="font-size:18px;font-weight:600;">{html.escape(mesh_heading)}</span>'
-            f'{phase_badge}'
-            f'</div>'
-            f'<div style="font-size:15px;opacity:0.85;margin-bottom:8px;">'
-            f'<b>Compound:</b> <a href="{chembl_url}" target="_blank" '
-            f'style="color:#3b82f6;text-decoration:none;font-weight:600;">{html.escape(chembl_id)}</a>'
-            f'</div>'
-            f'<div style="display:flex;flex-wrap:wrap;">{links_html}</div>'
-            f'</div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
+        with ind_cols[card_idx % 2]:
+            st.markdown(
+                f'<div style="padding:12px;border:1px solid rgba(128,128,128,0.2);'
+                f'border-radius:8px;margin-bottom:8px;">'
+                f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap;">'
+                f'<span style="font-size:16px;font-weight:600;">{html.escape(mesh_heading)}</span>'
+                f'{phase_badge}'
+                f'</div>'
+                f'<div style="font-size:14px;opacity:0.85;margin-bottom:6px;">'
+                f'<b>Compound:</b> <a href="{chembl_url}" target="_blank" '
+                f'style="color:#3b82f6;text-decoration:none;font-weight:600;">{html.escape(chembl_id)}</a>'
+                f'</div>'
+                f'<div style="display:flex;flex-wrap:wrap;">{links_html}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
-    # Phase distribution chart
-    if 'Max_Phase' in indications_df.columns and len(indications_df) > 1:
-        st.markdown("---")
-        st.markdown("#### Phase Distribution")
+    # Bottom pagination
+    if total_pages > 1:
+        _pdb_pagination("indication", ind_page_key, current_page, total_pages, "bot")
 
-        phase_counts = indications_df['Max_Phase'].value_counts().sort_index()
-        phase_labels = {
-            4.0: 'Approved (4)',
-            3.0: 'Phase 3',
-            2.0: 'Phase 2',
-            1.0: 'Phase 1',
-            0.5: 'Early Phase 1',
-            -1.0: 'Unknown'
-        }
-
-        fig = px.bar(
-            x=[phase_labels.get(p, f'Phase {p}') for p in phase_counts.index],
-            y=phase_counts.values,
-            color=[phase_labels.get(p, f'Phase {p}') for p in phase_counts.index],
-            color_discrete_map={
-                'Approved (4)': '#28a745',
-                'Phase 3': '#007bff',
-                'Phase 2': '#ffc107',
-                'Phase 1': '#fd7e14',
-                'Early Phase 1': '#6c757d',
-                'Unknown': '#343a40',
-            },
-            labels={'x': 'Clinical Phase', 'y': 'Number of Indications'},
-        )
-        fig.update_layout(
-            title=dict(text='Clinical Trial Phases', subtitle=dict(text='Drug indication progression status')),
-            showlegend=False,
-            height=320,
-            margin=dict(t=55, b=40),
-        )
-        apply_impulator_theme(fig)
-        st.plotly_chart(fig, width='stretch')
 
 
 def _load_compound_data(

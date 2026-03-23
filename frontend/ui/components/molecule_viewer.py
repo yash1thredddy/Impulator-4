@@ -66,31 +66,23 @@ def render_2d_structure(
             st.caption("Invalid SMILES")
             return False
 
+        # Use SVG for both modes — cleaner, transparent background
+        drawer = rdMolDraw2D.MolDraw2DSVG(size[0], size[1])
+        opts = drawer.drawOptions()
+        opts.clearBackground = False  # Transparent background
         if show_atom_numbers:
-            # Use MolDraw2DSVG for atom index labels
-            drawer = rdMolDraw2D.MolDraw2DSVG(size[0], size[1])
-            opts = drawer.drawOptions()
             opts.addAtomIndices = True
-            drawer.DrawMolecule(mol)
-            drawer.FinishDrawing()
-            svg = drawer.GetDrawingText()
-            st.markdown(
-                f'<div style="display: flex; justify-content: center; padding: 10px;">'
-                f'{svg}'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            img = Draw.MolToImage(mol, size=size)
-            buffered = BytesIO()
-            img.save(buffered, format="PNG")
-            img_str = base64.b64encode(buffered.getvalue()).decode()
-            st.markdown(
-                f'<div style="display: flex; justify-content: center; padding: 10px;">'
-                f'<img src="data:image/png;base64,{img_str}" alt="Molecular structure" />'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+        drawer.DrawMolecule(mol)
+        drawer.FinishDrawing()
+        svg = drawer.GetDrawingText()
+
+        st.markdown(
+            f'<div style="display:flex;justify-content:center;padding:12px;'
+            f'background:#fff;border-radius:10px;">'
+            f'{svg}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
         return True
 
     except Exception as e:

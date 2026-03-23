@@ -387,16 +387,18 @@ def render_job_form() -> Optional[str]:
     with preview_col:
         mol_info = _get_mol_info(structure_input, input_type)
 
-        # Header row: Live Preview + MW + Formula + Expand
-        header_cols = st.columns([2, 1, 1, 1])
-        header_cols[0].subheader("Live Preview")
+        # Header row: Live Preview + Formula + MW + Expand
         if mol_info:
-            header_cols[1].metric("MW", f"{mol_info['mw']:.2f}")
-            header_cols[2].metric("Formula", mol_info['formula'])
+            header_cols = st.columns([2, 2, 1, 1])
+            header_cols[0].subheader("Live Preview")
+            header_cols[1].metric("Molecular Formula", mol_info['formula'])
+            header_cols[2].metric("Molecular Weight", f"{mol_info['mw']:.2f}")
             with header_cols[3]:
                 st.write("")  # spacer to align with metrics
                 if st.button("⛶ Expand", key="expand_mol_btn", type="primary", width='stretch'):
                     _show_expanded_molecule(mol_info['smiles'])
+        else:
+            st.subheader("Live Preview")
 
         # Pass resolved SMILES for InChI so OCL can render it
         resolved_smiles = mol_info['smiles'] if mol_info and input_type != "SMILES" else ""

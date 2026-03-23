@@ -13,6 +13,9 @@ import html as html_mod
 import logging
 from typing import Dict, Any
 
+import base64
+from pathlib import Path
+
 import requests
 import streamlit as st
 
@@ -54,11 +57,56 @@ def _mark_job_viewed(job_id: str) -> None:
     st.session_state[_VIEWED_JOBS_KEY] = viewed
 
 
+def _render_sidebar_logo() -> None:
+    """Render the IMPULATOR logo in the sidebar — uses PNG logos with theme detection."""
+    static_dir = Path(__file__).parent.parent.parent / "static"
+    light_path = static_dir / "Imp_Logo_Light.png"
+    dark_path = static_dir / "Imp_Logo_Dark.png"
+
+    light_b64 = ""
+    dark_b64 = ""
+    if light_path.exists():
+        light_b64 = base64.b64encode(light_path.read_bytes()).decode()
+    if dark_path.exists():
+        dark_b64 = base64.b64encode(dark_path.read_bytes()).decode()
+
+    if light_b64 and dark_b64:
+        st.components.v1.html(
+            f"""
+            <div id="sidebar-logo" style="text-align:center;padding:4px 0;">
+                <img id="logo-l" src="data:image/png;base64,{light_b64}"
+                     style="height:40px;object-fit:contain;display:none;">
+                <img id="logo-d" src="data:image/png;base64,{dark_b64}"
+                     style="height:40px;object-fit:contain;display:none;">
+            </div>
+            <script>
+            (function() {{
+                function update() {{
+                    var app = window.parent.document.querySelector('[data-testid="stSidebar"]');
+                    if (!app) return;
+                    var bg = getComputedStyle(app).backgroundColor;
+                    var m = bg.match(/\\d+/g);
+                    var dark = m && (0.299*m[0] + 0.587*m[1] + 0.114*m[2]) < 128;
+                    document.getElementById('logo-l').style.display = dark ? 'none' : 'block';
+                    document.getElementById('logo-d').style.display = dark ? 'block' : 'none';
+                }}
+                update();
+                setInterval(update, 1000);
+            }})();
+            </script>
+            """,
+            height=55,
+        )
+    else:
+        st.markdown("## IMPULATOR")
+        st.markdown("*IMP Navigator*")
+
+
 def render_sidebar() -> None:
     """Render the sidebar with active jobs and navigation."""
     with st.sidebar:
-        st.markdown("## IMPULATOR")
-        st.markdown("*IMP Navigator*")
+        # Logo — load icon + text logo, theme-aware
+        _render_sidebar_logo()
 
         st.divider()
 
