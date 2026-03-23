@@ -524,6 +524,7 @@ class CompoundListItem(BaseModel):
     qed: float | None = None
     is_duplicate: bool = False       # Computed: parent_id is not None
     parent_name: str | None = None   # Resolved via JOIN
+    version_count: int = 1           # Total siblings (including self) via correlated subquery
 
 
 class CompoundListResponse(BaseModel):

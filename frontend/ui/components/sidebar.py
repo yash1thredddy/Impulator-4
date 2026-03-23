@@ -321,6 +321,7 @@ def render_job_card(job: Dict[str, Any]) -> None:
                 if entry_id:
                     st.query_params["compound_id"] = entry_id
                     st.query_params["tab"] = "overview"
+                    SessionState.set('_last_deep_link_id', entry_id)
                 st.rerun()
         elif status == 'failed':
             st.button(

@@ -49,10 +49,11 @@ async def list_compounds(
     )
 
     items = []
-    for compound, parent_name in compound_rows:
+    for compound, parent_name, version_count in compound_rows:
         item = CompoundListItem.model_validate(compound)
         item.is_duplicate = compound.parent_id is not None
         item.parent_name = parent_name
+        item.version_count = version_count or 1
         items.append(item)
 
     return CompoundListResponse(

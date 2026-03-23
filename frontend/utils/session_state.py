@@ -231,6 +231,7 @@ class SessionState:
         """Navigate to home view."""
         cls.set_view(VIEW_HOME)
         cls.set('selected_compound', None)
+        cls.set('show_delete_confirmation', False)
 
     @classmethod
     def navigate_to_analyze(cls) -> None:
@@ -253,6 +254,7 @@ class SessionState:
         cls.set('selected_compound_storage_path', storage_path)
         cls.set('selected_compound_is_duplicate', is_duplicate)
         cls.set('selected_compound_duplicate_of_name', duplicate_of_name)
+        cls.set('show_delete_confirmation', False)
         cls.set_view(VIEW_COMPOUND_DETAILS)
 
     # Job management helpers

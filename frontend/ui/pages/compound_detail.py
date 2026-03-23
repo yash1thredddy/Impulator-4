@@ -40,6 +40,21 @@ def render_compound_detail_page() -> None:
     is_duplicate = SessionState.get('selected_compound_is_duplicate', False)
     parent_name = SessionState.get('selected_compound_duplicate_of_name')
 
+    # Fix UUID-as-name: if compound_name looks like a UUID, fetch the real name
+    import re
+    _uuid_pattern = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+    if compound_name and _uuid_pattern.match(compound_name) and entry_id:
+        try:
+            api = get_api_client()
+            response = api._request("GET", f"/api/v1/compounds/{entry_id}")
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("compound_name"):
+                    compound_name = data["compound_name"]
+                    SessionState.set('selected_compound', compound_name)
+        except Exception:
+            pass  # Keep UUID as fallback
+
     if not compound_name:
         st.error("No compound selected")
         if st.button("Go to Home"):
@@ -69,12 +84,11 @@ def render_compound_detail_page() -> None:
             )
     with col3:
         if st.button("🗑️", width='stretch', help="Delete compound"):
-            SessionState.set('show_delete_confirmation', True)
-            st.rerun()
+            _show_delete_confirmation(compound_name, entry_id)
 
-    if SessionState.get('show_delete_confirmation'):
-        _show_delete_confirmation(compound_name, entry_id)
-        return
+    # Show success toast after delete + navigate
+    if st.session_state.pop('_delete_success', None):
+        st.toast(f"✓ Compound deleted successfully", icon="✅")
 
     # Load data using storage_path (most reliable), fallback to entry_id, then compound_name
     data = _load_compound_data(
@@ -96,10 +110,16 @@ def render_compound_detail_page() -> None:
     _render_quick_stats(data)
 
     # Fetch versions for conditional tab (Streamlit requires fixed tab count per render)
+    # Re-fetch on first visit to this compound (cache_key changes per entry_id)
     versions = []
     has_versions = False
     cache_key = f"_versions_{entry_id}"
     if entry_id:
+        # Invalidate cache if we navigated to a different compound
+        prev_key = st.session_state.get('_versions_last_compound')
+        if prev_key != entry_id:
+            st.session_state.pop(cache_key, None)
+            st.session_state['_versions_last_compound'] = entry_id
         if cache_key not in st.session_state:
             api = get_api_client()
             result = api.get_compound_versions(entry_id)
@@ -270,7 +290,11 @@ def _render_compound_info(data: Dict[str, Any], df: pd.DataFrame, summary: Dict)
         smiles = data.get('smiles', '')
         if smiles:
             render_2d_structure(smiles, size=(380, 300))
-        st.caption(f"Similarity: {summary.get('similarity_threshold', 90)}%")
+            sc1, sc2 = st.columns([3, 1])
+            sc1.caption(f"Similarity: {summary.get('similarity_threshold', 90)}%")
+            with sc2:
+                if st.button("⛶", key="expand_overview_struct", type="primary", help="Expand structure"):
+                    _show_expanded_structure(smiles, label=data.get('compound_name', ''))
 
         # Processed date below structure
         if summary.get('processing_date'):
@@ -320,11 +344,16 @@ def _render_compound_info(data: Dict[str, Any], df: pd.DataFrame, summary: Dict)
 
         with info_cols[1]:
             activity_types = summary.get('activity_types', '')
-            if activity_types:
+            # Normalize: handle string, list, and [''] (empty default)
+            if isinstance(activity_types, str):
+                types = [t.strip() for t in activity_types.split(',') if t.strip()]
+            elif isinstance(activity_types, list):
+                types = [t for t in activity_types if t and t.strip()]
+            else:
+                types = []
+            if types:
                 st.markdown("#### Activity Types")
-                # Show as larger pills/tags
-                types = activity_types.split(',') if isinstance(activity_types, str) else activity_types
-                st.markdown(" ".join([f"**`{t.strip()}`**" for t in types[:7]]))
+                st.markdown(" ".join([f"**`{t}`**" for t in types[:7]]))
 
             # Chemical Formula (pre-computed in _load_compound_data)
             formula = data.get('mol_formula')
@@ -733,8 +762,8 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
             if has_psa_mw and has_npol_nha:
                 plot_df = unique_df.dropna(subset=['10xPSA_MW', 'NPOLoNHA'])
                 # Need >=2 points AND variance in x values for regression
-                x_vals = plot_df['10xPSA_MW'].values if len(plot_df) >= 2 else np.array([])
-                y_vals = plot_df['NPOLoNHA'].values if len(plot_df) >= 2 else np.array([])
+                x_vals = plot_df['NPOLoNHA'].values if len(plot_df) >= 2 else np.array([])
+                y_vals = plot_df['10xPSA_MW'].values if len(plot_df) >= 2 else np.array([])
                 can_regress = len(plot_df) >= 2 and len(np.unique(x_vals)) > 1
 
                 if can_regress:
@@ -765,8 +794,8 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
 
                     fig = px.scatter(
                         plot_df,
-                        x='10xPSA_MW',
-                        y='NPOLoNHA',
+                        x='NPOLoNHA',
+                        y='10xPSA_MW',
                         color='QED' if 'QED' in plot_df.columns and plot_df['QED'].notna().any() else None,
                         hover_data=['ChEMBL_ID', 'Molecule_Name'] if all(c in plot_df.columns for c in ['ChEMBL_ID', 'Molecule_Name']) else None,
                         title=title,
@@ -777,8 +806,8 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
                     fig.update_layout(
                         height=300,
                         margin=dict(t=40, b=30, l=30, r=30),
-                        xaxis_title="10 × PSA/MW",
-                        yaxis_title="NPOL/NHA"
+                        xaxis_title="NPOL/NHA",
+                        yaxis_title="10 × PSA/MW"
                     )
                     apply_impulator_theme(fig)
                     st.plotly_chart(fig, width='stretch', key="psa_npol_scatter_chart")
@@ -2471,6 +2500,246 @@ def _render_structures_tab(data: Dict[str, Any]) -> None:
     _render_molecule_viewer(df)
 
 
+@st.dialog("Molecule Structure", width="large")
+def _show_expanded_structure(smiles: str, label: str = "") -> None:
+    """Expanded molecule view with atom numbers and molecular properties."""
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import Descriptors, rdMolDescriptors
+        from rdkit.Chem.Draw import rdMolDraw2D
+
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            st.error("Invalid SMILES — cannot render")
+            return
+
+        drawer = rdMolDraw2D.MolDraw2DSVG(700, 450)
+        opts = drawer.drawOptions()
+        opts.addAtomIndices = True
+        drawer.DrawMolecule(mol)
+        drawer.FinishDrawing()
+        svg = drawer.GetDrawingText()
+
+        if label:
+            st.markdown(f"**{html.escape(label)}**")
+
+        st.markdown(
+            f'<div style="display:flex;justify-content:center;background:#fff;'
+            f'border-radius:8px;padding:12px;">{svg}</div>',
+            unsafe_allow_html=True,
+        )
+
+        isomeric = Chem.MolToSmiles(mol, isomericSmiles=True)
+        formula = rdMolDescriptors.CalcMolFormula(mol)
+        mw = Descriptors.ExactMolWt(mol)
+        atoms = mol.GetNumAtoms()
+        bonds = mol.GetNumBonds()
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Formula", formula)
+        c2.metric("Mol. Weight", f"{mw:.2f}")
+        c3.metric("Atoms", atoms)
+        c4.metric("Bonds", bonds)
+
+        st.markdown("**Isomeric SMILES**")
+        st.code(isomeric, language=None)
+    except ImportError:
+        st.warning("RDKit not available for expanded view")
+    except Exception as e:
+        st.error(f"Render error: {e}")
+
+
+def _render_3d_viewer(smiles: str, entry_id: str) -> None:
+    """Interactive 3D molecule viewer using 3Dmol.js. All controls inside iframe."""
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+
+        mol = Chem.MolFromSmiles(str(smiles))
+        if mol is None:
+            st.caption("Could not parse SMILES for 3D rendering")
+            return
+
+        mol_3d = Chem.AddHs(mol)
+        result = AllChem.EmbedMolecule(mol_3d, randomSeed=42)
+        if result == -1:
+            AllChem.EmbedMolecule(mol_3d, useRandomCoords=True, randomSeed=42)
+        AllChem.MMFFOptimizeMolecule(mol_3d, maxIters=500)
+        pdb_block = Chem.MolToPDBBlock(mol_3d)
+
+    except Exception as e:
+        st.caption(f"3D generation failed: {e}")
+        return
+
+    safe_pdb = pdb_block.replace('`', '\\`').replace('${', '\\${')
+
+    viewer_html = f"""
+    <style>
+        * {{ margin:0; padding:0; box-sizing:border-box; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: transparent; }}
+        #viewer3d {{ width:100%; height:380px; background:#fff; border-radius:8px 8px 0 0; }}
+        #controls {{ display:flex; gap:6px; padding:8px 12px; align-items:center; flex-wrap:wrap;
+            background:#1a1a2e; border-radius:0 0 8px 8px; position:relative; z-index:10; }}
+        .btn {{ padding:6px 12px; border-radius:6px; border:1px solid rgba(255,255,255,0.2);
+            background:rgba(255,255,255,0.1); color:#eee; font-size:13px; cursor:pointer;
+            outline:none; user-select:none; display:inline-block; }}
+        .btn:hover {{ background:rgba(255,255,255,0.18); }}
+        .btn.active {{ background:rgba(99,102,241,0.5); border-color:rgba(99,102,241,0.7); color:#fff; }}
+        .btn-group {{ position:relative; }}
+        .btn-group .menu {{ display:none; position:absolute; bottom:100%; left:0; margin-bottom:4px;
+            background:#2a2a3e; border:1px solid rgba(255,255,255,0.15); border-radius:6px;
+            overflow:hidden; min-width:130px; z-index:100; box-shadow:0 4px 12px rgba(0,0,0,0.4); }}
+        .btn-group.open .menu {{ display:block; }}
+        .menu-item {{ padding:8px 14px; color:#ddd; font-size:13px; cursor:pointer; }}
+        .menu-item:hover {{ background:rgba(255,255,255,0.1); }}
+        .menu-item.selected {{ background:rgba(99,102,241,0.3); }}
+        .lbl {{ font-size:11px; color:#999; text-transform:uppercase; letter-spacing:0.5px; }}
+    </style>
+    <div id="viewer3d"></div>
+    <div id="controls">
+        <span class="lbl">Style</span>
+        <div class="btn-group" id="styleGroup">
+            <div class="btn" id="styleBtn">Ball &amp; Stick ▾</div>
+            <div class="menu">
+                <div class="menu-item selected" data-val="ballstick">Ball &amp; Stick</div>
+                <div class="menu-item" data-val="stick">Stick</div>
+                <div class="menu-item" data-val="sphere">Sphere</div>
+                <div class="menu-item" data-val="line">Line</div>
+            </div>
+        </div>
+        <span class="lbl">Color</span>
+        <div class="btn-group" id="colorGroup">
+            <div class="btn" id="colorBtn">Element (CPK) ▾</div>
+            <div class="menu">
+                <div class="menu-item selected" data-val="default">Element (CPK)</div>
+                <div class="menu-item" data-val="chain">Chain</div>
+                <div class="menu-item" data-val="spectrum">Spectrum</div>
+            </div>
+        </div>
+        <div class="btn" id="spinBtn">Spin</div>
+        <div class="btn" id="resetBtn">Reset</div>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.4.2/3Dmol-min.js"></script>
+    <script>
+    (function() {{
+        var viewer = $3Dmol.createViewer(document.getElementById("viewer3d"), {{
+            backgroundColor: "white", antialias: true
+        }});
+        var pdb = `{safe_pdb}`;
+        viewer.addModel(pdb, "pdb");
+
+        var styles = {{
+            ballstick: {{stick: {{radius: 0.12}}, sphere: {{scale: 0.25}}}},
+            stick: {{stick: {{radius: 0.15}}}},
+            sphere: {{sphere: {{scale: 0.4}}}},
+            line: {{line: {{}}}}
+        }};
+
+        var curStyle = "ballstick";
+        var curColor = "default";
+
+        function applyStyle() {{
+            var styleObj = JSON.parse(JSON.stringify(styles[curStyle] || styles.ballstick));
+            if (curColor === "chain") {{
+                Object.keys(styleObj).forEach(function(k) {{ styleObj[k].colorscheme = "chain"; }});
+            }} else if (curColor === "spectrum") {{
+                Object.keys(styleObj).forEach(function(k) {{ styleObj[k].colorscheme = "roygb"; }});
+            }}
+            viewer.setStyle({{}}, styleObj);
+            viewer.render();
+        }}
+
+        applyStyle();
+        viewer.zoomTo();
+        viewer.render();
+
+        // Hover labels
+        viewer.setHoverable({{}}, true,
+            function(atom, viewer, event, container) {{
+                if (!atom.label) {{
+                    atom.label = viewer.addLabel(
+                        atom.elem + atom.serial,
+                        {{position: atom, backgroundColor: "rgba(0,0,0,0.75)",
+                         fontColor: "white", fontSize: 12, borderRadius: 4, padding: 4}});
+                }}
+            }},
+            function(atom, viewer) {{
+                if (atom.label) {{ viewer.removeLabel(atom.label); delete atom.label; }}
+            }}
+        );
+        viewer.render();
+
+        // Custom dropdown logic
+        function setupDropdown(groupId, btnId, onSelect) {{
+            var group = document.getElementById(groupId);
+            var btn = document.getElementById(btnId);
+            btn.addEventListener("click", function(e) {{
+                e.stopPropagation();
+                // Close other open dropdowns
+                document.querySelectorAll(".btn-group.open").forEach(function(g) {{
+                    if (g !== group) g.classList.remove("open");
+                }});
+                group.classList.toggle("open");
+            }});
+            group.querySelectorAll(".menu-item").forEach(function(item) {{
+                item.addEventListener("click", function(e) {{
+                    e.stopPropagation();
+                    group.querySelectorAll(".menu-item").forEach(function(i) {{ i.classList.remove("selected"); }});
+                    item.classList.add("selected");
+                    btn.textContent = item.textContent + " \\u25BE";
+                    group.classList.remove("open");
+                    onSelect(item.getAttribute("data-val"));
+                }});
+            }});
+        }}
+
+        setupDropdown("styleGroup", "styleBtn", function(val) {{
+            curStyle = val;
+            applyStyle();
+        }});
+        setupDropdown("colorGroup", "colorBtn", function(val) {{
+            curColor = val;
+            applyStyle();
+        }});
+
+        // Close dropdowns on click outside
+        document.addEventListener("click", function() {{
+            document.querySelectorAll(".btn-group.open").forEach(function(g) {{
+                g.classList.remove("open");
+            }});
+        }});
+
+        // Spin
+        var spinning = false;
+        var spinBtn = document.getElementById("spinBtn");
+        spinBtn.addEventListener("click", function() {{
+            spinning = !spinning;
+            viewer.spin(spinning);
+            spinBtn.classList.toggle("active", spinning);
+        }});
+
+        // Reset
+        document.getElementById("resetBtn").addEventListener("click", function() {{
+            spinning = false;
+            viewer.spin(false);
+            spinBtn.classList.remove("active");
+            curStyle = "ballstick";
+            curColor = "default";
+            document.getElementById("styleBtn").textContent = "Ball & Stick \\u25BE";
+            document.getElementById("colorBtn").textContent = "Element (CPK) \\u25BE";
+            document.querySelectorAll(".menu-item").forEach(function(i) {{ i.classList.remove("selected"); }});
+            document.querySelector('[data-val="ballstick"]').classList.add("selected");
+            document.querySelector('[data-val="default"]').classList.add("selected");
+            applyStyle();
+            viewer.zoomTo();
+            viewer.render();
+        }});
+    }})();
+    </script>
+    """
+    st.components.v1.html(viewer_html, height=460)
+
+
 def _render_molecule_viewer(df: pd.DataFrame) -> None:
     """2D/3D molecule viewer."""
     if df is None or 'SMILES' not in df.columns:
@@ -2509,7 +2778,12 @@ def _render_molecule_viewer(df: pd.DataFrame) -> None:
     col1, col2 = st.columns([1, 1])
 
     with col1:
-        render_2d_structure(row['SMILES'], size=(350, 280))
+        show_nums = st.checkbox("Show atom numbers", value=True, key=f"atom_nums_{_eid}")
+        render_2d_structure(row['SMILES'], size=(350, 280), show_atom_numbers=show_nums)
+
+        mol_label = row.get(id_col, '') if id_col else ''
+        if st.button("⛶ Expand", key=f"expand_struct_{_eid}", type="primary"):
+            _show_expanded_structure(row['SMILES'], label=mol_label)
 
     with col2:
         if id_col:
@@ -2532,35 +2806,38 @@ def _render_molecule_viewer(df: pd.DataFrame) -> None:
                 st.markdown(f"**IMP Score:** {avg_text}")
 
     # 3D Viewer
-    with st.expander("🧬 Generate 3D Structure"):
-        if st.button("Render 3D", key="render_3d"):
-            try:
-                from rdkit import Chem
-                from rdkit.Chem import AllChem
+    st.markdown("#### 3D Structure")
+    _render_3d_viewer(row['SMILES'], _eid)
 
-                mol = Chem.MolFromSmiles(row['SMILES'])
-                if mol:
-                    mol_3d = Chem.AddHs(mol)
-                    AllChem.EmbedMolecule(mol_3d, randomSeed=42)
-                    AllChem.MMFFOptimizeMolecule(mol_3d)
-                    pdb_block = Chem.MolToPDBBlock(mol_3d)
 
-                    html = f"""
-                    <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.1/3Dmol-min.js"></script>
-                    <div id="viewer" style="width:100%;height:350px;background:#f8f9fa;border-radius:8px;"></div>
-                    <script>
-                        let viewer = $3Dmol.createViewer(document.getElementById("viewer"), {{backgroundColor: "white"}});
-                        viewer.addModel(`{pdb_block}`, "pdb");
-                        viewer.setStyle({{}}, {{stick: {{radius: 0.15}}, sphere: {{radius: 0.3}}}});
-                        viewer.zoomTo();
-                        viewer.render();
-                    </script>
-                    """
-                    st.components.v1.html(html, height=370)
-                else:
-                    st.error("Could not parse SMILES")
-            except Exception as e:
-                st.error(f"Error: {e}")
+def _pdb_pagination(entry_id: str, page_key: str, current_page: int, total_pages: int, pos: str) -> None:
+    """Render centered ⟪ First ◁ Prev | Page X of Y | Next ▷ Last ⟫ pagination bar."""
+    _, c_first, c_prev, c_label, c_next, c_last, _ = st.columns([2, 1, 1, 2, 1, 1, 2])
+    with c_first:
+        if st.button("⟪ First", key=f"pdb_first_{pos}_{entry_id}", disabled=current_page <= 1,
+                      use_container_width=True):
+            st.session_state[page_key] = 1
+            st.rerun()
+    with c_prev:
+        if st.button("◁ Prev", key=f"pdb_prev_{pos}_{entry_id}", disabled=current_page <= 1,
+                      use_container_width=True):
+            st.session_state[page_key] = current_page - 1
+            st.rerun()
+    c_label.markdown(
+        f"<div style='text-align:center;padding:8px 0;font-size:15px;font-weight:500;'>"
+        f"Page {current_page} of {total_pages}</div>",
+        unsafe_allow_html=True,
+    )
+    with c_next:
+        if st.button("Next ▷", key=f"pdb_next_{pos}_{entry_id}", disabled=current_page >= total_pages,
+                      use_container_width=True):
+            st.session_state[page_key] = current_page + 1
+            st.rerun()
+    with c_last:
+        if st.button("Last ⟫", key=f"pdb_last_{pos}_{entry_id}", disabled=current_page >= total_pages,
+                      use_container_width=True):
+            st.session_state[page_key] = total_pages
+            st.rerun()
 
 
 def _render_pdb_evidence(
@@ -2646,46 +2923,71 @@ def _render_pdb_evidence(
     with col4:
         st.metric("% with PDB Data", f"{pct_with_pdb:.1f}%")
 
-    st.caption(f"📊 Summary across {len(unique_df)} unique compounds")
+    st.caption(f"Summary across {len(unique_df)} unique compounds")
 
-    st.markdown("---")
-
-    # Structure Quality Distribution table
-    st.markdown("**Structure Quality Distribution:**")
-    quality_data = []
+    # Visualizations: Quality donut + Resolution histogram side by side
     total_q = high_q + med_q + poor_q
-    if total_q > 0:
-        quality_data.append({
-            'Quality Tier': '⭐⭐⭐ High (< 2.0 Å)',
-            'Count': high_q,
-            'Avg %': f"{high_q/total_q*100:.1f}%"
-        })
-        quality_data.append({
-            'Quality Tier': '⭐⭐ Medium (2.0-3.0 Å)',
-            'Count': med_q,
-            'Avg %': f"{med_q/total_q*100:.1f}%"
-        })
-        quality_data.append({
-            'Quality Tier': '⭐ Poor (> 3.0 Å)',
-            'Count': poor_q,
-            'Avg %': f"{poor_q/total_q*100:.1f}%"
-        })
-        st.dataframe(pd.DataFrame(quality_data), width='stretch', hide_index=True, height=150)
-    else:
-        st.caption("No quality distribution data available")
+    if total_q > 0 and pdb_summary_df is not None and not pdb_summary_df.empty:
+        viz1, viz2 = st.columns(2)
 
-    st.info("💡 **Tip:** Higher PDB scores indicate more experimental validation. Compounds with ⭐⭐⭐ structures (< 2.0 Å resolution) have the strongest structural evidence.")
+        with viz1:
+            # Quality donut chart
+            quality_df = pd.DataFrame({
+                'Quality': ['High (< 2.0 Å)', 'Medium (2.0-3.0 Å)', 'Poor (> 3.0 Å)'],
+                'Count': [high_q, med_q, poor_q],
+            })
+            quality_df = quality_df[quality_df['Count'] > 0]
+            fig_donut = px.pie(
+                quality_df, values='Count', names='Quality',
+                hole=0.5, color='Quality',
+                color_discrete_map={
+                    'High (< 2.0 Å)': '#22c55e',
+                    'Medium (2.0-3.0 Å)': '#f59e0b',
+                    'Poor (> 3.0 Å)': '#ef4444',
+                },
+            )
+            fig_donut.update_layout(
+                title='Quality Distribution',
+                showlegend=True, legend=dict(orientation='h', y=-0.1),
+                margin=dict(t=40, b=40, l=10, r=10), height=280,
+            )
+            fig_donut.update_traces(textinfo='value+percent', textfont_size=13)
+            apply_impulator_theme(fig_donut)
+            st.plotly_chart(fig_donut, use_container_width=True)
+
+        with viz2:
+            # Resolution distribution histogram
+            if 'Resolution' in pdb_summary_df.columns:
+                res_vals = pd.to_numeric(pdb_summary_df['Resolution'], errors='coerce').dropna()
+                if len(res_vals) > 0:
+                    fig_res = px.histogram(
+                        res_vals, nbins=15,
+                        labels={'value': 'Resolution (Å)', 'count': 'Structures'},
+                        color_discrete_sequence=['#3b82f6'],
+                    )
+                    # Add quality zone annotations
+                    fig_res.add_vrect(x0=0, x1=2.0, fillcolor='#22c55e', opacity=0.08,
+                                     annotation_text='High', annotation_position='top left')
+                    fig_res.add_vrect(x0=2.0, x1=3.0, fillcolor='#f59e0b', opacity=0.08,
+                                     annotation_text='Medium', annotation_position='top left')
+                    fig_res.add_vrect(x0=3.0, x1=res_vals.max() + 0.5, fillcolor='#ef4444', opacity=0.08,
+                                     annotation_text='Poor', annotation_position='top left')
+                    fig_res.update_layout(
+                        title='Resolution Distribution',
+                        xaxis_title='Resolution (Å)', yaxis_title='Structures',
+                        margin=dict(t=40, b=40, l=10, r=10), height=280,
+                        showlegend=False,
+                    )
+                    apply_impulator_theme(fig_res)
+                    st.plotly_chart(fig_res, use_container_width=True)
 
     st.markdown("---")
 
     # pdb_summary_df was already loaded earlier for accurate counts
-    # If we have detailed PDB summary, display it in the exact format
+    # Card-based PDB structure browser with thumbnails
     if pdb_summary_df is not None and not pdb_summary_df.empty:
-        st.markdown("**Detailed PDB Structures:**")
-        st.caption("*Sorted by quality (⭐⭐⭐ first) and resolution (best first)*")
-
-        # Build display table with clickable links
-        display_data = []
+        # Build structured data for cards
+        card_data = []
         for _, row in pdb_summary_df.iterrows():
             pdb_id = str(row.get('PDB_ID', ''))
             chembl_id = str(row.get('ChEMBL_ID', ''))
@@ -2706,62 +3008,140 @@ def _render_pdb_evidence(
             if pd.isna(uniprot):
                 uniprot = ''
 
-            # Get first UniProt ID for link
             uniprot_list = [u.strip() for u in str(uniprot).split(',') if u.strip() and u.strip() != 'N/A']
-            uniprot_link = f"https://www.uniprot.org/uniprotkb/{uniprot_list[0]}" if uniprot_list else ''
 
-            # Parse resolution for sorting
             try:
                 res_val = float(resolution) if resolution and resolution != 'N/A' and str(resolution) != 'nan' else 999.0
             except (ValueError, TypeError):
                 res_val = 999.0
 
-            display_data.append({
-                'PDB_Link': f"https://www.rcsb.org/structure/{pdb_id}",
-                'ChEMBL_ID': chembl_id,
-                'Molecule_Name': str(mol_name) if mol_name else '',
-                'Title': str(title)[:70] + '...' if len(str(title)) > 70 else str(title),
-                'Resolution': f"{float(resolution):.2f}" if resolution and resolution != 'N/A' and str(resolution) != 'nan' else 'N/A',
-                'Resolution_Sort': res_val,
-                'Quality': quality,
-                'Experimental_Method': exp_method,
-                'UniProt_IDs': uniprot_link
+            card_data.append({
+                'pdb_id': pdb_id,
+                'chembl_id': chembl_id,
+                'mol_name': str(mol_name),
+                'title': str(title),
+                'resolution': f"{res_val:.2f} Å" if res_val < 999 else 'N/A',
+                'resolution_val': res_val,
+                'quality': quality,
+                'exp_method': exp_method,
+                'uniprot_ids': uniprot_list,
             })
 
-        pdb_table = pd.DataFrame(display_data)
-
-        # Sort by quality (*** first) then by resolution (lowest first)
+        # Sort by quality then resolution
         quality_order = {'***': 1, '**': 2, '*': 3, '': 4, 'N/A': 4}
-        pdb_table['Quality_Sort'] = pdb_table['Quality'].map(lambda x: quality_order.get(x, 4))
-        pdb_table = pdb_table.sort_values(['Quality_Sort', 'Resolution_Sort']).drop(columns=['Quality_Sort', 'Resolution_Sort'])
+        card_data.sort(key=lambda x: (quality_order.get(x['quality'], 4), x['resolution_val']))
 
-        # Display with column config for clickable links
-        st.dataframe(
-            pdb_table,
-            width='stretch',
-            hide_index=True,
-            height=400,
-            column_config={
-                "PDB_Link": st.column_config.LinkColumn(
-                    "PDB_Link",
-                    display_text=r"https://www\.rcsb\.org/structure/(.+)",
-                    width="small"
-                ),
-                "ChEMBL_ID": st.column_config.TextColumn("ChEMBL_ID", width="small"),
-                "Molecule_Name": st.column_config.TextColumn("Molecule_Name", width="medium"),
-                "Title": st.column_config.TextColumn("Title", width="large"),
-                "Resolution": st.column_config.TextColumn("Resolution", width="small"),
-                "Quality": st.column_config.TextColumn("Quality", width="small"),
-                "Experimental_Method": st.column_config.TextColumn("Experimental_Method", width="medium"),
-                "UniProt_IDs": st.column_config.LinkColumn(
-                    "UniProt_IDs",
-                    display_text=r"https://www\.uniprot\.org/uniprotkb/(.+)",
-                    width="small"
+        # Search and sort controls
+        sc1, sc2 = st.columns([3, 1])
+        search = sc1.text_input("Search", placeholder="Search PDB ID, title, ChEMBL ID...",
+                                key=f"pdb_search_{entry_id}", label_visibility="collapsed")
+        sort_opt = sc2.selectbox("Sort", ["Resolution ↑", "Resolution ↓", "Quality ↓"],
+                                 key=f"pdb_sort_{entry_id}", label_visibility="collapsed")
+
+        # Filter
+        if search:
+            q = search.lower()
+            card_data = [c for c in card_data if
+                         q in c['pdb_id'].lower() or q in c['title'].lower() or
+                         q in c['chembl_id'].lower() or q in c['mol_name'].lower()]
+
+        # Sort
+        if sort_opt == "Resolution ↑":
+            card_data.sort(key=lambda x: x['resolution_val'])
+        elif sort_opt == "Resolution ↓":
+            card_data.sort(key=lambda x: x['resolution_val'], reverse=True)
+        elif sort_opt == "Quality ↓":
+            card_data.sort(key=lambda x: (quality_order.get(x['quality'], 4), x['resolution_val']))
+
+        # Pagination
+        PAGE_SIZE = 25
+        total = len(card_data)
+        total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+        page_key = f"pdb_page_{entry_id}"
+
+        if page_key not in st.session_state:
+            st.session_state[page_key] = 1
+        current_page = st.session_state[page_key]
+        # Clamp
+        if current_page > total_pages:
+            current_page = total_pages
+            st.session_state[page_key] = current_page
+
+        st.caption(f"{total} structures")
+        if total_pages > 1:
+            _pdb_pagination(entry_id, page_key, current_page, total_pages, "top")
+
+        start = (current_page - 1) * PAGE_SIZE
+        page_data = card_data[start:start + PAGE_SIZE]
+
+        # Render cards
+        for c in page_data:
+            pdb_id = html.escape(c['pdb_id'])
+            title_text = html.escape(c['title']) if c['title'] else 'Untitled'
+            star_count = c['quality'].count('*')
+            quality_stars = '<span style="color:#f59e0b;font-size:16px;">' + '★' * star_count + '☆' * (3 - star_count) + '</span>'
+            chembl_text = html.escape(c['chembl_id'])
+            method_text = html.escape(c['exp_method'])
+            thumb_url = f"https://cdn.rcsb.org/images/structures/{pdb_id.lower()}_assembly-1.jpeg"
+
+            # UniProt links
+            uniprot_html = ""
+            for uid in c['uniprot_ids'][:3]:
+                safe_uid = html.escape(uid)
+                uniprot_html += (
+                    f'<a href="https://www.uniprot.org/uniprotkb/{safe_uid}" '
+                    f'target="_blank" style="color:#3b82f6;text-decoration:none;font-weight:600;">{safe_uid}</a> '
                 )
-            }
-        )
 
-        st.caption(f"📋 {len(pdb_table)} total PDB structures sorted by quality (⭐⭐⭐ → ⭐⭐ → ⭐) and resolution (best first). Click PDB_Link to view structure at RCSB PDB. 📜 Scroll to see all.")
+            st.markdown(
+                f'<div style="display:flex;gap:16px;padding:14px;border-bottom:1px solid rgba(128,128,128,0.2);'
+                f'align-items:flex-start;">'
+                f'<a href="https://www.rcsb.org/structure/{pdb_id}" target="_blank">'
+                f'<img src="{thumb_url}" style="width:90px;height:90px;border-radius:6px;'
+                f'object-fit:cover;background:#222;cursor:pointer;flex-shrink:0;" '
+                f'onerror="this.style.display=\'none\'" width="90" height="90">'
+                f'</a>'
+                f'<div style="flex:1;min-width:0;">'
+                f'<div style="font-size:17px;font-weight:500;margin-bottom:6px;">{title_text}</div>'
+                f'<div style="font-size:15px;opacity:0.85;">'
+                f'<b>PDB:</b> <a href="https://www.rcsb.org/structure/{pdb_id}" target="_blank" '
+                f'style="color:#3b82f6;text-decoration:none;font-weight:600;">{pdb_id}</a>'
+                f' &nbsp; <b>ChEMBL:</b> {chembl_text}'
+                f' &nbsp; <b>Quality:</b> {quality_stars}'
+                f'</div>'
+                f'<div style="font-size:15px;opacity:0.85;margin-top:4px;">'
+                f'<b>Resolution:</b> {html.escape(c["resolution"])}'
+                f' &nbsp; <b>Method:</b> {method_text}'
+                f'{(" &nbsp; <b>UniProt:</b> " + uniprot_html) if uniprot_html else ""}'
+                f'</div>'
+                f'</div>'
+                f'<div style="flex-shrink:0;display:flex;flex-direction:column;gap:6px;align-self:center;">'
+                f'<a href="https://www.rcsb.org/structure/{pdb_id}" target="_blank" '
+                f'style="display:block;padding:8px 16px;font-size:14px;text-align:center;'
+                f'color:#fff;text-decoration:none;font-weight:600;'
+                f'background:linear-gradient(135deg,#3b82f6,#6366f1);border-radius:8px;white-space:nowrap;'
+                f'box-shadow:0 2px 8px rgba(59,130,246,0.3);'
+                f'transition:transform 0.15s,box-shadow 0.15s;"'
+                f' onmouseover="this.style.transform=\'translateY(-1px)\';this.style.boxShadow=\'0 4px 12px rgba(59,130,246,0.4)\'"'
+                f' onmouseout="this.style.transform=\'none\';this.style.boxShadow=\'0 2px 8px rgba(59,130,246,0.3)\'">'
+                f'View in PDB</a>'
+                f'<a href="https://www.rcsb.org/3d-view/{pdb_id}" target="_blank" '
+                f'style="display:block;padding:8px 16px;font-size:14px;text-align:center;'
+                f'color:#fff;text-decoration:none;font-weight:600;'
+                f'background:linear-gradient(135deg,#22c55e,#06b6d4);border-radius:8px;white-space:nowrap;'
+                f'box-shadow:0 2px 8px rgba(34,197,94,0.3);'
+                f'transition:transform 0.15s,box-shadow 0.15s;"'
+                f' onmouseover="this.style.transform=\'translateY(-1px)\';this.style.boxShadow=\'0 4px 12px rgba(34,197,94,0.4)\'"'
+                f' onmouseout="this.style.transform=\'none\';this.style.boxShadow=\'0 2px 8px rgba(34,197,94,0.3)\'">'
+                f'Explore in 3D</a>'
+                f'</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        # Bottom pagination
+        if total_pages > 1:
+            _pdb_pagination(entry_id, page_key, current_page, total_pages, "bot")
 
     else:
         # Fallback: PDB summary file not found - show basic info from DataFrame
@@ -2825,29 +3205,6 @@ def _render_pdb_evidence(
             else:
                 st.info("No PDB IDs found in the data")
 
-    # PDB Score distribution
-    if 'PDB_Score' in unique_df.columns:
-        st.markdown("---")
-        st.markdown("**PDB Score Distribution**")
-
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            fig = px.histogram(unique_df, x='PDB_Score', nbins=20)
-            fig.update_layout(height=250, margin=dict(t=20, b=30))
-            apply_impulator_theme(fig)
-            st.plotly_chart(fig, width='stretch')
-
-        with col2:
-            st.markdown("**Quality Breakdown**")
-            if all(c in unique_df.columns for c in ['PDB_High_Quality', 'PDB_Medium_Quality', 'PDB_Poor_Quality']):
-                high = unique_df['PDB_High_Quality'].sum()
-                med = unique_df['PDB_Medium_Quality'].sum()
-                poor = unique_df['PDB_Poor_Quality'].sum()
-                total = high + med + poor
-                if total > 0:
-                    st.caption(f"⭐⭐⭐ High: {int(high)} ({high/total*100:.0f}%)")
-                    st.caption(f"⭐⭐ Medium: {int(med)} ({med/total*100:.0f}%)")
-                    st.caption(f"⭐ Poor: {int(poor)} ({poor/total*100:.0f}%)")
 
 
 # =============================================================================
@@ -3281,22 +3638,18 @@ def _load_compound_data(
         return {'_error': 'server_error', '_detail': str(e)}
 
 
+@st.dialog("Confirm Delete")
 def _show_delete_confirmation(compound_name: str, entry_id: Optional[str] = None) -> None:
-    """Delete confirmation dialog.
+    """Delete confirmation dialog (modal overlay).
 
     Calls backend API to delete compound from database, Azure storage, and local cache.
-
-    Args:
-        compound_name: Display name of the compound
-        entry_id: UUID of the compound (required for proper deletion)
     """
-    st.warning(f"Delete **{compound_name}**?")
+    st.warning(f"Are you sure you want to delete **{compound_name}**? This cannot be undone.")
 
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Cancel", width='stretch'):
-            SessionState.set('show_delete_confirmation', False)
-            st.rerun()
+            st.rerun()  # Closes the dialog
     with col2:
         if st.button("Delete", type="primary", width='stretch'):
             try:
@@ -3304,18 +3657,20 @@ def _show_delete_confirmation(compound_name: str, entry_id: Optional[str] = None
                     st.error("Cannot delete: compound entry_id not found")
                     return
 
-                # Call backend API to delete (handles DB, Azure, and local cache)
                 api_client = get_api_client()
                 result = api_client.delete_compound(entry_id)
 
                 if result.success:
-                    # Also clear frontend cache (uses entry_id UUID)
                     if entry_id:
                         delete_from_cache(entry_id)
-
-                    # Show toast notification (persists across rerun)
-                    st.toast(f"✓ Deleted '{compound_name}' successfully", icon="✅")
-                    SessionState.set('show_delete_confirmation', False)
+                    st.session_state['_delete_success'] = compound_name
+                    st.query_params.clear()
+                    # Clear compound list cache so deleted compound disappears
+                    try:
+                        from frontend.services import get_compounds_cached
+                        get_compounds_cached.clear()
+                    except Exception:
+                        pass
                     SessionState.navigate_to_home()
                     st.rerun()
                 else:
@@ -5553,7 +5908,11 @@ def _render_versions_tab(versions: list, current_entry_id: str) -> None:
         f"of this structure (same InChIKey)"
     )
 
-    # Summary table
+    # Summary table — compare each version's config against current
+    current_threshold = current.get("similarity_threshold")
+    current_act_set = set(current.get("activity_types") or [])
+    current_act_str = ", ".join(sorted(current_act_set)) if current_act_set else "all (default)"
+
     rows = []
     for v in versions:
         marker = ""
@@ -5562,10 +5921,23 @@ def _render_versions_tab(versions: list, current_entry_id: str) -> None:
         if v.get("is_original"):
             marker += " ★"
         qed = v.get("qed")
+
+        # Compare activity types with current compound
+        v_act = set(v.get("activity_types") or [])
+        v_threshold = v.get("similarity_threshold")
+        same_config = (v_act == current_act_set and v_threshold == current_threshold)
+
+        if v.get("is_current"):
+            act_display = ", ".join(sorted(v_act)) if v_act else "all (default)"
+        elif same_config:
+            act_display = "✓ Same Config"
+        else:
+            act_display = ", ".join(sorted(v_act)) if v_act else "all (default)"
+
         rows.append({
             "Name": html.escape(v.get("compound_name", "")) + marker,
             "Threshold": f"{v.get('similarity_threshold', '?')}%",
-            "Activity Types": v.get("activity_types") or "default",
+            "Activity Types": act_display,
             "Similar Compounds": v.get("similar_compounds") or 0,
             "QED": f"{qed:.2f}" if qed is not None else "—",
             "Activities": v.get("total_activities") or 0,
@@ -5589,16 +5961,14 @@ def _render_versions_tab(versions: list, current_entry_id: str) -> None:
     # Per-sibling expandable cards with config diffs
     st.markdown("##### Version Details")
     current_threshold = current.get("similarity_threshold")
-    current_activities = {
-        s.strip() for s in (current.get("activity_types") or "").split(",")
-    } - {""}
+    _raw_act = current.get("activity_types") or []
+    current_activities = set(_raw_act) if isinstance(_raw_act, list) else {s.strip() for s in _raw_act.split(",")} - {""}
 
     for idx, sib in enumerate(siblings):
         sib_name = html.escape(sib.get("compound_name", "Unknown"))
         sib_threshold = sib.get("similarity_threshold")
-        sib_activities = {
-            s.strip() for s in (sib.get("activity_types") or "").split(",")
-        } - {""}
+        _raw_sib_act = sib.get("activity_types") or []
+        sib_activities = set(_raw_sib_act) if isinstance(_raw_sib_act, list) else {s.strip() for s in _raw_sib_act.split(",")} - {""}
 
         label = f"**{sib_name}**"
         if sib.get("is_original"):
@@ -5621,9 +5991,9 @@ def _render_versions_tab(versions: list, current_entry_id: str) -> None:
                 for a in sorted(shared):
                     parts.append(a)
                 for a in sorted(added):
-                    parts.append(f"🟢 {a}")
+                    parts.append(f"**+{a}**")
                 for a in sorted(removed):
-                    parts.append(f"🔴 ~~{a}~~")
+                    parts.append(f"~~{a}~~")
                 diffs.append(f"**Activity Types**: {', '.join(parts)}")
 
             if diffs:

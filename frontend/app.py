@@ -39,8 +39,8 @@ def main():
     """Main application entry point."""
     # Page configuration - must be first Streamlit command
     st.set_page_config(
-        page_title=config.APP_NAME,
-        page_icon=config.APP_ICON,
+        page_title="IMPULATOR — IMP's Navigator",
+        page_icon="frontend/static/favicon.svg",
         layout="wide",
         initial_sidebar_state="expanded",
     )
@@ -58,12 +58,22 @@ def main():
 
     # Deep linking: read URL params and navigate if present
     params = st.query_params
-    if "compound_id" in params and not SessionState.get('_deep_link_applied'):
+    if "compound_id" in params and SessionState.get('_last_deep_link_id') != params["compound_id"]:
         compound_id = params["compound_id"]
         tab = params.get("tab", "overview")
-        # Navigate to compound detail (shows compound list with detail auto-opened)
-        SessionState.navigate_to_compound(compound_id, entry_id=compound_id)
-        SessionState.set('_deep_link_applied', True)
+        # Look up actual compound name from the API
+        try:
+            api = get_api_client()
+            response = api._request("GET", f"/api/v1/compounds/{compound_id}")
+            if response.status_code == 200:
+                data = response.json()
+                deep_link_name = data.get("compound_name", compound_id)
+            else:
+                deep_link_name = compound_id
+        except Exception:
+            deep_link_name = compound_id  # Fallback to UUID if lookup fails
+        SessionState.navigate_to_compound(deep_link_name, entry_id=compound_id)
+        SessionState.set('_last_deep_link_id', compound_id)
 
     # Render sidebar (includes fragment-based job polling)
     render_sidebar()

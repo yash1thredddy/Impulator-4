@@ -28,6 +28,7 @@ except ImportError:
 try:
     from rdkit import Chem
     from rdkit.Chem import Draw
+    from rdkit.Chem.Draw import rdMolDraw2D
     RDKIT_AVAILABLE = True
 except ImportError:
     RDKIT_AVAILABLE = False
@@ -37,7 +38,8 @@ except ImportError:
 def render_2d_structure(
     smiles: str,
     size: tuple = (300, 200),
-    key: str = None
+    key: str = None,
+    show_atom_numbers: bool = False,
 ) -> bool:
     """Render a 2D molecular structure from SMILES using RDKit.
 
@@ -45,6 +47,7 @@ def render_2d_structure(
         smiles: SMILES string of the molecule
         size: Tuple of (width, height) for the image
         key: Optional unique key for the component
+        show_atom_numbers: If True, display atom index labels on each atom
 
     Returns:
         True if rendered successfully, False otherwise
@@ -63,21 +66,31 @@ def render_2d_structure(
             st.caption("Invalid SMILES")
             return False
 
-        # Generate the molecular image
-        img = Draw.MolToImage(mol, size=size)
-
-        # Convert image to base64 for HTML display
-        buffered = BytesIO()
-        img.save(buffered, format="PNG")
-        img_str = base64.b64encode(buffered.getvalue()).decode()
-
-        # Display the image centered
-        st.markdown(
-            f'<div style="display: flex; justify-content: center; padding: 10px;">'
-            f'<img src="data:image/png;base64,{img_str}" alt="Molecular structure" />'
-            f'</div>',
-            unsafe_allow_html=True
-        )
+        if show_atom_numbers:
+            # Use MolDraw2DSVG for atom index labels
+            drawer = rdMolDraw2D.MolDraw2DSVG(size[0], size[1])
+            opts = drawer.drawOptions()
+            opts.addAtomIndices = True
+            drawer.DrawMolecule(mol)
+            drawer.FinishDrawing()
+            svg = drawer.GetDrawingText()
+            st.markdown(
+                f'<div style="display: flex; justify-content: center; padding: 10px;">'
+                f'{svg}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            img = Draw.MolToImage(mol, size=size)
+            buffered = BytesIO()
+            img.save(buffered, format="PNG")
+            img_str = base64.b64encode(buffered.getvalue()).decode()
+            st.markdown(
+                f'<div style="display: flex; justify-content: center; padding: 10px;">'
+                f'<img src="data:image/png;base64,{img_str}" alt="Molecular structure" />'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
         return True
 
     except Exception as e:

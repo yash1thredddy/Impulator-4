@@ -525,6 +525,10 @@ class JobService:
         if author_name:
             workflow_meta["author_name"] = author_name
 
+        # Normalize: None/empty → explicit default list (all 7 types)
+        if not activity_types:
+            activity_types = sorted(_DEFAULT_ACTIVITY_TYPES.split(","))
+
         job = job_repo.create_job(
             db,
             id=uuid.uuid4(),
@@ -1135,9 +1139,17 @@ class JobService:
                 existing.imp_score = result_summary.get('imp_score')
                 existing.similarity_threshold = result_summary.get('similarity_threshold', 90)
                 # activity_types in result_summary may be comma-separated string
-                # from ZIP metadata; convert to list for TEXT[] column
+                # from ZIP metadata; convert to list for TEXT[] column.
+                # Empty/None means "all defaults" — store the actual default list.
                 raw_at = result_summary.get('activity_types')
-                existing.activity_types = raw_at.split(',') if isinstance(raw_at, str) else (raw_at or [])
+                if isinstance(raw_at, str) and raw_at.strip():
+                    existing.activity_types = [t.strip() for t in raw_at.split(',') if t.strip()]
+                elif isinstance(raw_at, list):
+                    existing.activity_types = [t for t in raw_at if t and t.strip()]
+                else:
+                    existing.activity_types = []
+                if not existing.activity_types:
+                    existing.activity_types = sorted(_DEFAULT_ACTIVITY_TYPES.split(","))
                 existing.qed = result_summary.get('qed', 0.0)
                 existing.num_outliers = result_summary.get('num_outliers', 0)
                 existing.similar_compounds = similar_compounds

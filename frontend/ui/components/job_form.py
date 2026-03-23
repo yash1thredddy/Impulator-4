@@ -8,6 +8,7 @@ import logging
 from typing import Dict, List, Optional
 
 import streamlit as st
+import streamlit.components.v1 as st_components
 
 from frontend.services import get_api_client
 from frontend.config.settings import config
@@ -25,6 +26,236 @@ from frontend.ui.components.availability_dialog import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@st.dialog("Molecule Structure", width="large")
+def _show_expanded_molecule(smiles: str) -> None:
+    """Show an expanded molecule view in a Streamlit dialog with atom numbers."""
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import Descriptors, rdMolDescriptors
+        from rdkit.Chem.Draw import rdMolDraw2D
+
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            st.error("Invalid SMILES — cannot render")
+            return
+
+        drawer = rdMolDraw2D.MolDraw2DSVG(700, 450)
+        opts = drawer.drawOptions()
+        opts.addAtomIndices = True
+        drawer.DrawMolecule(mol)
+        drawer.FinishDrawing()
+        svg = drawer.GetDrawingText()
+
+        st.markdown(
+            f'<div style="display:flex;justify-content:center;background:#fff;'
+            f'border-radius:8px;padding:12px;">{svg}</div>',
+            unsafe_allow_html=True,
+        )
+
+        isomeric = Chem.MolToSmiles(mol, isomericSmiles=True)
+
+        formula = rdMolDescriptors.CalcMolFormula(mol)
+        mw = Descriptors.ExactMolWt(mol)
+        atoms = mol.GetNumAtoms()
+        bonds = mol.GetNumBonds()
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Formula", formula)
+        c2.metric("Mol. Weight", f"{mw:.2f}")
+        c3.metric("Atoms", atoms)
+        c4.metric("Bonds", bonds)
+
+        st.markdown("**Isomeric SMILES**")
+        st.code(isomeric, language=None)
+
+    except ImportError:
+        st.warning("RDKit not available for expanded view")
+    except Exception as e:
+        st.error(f"Render error: {e}")
+
+
+def _get_mol_info(structure_input: str, input_type: str) -> dict | None:
+    """Compute molecular properties from valid input. Returns None if invalid.
+
+    Handles SMILES directly and InChI via RDKit conversion.
+    InChIKey requires PubChem lookup (not done here — handled on submit).
+    """
+    if not structure_input or not structure_input.strip():
+        return None
+
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import Descriptors, rdMolDescriptors
+
+        val = structure_input.strip()
+        if input_type == "SMILES":
+            mol = Chem.MolFromSmiles(val)
+            smiles = val
+        elif input_type == "InChI":
+            mol = Chem.MolFromInchi(val)
+            smiles = Chem.MolToSmiles(mol) if mol else None
+        elif input_type == "InChIKey":
+            # Resolve via PubChem (cached by backend client)
+            client = get_api_client()
+            smiles = client.resolve_inchikey_to_smiles(val)
+            mol = Chem.MolFromSmiles(smiles) if smiles else None
+        else:
+            return None
+
+        if mol is None:
+            return None
+        return {
+            "smiles": smiles,
+            "isomeric": Chem.MolToSmiles(mol, isomericSmiles=True),
+            "formula": rdMolDescriptors.CalcMolFormula(mol),
+            "mw": Descriptors.ExactMolWt(mol),
+            "atoms": mol.GetNumAtoms(),
+            "bonds": mol.GetNumBonds(),
+        }
+    except Exception:
+        return None
+
+
+def _render_live_preview(input_type: str, resolved_smiles: str = "") -> None:
+    """Render real-time 2D molecule preview using OpenChemLib JS.
+
+    For SMILES input: polls textarea and renders in real-time.
+    For InChI input: uses pre-resolved SMILES from server-side RDKit.
+    """
+    st_components.html(
+        f"""
+        <style>
+            * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+            body {{ background: transparent; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }}
+            #mol-container {{ background: #fff; border-radius: 8px; padding: 8px; }}
+            #mol-svg {{ display: flex; justify-content: center; align-items: center;
+                min-height: 200px; }}
+            #mol-svg svg {{ display: block; max-width: 100%; }}
+            #status {{ text-align: center; color: #888; font-size: 12px; padding: 4px 0; }}
+            .loading {{ color: #999; font-size: 12px; }}
+        </style>
+        <div id="mol-container">
+            <div id="mol-svg"><span class="loading">Loading OpenChemLib...</span></div>
+        </div>
+        <div id="status"></div>
+        <script src="https://unpkg.com/openchemlib@8.18.0/dist/openchemlib-full.js"></script>
+        <script>
+        (function() {{
+            var parentDoc = window.parent.document;
+            var svgEl = document.getElementById('mol-svg');
+            var statusEl = document.getElementById('status');
+            var lastValue = '';
+            var inputType = '{input_type}';
+            var resolvedSmiles = '{resolved_smiles}';
+            var OCL = window.OCL;
+
+            function setText(el, text) {{ el.textContent = text; }}
+
+            function renderMol(smiles) {{
+                if (!smiles || !OCL) return false;
+                try {{
+                    var mol = OCL.Molecule.fromSmiles(smiles);
+                    var svgStr = mol.toSVG(244, 244, null, {{
+                        autoCrop: true,
+                        autoCropMargin: 15,
+                        suppressChiralText: true,
+                        noImplicitAtomLabelColors: false,
+                        showAtomNumber: false
+                    }});
+                    var parser = new DOMParser();
+                    var doc = parser.parseFromString(svgStr, 'image/svg+xml');
+                    svgEl.replaceChildren(doc.documentElement);
+                    setText(statusEl, '');
+                    return true;
+                }} catch(e) {{
+                    svgEl.replaceChildren();
+                    setText(statusEl, 'Invalid structure');
+                    return false;
+                }}
+            }}
+
+            // InChIKey → SMILES via PubChem (client-side fetch, no rerun)
+            var ikCache = {{}};
+            var ikPending = null;
+            function resolveInChIKey(key) {{
+                // Validate format: 14-10-1 uppercase letters with dashes
+                if (!/^[A-Z]{{14}}-[A-Z]{{10}}-[A-Z]$/.test(key)) {{
+                    setText(statusEl, 'Invalid InChIKey format');
+                    return;
+                }}
+                if (ikCache[key]) {{ renderMol(ikCache[key]); return; }}
+                if (ikPending === key) return; // already fetching
+                ikPending = key;
+                setText(statusEl, 'Looking up InChIKey...');
+                fetch('https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/inchikey/' +
+                    encodeURIComponent(key) + '/property/ConnectivitySMILES/JSON')
+                    .then(function(r) {{ return r.json(); }})
+                    .then(function(data) {{
+                        ikPending = null;
+                        var props = data && data.PropertyTable && data.PropertyTable.Properties;
+                        var p = props && props[0];
+                        var smi = p && (p.ConnectivitySMILES || p.SMILES || p.IsomericSMILES || p.CanonicalSMILES);
+                        if (smi) {{
+                            ikCache[key] = smi;
+                            renderMol(smi);
+                        }} else {{
+                            setText(statusEl, 'InChIKey not found in PubChem');
+                        }}
+                    }})
+                    .catch(function() {{
+                        ikPending = null;
+                        setText(statusEl, 'PubChem lookup failed');
+                    }});
+            }}
+
+            function findTextarea() {{
+                var areas = parentDoc.querySelectorAll('textarea[aria-label]');
+                for (var i = 0; i < areas.length; i++) {{
+                    var label = areas[i].getAttribute('aria-label') || '';
+                    if (label.indexOf('SMILES') !== -1 || label.indexOf('InChI') !== -1) return areas[i];
+                }}
+                return null;
+            }}
+
+            function poll() {{
+                var ta = findTextarea();
+                if (!ta) {{ setTimeout(poll, 300); return; }}
+                var val = ta.value || '';
+                if (val !== lastValue) {{
+                    lastValue = val;
+                    if (!val.trim()) {{
+                        svgEl.replaceChildren();
+                        setText(statusEl, 'Enter a structure to preview');
+                    }} else if (inputType === 'SMILES') {{
+                        renderMol(val.trim());
+                    }} else if (inputType === 'InChIKey') {{
+                        resolveInChIKey(val.trim());
+                    }} else if (resolvedSmiles) {{
+                        renderMol(resolvedSmiles);
+                    }} else {{
+                        setText(statusEl, 'Enter a valid structure');
+                    }}
+                }}
+                setTimeout(poll, 300);
+            }}
+
+            if (OCL) {{
+                svgEl.replaceChildren();
+                if (resolvedSmiles) {{
+                    renderMol(resolvedSmiles);
+                }} else {{
+                    setText(statusEl, 'Enter a structure to preview');
+                }}
+                poll();
+            }} else {{
+                setText(statusEl, 'Failed to load OpenChemLib');
+            }}
+        }})();
+        </script>
+        """,
+        height=240,
+    )
 
 
 def render_job_form() -> Optional[str]:
@@ -105,50 +336,71 @@ def render_job_form() -> Optional[str]:
                     author_name=author_name,
                 )
 
-    # --- Structure input OUTSIDE form (reactive validation) ---
-    st.subheader("Compound Information")
+    # --- Structure input + live preview side by side ---
+    input_col, preview_col = st.columns([1, 1])
 
-    # Input type selection
-    input_type = st.radio(
-        "Structure Input Type",
-        ["SMILES", "InChI", "InChIKey"],
-        horizontal=True,
-        help="Choose the format of your chemical structure input"
-    )
+    with input_col:
+        st.subheader("Compound Information")
 
-    # Structure input
-    if input_type == "SMILES":
-        structure_input = st.text_area(
-            "SMILES String",
-            height=80,
-            placeholder="e.g., CC(=O)OC1=CC=CC=C1C(=O)O (Aspirin)",
-            help="Simplified Molecular Input Line Entry System notation"
-        )
-    elif input_type == "InChI":
-        structure_input = st.text_area(
-            "InChI String",
-            height=80,
-            placeholder="e.g., InChI=1S/C9H8O4/c1-6(10)13-8-5-3-2-4-7(8)9(11)12/h2-5H,1H3,(H,11,12)",
-            help="International Chemical Identifier"
-        )
-    else:  # InChIKey
-        structure_input = st.text_area(
-            "InChIKey String",
-            height=80,
-            placeholder="e.g., BSYNRYMUTXBXSQ-UHFFFAOYSA-N (Aspirin)",
-            help="27-character International Chemical Identifier Key"
+        # Input type selection
+        input_type = st.radio(
+            "Structure Input Type",
+            ["SMILES", "InChI", "InChIKey"],
+            horizontal=True,
+            help="Choose the format of your chemical structure input"
         )
 
-    # Inline validation feedback for structure input
-    if structure_input and structure_input.strip():
+        # Structure input
         if input_type == "SMILES":
-            val_result = InputValidator.validate_smiles(structure_input)
+            structure_input = st.text_area(
+                "SMILES String",
+                height=80,
+                placeholder="e.g., CC(=O)OC1=CC=CC=C1C(=O)O (Aspirin)",
+                help="Simplified Molecular Input Line Entry System notation"
+            )
         elif input_type == "InChI":
-            val_result = InputValidator.validate_inchi(structure_input)
-        else:
-            val_result = InputValidator.validate_inchi_key(structure_input)
-        if not val_result.is_valid:
-            st.error(f"Invalid {input_type}: {val_result.errors[0]}")
+            structure_input = st.text_area(
+                "InChI String",
+                height=80,
+                placeholder="e.g., InChI=1S/C9H8O4/c1-6(10)13-8-5-3-2-4-7(8)9(11)12/h2-5H,1H3,(H,11,12)",
+                help="International Chemical Identifier"
+            )
+        else:  # InChIKey
+            structure_input = st.text_area(
+                "InChIKey String",
+                height=80,
+                placeholder="e.g., BSYNRYMUTXBXSQ-UHFFFAOYSA-N (Aspirin)",
+                help="27-character International Chemical Identifier Key"
+            )
+
+        # Inline validation feedback for structure input
+        if structure_input and structure_input.strip():
+            if input_type == "SMILES":
+                val_result = InputValidator.validate_smiles(structure_input)
+            elif input_type == "InChI":
+                val_result = InputValidator.validate_inchi(structure_input)
+            else:
+                val_result = InputValidator.validate_inchi_key(structure_input)
+            if not val_result.is_valid:
+                st.error(f"Invalid {input_type}: {val_result.errors[0]}")
+
+    with preview_col:
+        mol_info = _get_mol_info(structure_input, input_type)
+
+        # Header row: Live Preview + MW + Formula + Expand
+        header_cols = st.columns([2, 1, 1, 1])
+        header_cols[0].subheader("Live Preview")
+        if mol_info:
+            header_cols[1].metric("MW", f"{mol_info['mw']:.2f}")
+            header_cols[2].metric("Formula", mol_info['formula'])
+            with header_cols[3]:
+                st.write("")  # spacer to align with metrics
+                if st.button("⛶ Expand", key="expand_mol_btn", type="primary", use_container_width=True):
+                    _show_expanded_molecule(mol_info['smiles'])
+
+        # Pass resolved SMILES for InChI so OCL can render it
+        resolved_smiles = mol_info['smiles'] if mol_info and input_type != "SMILES" else ""
+        _render_live_preview(input_type, resolved_smiles)
 
     # --- Configuration section ---
     st.subheader("Analysis Configuration")

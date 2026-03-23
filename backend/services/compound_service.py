@@ -568,7 +568,7 @@ def _save_results_inner(
         'author_name': author_name or 'N/A',
         'query_smiles': smiles,
         'similarity_threshold': similarity_threshold,
-        'activity_types': ','.join(activity_types or []),
+        'activity_types': ','.join(activity_types) if activity_types else 'AC50,EC50,GI50,IC50,Kd,Ki,MIC',
         'processing_date': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
         'total_compounds': df_results['ChEMBL_ID'].nunique() if 'ChEMBL_ID' in df_results.columns else 0,
         'total_bioactivity_rows': len(df_results),
@@ -1236,7 +1236,9 @@ from backend.models.schemas import (  # noqa: E402 -- deferred to avoid circular
     CompoundDeleteResponse,
     BatchDeleteResponse,
 )
-from sqlalchemy.orm import Session  # noqa: E402 -- deferred to avoid circular imports
+from sqlalchemy import select  # noqa: E402 -- deferred to avoid circular imports
+from sqlalchemy.orm import Session  # noqa: E402
+from backend.models.compound import Compound  # noqa: E402
 
 
 def get_compound_versions(db: Session, entry_id: str) -> dict:
@@ -1393,17 +1395,31 @@ def batch_delete_with_cleanup(
             seen.add(eid)
             unique_entry_ids.append(eid)
 
-    # DB mutations
+    # Sort: delete children (parent_id not None) before parents to avoid FK violations.
+    # Fetch all compounds first, then sort by dependency.
+    compounds_to_delete = []
     for eid in unique_entry_ids:
         compound = compound_repo.get_by_entry_id(db, eid)
-
         if not compound:
             not_found.append(eid)
             continue
+        compounds_to_delete.append(compound)
+
+    # Children first (parent_id is not None), then parents (parent_id is None)
+    compounds_to_delete.sort(key=lambda c: (c.parent_id is None, c.compound_name))
+
+    for compound in compounds_to_delete:
+        eid = compound.entry_id
+        # Reparent any remaining children of this compound before deleting
+        children = db.scalars(
+            select(Compound).where(Compound.parent_id == eid)
+        ).all()
+        for child in children:
+            child.parent_id = compound.parent_id  # Point to grandparent or None
+        if children:
+            db.flush()
 
         compound_name = compound.compound_name
-
-        # Child reparenting handled by Postgres trigger (trg_reparent_on_delete)
 
         # Archive to deleted_compounds
         compound_repo.archive_compound(

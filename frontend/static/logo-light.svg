@@ -1,0 +1,52 @@
+<svg width="360" height="80" viewBox="0 0 360 80" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Purple gradient for valid hexagon -->
+    <linearGradient id="validGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#764ba2"/>
+      <stop offset="50%" stop-color="#667eea"/>
+      <stop offset="100%" stop-color="#5a67d8"/>
+    </linearGradient>
+    <!-- Gray gradient for invalid/imposter hexagon -->
+    <linearGradient id="invalidGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6B7280"/>
+      <stop offset="50%" stop-color="#9CA3AF"/>
+      <stop offset="100%" stop-color="#4B5563"/>
+    </linearGradient>
+    <!-- Purple shadow for depth -->
+    <linearGradient id="validShadow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4C3F91"/>
+      <stop offset="100%" stop-color="#5a67d8"/>
+    </linearGradient>
+    <linearGradient id="invalidShadow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#374151"/>
+      <stop offset="100%" stop-color="#6B7280"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Interlocking hexagons icon -->
+  <g transform="translate(8, 8)">
+    <!-- Left hexagon (valid compound) - back face -->
+    <path d="M22 4 L42 4 L52 18 L52 38 L42 52 L22 52 L12 38 L12 18 Z" fill="url(#validGrad)"/>
+    <!-- Left hexagon depth/3D edge -->
+    <path d="M12 18 L22 4 L22 12 L14 22 Z" fill="url(#validShadow)" opacity="0.7"/>
+    <path d="M12 38 L12 18 L14 22 L14 36 Z" fill="url(#validShadow)" opacity="0.5"/>
+
+    <!-- Right hexagon (imposter) - overlapping -->
+    <path d="M38 12 L58 12 L68 26 L68 46 L58 60 L38 60 L28 46 L28 26 Z" fill="url(#invalidGrad)"/>
+    <!-- Right hexagon depth/3D edge -->
+    <path d="M68 26 L58 12 L60 16 L68 26 Z" fill="url(#invalidShadow)" opacity="0.6"/>
+    <!-- Crack/break line on imposter -->
+    <line x1="48" y1="20" x2="46" y2="40" stroke="#1F2937" stroke-width="1.2" opacity="0.4"/>
+    <line x1="46" y1="40" x2="50" y2="52" stroke="#1F2937" stroke-width="1.2" opacity="0.4"/>
+  </g>
+
+  <!-- Text -->
+  <text x="90" y="48" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="34" font-weight="800" letter-spacing="-0.5">
+    <tspan fill="#5B21B6">IMP</tspan><tspan fill="#1F2937">ULATOR</tspan>
+  </text>
+
+  <!-- Subtitle -->
+  <text x="91" y="66" font-family="Inter, -apple-system, BlinkMacSystemFont, sans-serif" font-size="11" font-weight="400" fill="#6B7280" letter-spacing="0.5">
+    Identify Invalid Metabolic Panaceas
+  </text>
+</svg>

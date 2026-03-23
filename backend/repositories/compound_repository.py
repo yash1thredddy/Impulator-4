@@ -66,8 +66,20 @@ class CompoundRepository:
         """
         # Self-join to resolve parent compound name
         parent = aliased(Compound, name="parent")
+        # Correlated subquery: count siblings sharing the same structure key
+        sibling = aliased(Compound, name="sibling")
+        version_count_sub = (
+            select(func.count(sibling.entry_id))
+            .where(
+                sibling.inchikey_structure_key == Compound.inchikey_structure_key,
+                sibling.inchikey_structure_key.isnot(None),
+            )
+            .correlate(Compound)
+            .scalar_subquery()
+            .label("version_count")
+        )
         base = (
-            select(Compound, parent.compound_name.label("parent_name"))
+            select(Compound, parent.compound_name.label("parent_name"), version_count_sub)
             .outerjoin(parent, Compound.parent_id == parent.entry_id)
         )
 
@@ -117,7 +129,7 @@ class CompoundRepository:
             return [], 0
 
         total = rows[0]._total
-        compounds = [(row[0], row[1]) for row in rows]  # (Compound, parent_name)
+        compounds = [(row[0], row[1], row[2]) for row in rows]  # (Compound, parent_name, version_count)
         return compounds, total
 
     def get_versions(

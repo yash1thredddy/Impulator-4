@@ -15,18 +15,16 @@ logger = logging.getLogger(__name__)
 
 def render_analyze_page() -> None:
     """Render the analyze page with job submission form."""
-    # Header with back button
-    col1, col2 = st.columns([1, 4])
+    if st.button("⬅ Back", key="analyze_back_btn"):
+        SessionState.navigate_to_home()
+        st.rerun()
 
-    with col1:
-        if st.button("⬅ Back", key="analyze_back_btn", width='stretch'):
-            SessionState.navigate_to_home()
-            st.rerun()
-
-    with col2:
-        st.title("New Analysis")
-
-    st.caption("Submit a compound for IMP analysis")
+    st.markdown(
+        "<h1 style='text-align:center;margin:-1rem 0 0 0;padding:0;'>New Analysis</h1>"
+        "<p style='text-align:center;color:#888;font-size:14px;margin:0 0 4px 0;'>"
+        "Submit a compound for IMP analysis</p>",
+        unsafe_allow_html=True,
+    )
 
     # Tabs for single vs batch
     tab1, tab2 = st.tabs(["Single Compound", "Batch Upload"])
@@ -46,12 +44,12 @@ def render_single_analysis() -> None:
 
     job_id = render_job_form()
 
-    # If a new job was submitted, store it in session state
+    # If a new job was submitted, store it in session state and rerun
+    # so the sidebar fragment picks up the polling flag immediately
     if job_id:
         SessionState.set('just_submitted_job', True)
         SessionState.set('last_submitted_job_id', job_id)
-        just_submitted = True
-        last_job_id = job_id
+        st.rerun()
 
     if just_submitted and last_job_id:
         # Job submitted successfully

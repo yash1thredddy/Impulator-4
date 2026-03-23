@@ -71,6 +71,7 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "", select_
     entry_id = compound.get('entry_id', '')  # Unique identifier for key generation
     smiles = compound.get('smiles', '')
     is_duplicate = compound.get('is_duplicate', False)
+    version_count = compound.get('version_count', 1)
 
     # Optional fields from metadata
     chembl_id = compound.get('chembl_id', '')
@@ -100,21 +101,12 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "", select_
                 label_visibility="collapsed",
             )
 
-        # Compound name (CSS ellipsis) with DUPLICATE badge stacked below
-        dup_tag = ""
-        if is_duplicate:
-            dup_tag = (
-                "<span style='display: inline-block; background: #ff6b35; color: white; "
-                "padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; "
-                "margin-top: 2px;'>DUPLICATE</span>"
-            )
-
+        # Compound name (clean, no badge — badge moves to ChEMBL line)
         st.markdown(
             f"<div style='text-align: center; margin: 0 0 10px 0;' title='{safe_compound_name}'>"
             f"<div style='font-size: clamp(0.9rem, 2.5vw, 1.4rem); font-weight: 600; "
             f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;'>"
-            f"{safe_compound_name}</div>"
-            f"{dup_tag}</div>",
+            f"{safe_compound_name}</div></div>",
             unsafe_allow_html=True
         )
 
@@ -129,12 +121,35 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "", select_
                 unsafe_allow_html=True
             )
 
-        # ChEMBL ID if available
+        # ChEMBL ID + optional DUPLICATE badge (right corner)
+        dup_badge = ""
+        if is_duplicate:
+            dup_badge = (
+                "<span style='background: #ff6b35; color: white; "
+                "padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 600; "
+                "letter-spacing: 0.5px;'>DUPLICATE</span>"
+            )
+        elif version_count > 1:
+            dup_badge = (
+                f"<span style='background: #667eea; color: white; "
+                f"padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 600; "
+                f"letter-spacing: 0.5px;'>{version_count} VERSIONS</span>"
+            )
         if chembl_id and str(chembl_id) != 'nan':
             safe_chembl_id = html.escape(str(chembl_id))
-            st.markdown(f"<p style='color: #888; font-size: 14px; margin: 8px 0;'>ChEMBL: {safe_chembl_id}</p>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div style='display: flex; justify-content: space-between; align-items: center; "
+                f"margin: 8px 0;'>"
+                f"<span style='color: var(--text-color); opacity: 0.5; font-size: 14px;'>ChEMBL: {safe_chembl_id}</span>"
+                f"{dup_badge}</div>",
+                unsafe_allow_html=True
+            )
         else:
-            st.markdown("<p style='margin: 8px 0;'>&nbsp;</p>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div style='display: flex; justify-content: flex-end; margin: 8px 0; min-height: 1.2rem;'>"
+                f"{dup_badge}</div>",
+                unsafe_allow_html=True
+            )
 
         # Stats using HTML flexbox for consistent layout
         # Escape all values for XSS prevention

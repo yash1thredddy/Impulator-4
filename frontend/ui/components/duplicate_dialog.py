@@ -11,6 +11,7 @@ via session_state (not return values) because @st.dialog functions cannot
 return values to the caller.
 """
 
+import html
 import logging
 from datetime import datetime
 from typing import Optional
@@ -87,64 +88,98 @@ def _render_match_details(
     is_identical_config: bool,
     config_diff: Optional[dict],
 ) -> None:
-    """Render compact match details in 3 aligned lines."""
+    """Render clear, visually distinct match details with side-by-side comparison."""
     existing_name = existing.get("compound_name", "Unknown")
     submitted_name = submitted.get("compound_name", "Unknown")
     processed_at = _format_processed_datetime(existing.get("processed_at"))
     author_name = (existing.get("author_name") or "Unknown").strip()
     existing_threshold = existing.get("similarity_threshold", 90)
-    existing_activities = existing.get("activity_types") or "N/A"
+    submitted_threshold = submitted.get("similarity_threshold", 90)
 
-    # Header + config status
-    st.markdown("**Match Details**")
+    # Normalize activity types for display
+    existing_act = existing.get("activity_types") or []
+    if isinstance(existing_act, str):
+        existing_act = [a.strip() for a in existing_act.split(",") if a.strip()]
+    submitted_act = submitted.get("activity_types") or []
+    if isinstance(submitted_act, str):
+        submitted_act = [a.strip() for a in submitted_act.split(",") if a.strip()]
+
+    _ = config_diff  # consumed via direct comparison below
+
+    # Clear comparison table — designed for readability (large text, obvious colors)
+    existing_act_str = ", ".join(sorted(existing_act)) if existing_act else "All types (default)"
+    submitted_act_str = ", ".join(sorted(submitted_act)) if submitted_act else "All types (default)"
+
+    threshold_same = existing_threshold == submitted_threshold
+    activities_same = set(existing_act) == set(submitted_act)
+
+    # Build HTML table with clear color coding
+    threshold_existing_style = ""
+    threshold_submitted_style = ""
+    act_existing_style = ""
+    act_submitted_style = ""
+
+    if not threshold_same:
+        threshold_existing_style = "color: #d32f2f; text-decoration: line-through;"
+        threshold_submitted_style = "color: #2e7d32; font-weight: bold;"
+    if not activities_same:
+        act_existing_style = "color: #d32f2f;"
+        act_submitted_style = "color: #2e7d32; font-weight: bold;"
+
+    table_html = f"""
+    <table style="width: 100%; border-collapse: collapse; font-size: 16px; margin: 10px 0;">
+        <thead>
+            <tr style="border-bottom: 2px solid var(--text-color); opacity: 0.8;">
+                <th style="text-align: left; padding: 8px 12px; width: 30%;"></th>
+                <th style="text-align: left; padding: 8px 12px; width: 35%; color: #1565c0;">
+                    📋 Existing Analysis</th>
+                <th style="text-align: left; padding: 8px 12px; width: 35%; color: #e65100;">
+                    🆕 Your Submission</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr style="border-bottom: 1px solid var(--secondary-background-color);">
+                <td style="padding: 8px 12px; font-weight: 600;">Threshold</td>
+                <td style="padding: 8px 12px; {threshold_existing_style}">{existing_threshold}%</td>
+                <td style="padding: 8px 12px; {threshold_submitted_style}">{submitted_threshold}%
+                    {'<span style="color: #2e7d32;"> ✓ same</span>' if threshold_same else ' <span style="color: #e65100;">← changed</span>'}</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--secondary-background-color);">
+                <td style="padding: 8px 12px; font-weight: 600;">Activity Types</td>
+                <td style="padding: 8px 12px; {act_existing_style}">{html.escape(existing_act_str)}</td>
+                <td style="padding: 8px 12px; {act_submitted_style}">{html.escape(submitted_act_str)}
+                    {'<span style="color: #2e7d32;"> ✓ same</span>' if activities_same else ' <span style="color: #e65100;">← changed</span>'}</td>
+            </tr>
+            <tr>
+                <td style="padding: 8px 12px; font-weight: 600;">Author</td>
+                <td style="padding: 8px 12px;">{html.escape(author_name)}</td>
+                <td style="padding: 8px 12px; color: var(--text-color); opacity: 0.5;">You</td>
+            </tr>
+            <tr>
+                <td style="padding: 8px 12px; font-weight: 600;">Processed</td>
+                <td style="padding: 8px 12px;">{processed_at}</td>
+                <td style="padding: 8px 12px; color: var(--text-color); opacity: 0.5;">Now</td>
+            </tr>
+        </tbody>
+    </table>
+    """
+    st.markdown(table_html, unsafe_allow_html=True)
+
+    # Clear summary
     if is_identical_config:
-        st.info(
-            f"Same threshold ({existing_threshold}%) and activity types — results would be identical.",
-            icon="ℹ️",
-        )
+        st.info("Same configuration — reprocessing would produce identical results.", icon="ℹ️")
     else:
-        # Use suggestion-style info note for config differences.
-        if config_match == "different_threshold":
-            note_text = "Different threshold selected — results may differ from the existing analysis."
-        elif config_match == "different_activities":
-            note_text = "Different activity types selected — results may differ from the existing analysis."
-        elif config_match == "different_both":
-            note_text = "Threshold and activity types differ — results will likely differ."
-        else:
-            note_text = "Configuration differs from the existing analysis — results may differ."
-        st.info(note_text, icon="ℹ️")
-
-    # Row 1: match sentence
-    if dup_type == "exact":
-        st.caption(f"`{submitted_name}` matches `{existing_name}` by name and structure.")
-    else:
-        st.caption(f"`{submitted_name}` shares structure with `{existing_name}`.")
-
-    # Row 2: existing config + activity types
-    row2_left, row2_right = st.columns(2, gap="medium")
-    with row2_left:
-        st.caption(f"Existing config: threshold {existing_threshold}%")
-    with row2_right:
-        st.caption(f"Activity types: `{existing_activities}`")
-
-    # Row 3: allowed actions + processed info
-    row3_left, row3_right = st.columns(2, gap="medium")
-    with row3_left:
-        st.caption(f"Allowed actions: {_get_allowed_actions_text(dup_type, is_identical_config)}")
-    with row3_right:
-        st.caption(f"Processed: {processed_at} by {author_name}")
-
-    # Optional concise diff details for non-identical configs.
-    if not is_identical_config and config_diff:
-        threshold = config_diff.get("similarity_threshold", {})
-        activities = config_diff.get("activity_types", {})
-        parts = []
-        if threshold:
-            parts.append(f"threshold {threshold.get('existing')}% -> {threshold.get('submitted')}%")
-        if activities:
-            parts.append(f"activity types `{activities.get('existing')}` -> `{activities.get('submitted')}`")
-        if parts:
-            st.caption("Submitted vs existing: " + " | ".join(parts))
+        changes = []
+        if not threshold_same:
+            changes.append(f"threshold ({existing_threshold}% → {submitted_threshold}%)")
+        if not activities_same:
+            added = set(submitted_act) - set(existing_act)
+            removed = set(existing_act) - set(submitted_act)
+            if added:
+                changes.append(f"added types: {', '.join(sorted(added))}")
+            if removed:
+                changes.append(f"removed types: {', '.join(sorted(removed))}")
+        st.warning(f"Configuration differs: {'; '.join(changes)}. Results will differ.", icon="⚠️")
 
 
 @st.dialog("Duplicate Compound Found", width="large")
@@ -171,11 +206,64 @@ def duplicate_dialog(duplicate_info: dict):
 
     existing_name = existing.get("compound_name", "Unknown")
     submitted_name = submitted.get("compound_name", "Unknown")
-    # Get suggested name from backend (calculates next available version, e.g., _v3 if _v2 exists)
     suggested_name = duplicate_info.get("suggested_name", f"{existing_name}_v2")
-
     is_identical_config = config_match == "identical"
 
+    # ─── CONFIRMATION MODE ───────────────────────────────────────────
+    # If user already clicked Continue, show ONLY the compact confirmation
+    confirm_key = "_dup_confirm_step"
+    if st.session_state.get(confirm_key, False):
+        pending_action = st.session_state.get("_dup_pending_action", "")
+        pending_new_name = st.session_state.get("_dup_pending_new_name")
+
+        if pending_action == "replace":
+            st.error(
+                f"**⚠️ Replace** will permanently delete **{existing_name}** "
+                f"and reprocess with your new configuration. "
+                f"Existing results will be **lost**."
+            )
+            confirm_btn_text = "🔴 Yes, Replace"
+        elif pending_action in ("change_name", "duplicate"):
+            display_name = pending_new_name or suggested_name
+            st.success(
+                f"**✅ Keep Both** — Save as **{display_name}** "
+                f"alongside existing **{existing_name}**."
+            )
+            confirm_btn_text = "✅ Yes, Keep Both"
+        elif pending_action == "skip":
+            st.info(
+                f"**Skip** — **{submitted_name}** will not be processed. "
+                f"Nothing changes."
+            )
+            confirm_btn_text = "Skip"
+        else:
+            confirm_btn_text = "Confirm"
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("← Go Back", width="stretch", key="dup_go_back"):
+                st.session_state[confirm_key] = False
+                st.rerun(scope="fragment")
+        with c2:
+            if st.button(confirm_btn_text, type="primary", width="stretch", key="dup_final_confirm"):
+                st.session_state.pop(confirm_key, None)
+                final_action = pending_action
+                st.session_state.pop("_dup_pending_action", None)
+                st.session_state.pop("_dup_pending_new_name", None)
+                if final_action == "change_name":
+                    st.session_state[DUPLICATE_RESULT_KEY] = {
+                        "action": "duplicate",
+                        "new_name": (pending_new_name or "").strip(),
+                    }
+                else:
+                    st.session_state[DUPLICATE_RESULT_KEY] = {
+                        "action": final_action,
+                        "new_name": pending_new_name,
+                    }
+                st.rerun()
+        return  # Don't render the full details below
+
+    # ─── MAIN DIALOG CONTENT ─────────────────────────────────────────
     # Header based on config match
     if is_identical_config:
         st.warning("**Exact Duplicate Found**")
@@ -245,14 +333,15 @@ def duplicate_dialog(duplicate_info: dict):
         new_name = None
 
     else:
-        # Different config: allow all three options
+        # Different config: allow all three options — default to "Keep both" (safest)
         if dup_type == "exact":
             action = st.radio(
                 "Choose an action:",
-                options=["replace", "change_name", "skip"],
+                options=["change_name", "replace", "skip"],
+                index=0,  # Default: Keep both (safest)
                 format_func=lambda x: {
-                    "replace": "Replace existing (reprocess with new config)",
-                    "change_name": "Keep both (save as separate analysis)",
+                    "change_name": "✅ Keep both (save as separate analysis)",
+                    "replace": "⚠️ Replace existing (reprocess with new config — overwrites!)",
                     "skip": "Skip (don't process)",
                 }.get(x, x),
                 key="duplicate_action_exact",
@@ -273,13 +362,14 @@ def duplicate_dialog(duplicate_info: dict):
                     new_name = None
 
         else:
-            # Structure-only + different config: full options
+            # Structure-only + different config: full options — default to "Keep both"
             action = st.radio(
                 "Choose an action:",
-                options=["replace", "duplicate", "skip"],
+                options=["duplicate", "replace", "skip"],
+                index=0,  # Default: Keep both (safest)
                 format_func=lambda x: {
-                    "replace": f"Replace existing '{existing_name}' (reprocess with new config)",
-                    "duplicate": f"Keep both (save as separate analysis of {existing_name})",
+                    "duplicate": f"✅ Keep both (save as separate analysis of {existing_name})",
+                    "replace": f"⚠️ Replace existing '{existing_name}' (overwrites!)",
                     "skip": "Skip (don't process)",
                 }.get(x, x),
                 key="duplicate_action_structure",
@@ -289,35 +379,21 @@ def duplicate_dialog(duplicate_info: dict):
 
     st.divider()
 
-    # Action buttons
+    # Action buttons — Continue goes to confirmation (rendered at top of dialog on next render)
     col1, col2 = st.columns(2)
-
     with col1:
         if st.button("Cancel", width="stretch", key="duplicate_cancel"):
-            st.session_state[DUPLICATE_RESULT_KEY] = {
-                "action": "cancel",
-                "new_name": None,
-            }
+            st.session_state[DUPLICATE_RESULT_KEY] = {"action": "cancel", "new_name": None}
             st.rerun()
-
     with col2:
-        if st.button("Continue", type="primary", width="stretch", key="duplicate_continue"):
-            # Map change_name to duplicate action with new name
-            if action == "change_name":
-                if new_name and new_name.strip():
-                    st.session_state[DUPLICATE_RESULT_KEY] = {
-                        "action": "duplicate",
-                        "new_name": new_name.strip(),
-                    }
-                    st.rerun()
-                else:
-                    st.error("Please enter a valid name")
-            else:
-                st.session_state[DUPLICATE_RESULT_KEY] = {
-                    "action": action,
-                    "new_name": new_name,
-                }
-                st.rerun()
+        can_continue = True
+        if action == "change_name" and (not new_name or not new_name.strip()):
+            can_continue = False
+        if st.button("Continue →", type="primary", width="stretch", key="duplicate_continue", disabled=not can_continue):
+            st.session_state["_dup_confirm_step"] = True
+            st.session_state["_dup_pending_action"] = action
+            st.session_state["_dup_pending_new_name"] = new_name
+            st.rerun(scope="fragment")
 
 
 def clear_duplicate_dialog_state():

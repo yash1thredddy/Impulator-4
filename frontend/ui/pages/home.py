@@ -12,6 +12,7 @@ import logging
 from typing import Optional, List, Dict, Any
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from frontend.services import get_api_client, get_compounds_cached
 from frontend.utils import SessionState
@@ -20,10 +21,102 @@ from frontend.ui.components import render_compound_grid, render_compound_list
 logger = logging.getLogger(__name__)
 
 
+@st.cache_data
+def _load_logo_b64(filename: str) -> str | None:
+    """Load and cache base64-encoded logo PNG."""
+    from pathlib import Path
+    import base64
+    path = Path("frontend/static") / filename
+    if path.exists():
+        return base64.b64encode(path.read_bytes()).decode()
+    return None
+
+
+def _render_logo():
+    """Render the IMPULATOR logo from PNG — theme-aware using CSS media query."""
+    light_b64 = _load_logo_b64("Imp_Logo_Light.png")
+    dark_b64 = _load_logo_b64("Imp_Logo_Dark.png")
+
+    if light_b64 and dark_b64:
+        # Use components.html — renders in iframe with full JS support
+        components.html(
+            f'<div style="text-align:center;margin:0;padding:0;">'
+            f'<img id="logo-light" src="data:image/png;base64,{light_b64}" '
+            f'style="height:96px;object-fit:contain;" alt="IMPULATOR">'
+            f'<img id="logo-dark" src="data:image/png;base64,{dark_b64}" '
+            f'style="height:96px;object-fit:contain;display:none;" alt="IMPULATOR">'
+            f'</div>'
+            f'<script>'
+            f'function update(){{'
+            f'  var p=window.parent.document.querySelector("[data-testid=\\"stApp\\"]");'
+            f'  if(!p)return;'
+            f'  var bg=getComputedStyle(p).backgroundColor;'
+            f'  var m=bg.match(/\\d+/g);'
+            f'  var dark=m&&(0.299*m[0]+0.587*m[1]+0.114*m[2])<128;'
+            f'  document.getElementById("logo-light").style.display=dark?"none":"block";'
+            f'  document.getElementById("logo-dark").style.display=dark?"block":"none";'
+            f'}}'
+            f'update();setInterval(update,500);'
+            f'</script>',
+            height=110,
+        )
+    elif light_b64:
+        st.markdown(
+            f'<div style="text-align: center;">'
+            f'<img src="data:image/png;base64,{light_b64}" '
+            f'style="height: 64px; object-fit: contain;" alt="IMPULATOR">'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(
+            '<div style="text-align: center;">'
+            '<span style="font-size: 32px; font-weight: 800; font-family: Inter, sans-serif;">'
+            '<span style="color: #5B21B6;">IMP</span>'
+            '<span style="color: var(--text-color);">ULATOR</span>'
+            '</span></div>',
+            unsafe_allow_html=True
+        )
+
+
 def render_home_page() -> None:
     """Render the home page with compound browser."""
-    st.title(" IMPULATOR")
-    st.caption("IMP Navigator - Identify Invalid Metabolic Panaceas")
+    # Gradient style for the New Analysis button only.
+    # WARNING: Targets Streamlit internal selectors — may break on Streamlit upgrade
+    st.markdown("""
+    <style>
+    #new-analysis-marker {
+        display: none;
+    }
+    .stElementContainer:has(#new-analysis-marker) + .stElementContainer button[kind="primary"] {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+        border: none !important;
+        font-size: 1.1rem !important;
+        font-weight: 600 !important;
+        padding: 0.65rem 1.5rem !important;
+        border-radius: 0.5rem !important;
+        color: white !important;
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    .stElementContainer:has(#new-analysis-marker) + .stElementContainer button[kind="primary"]:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    btn_col, spacer, title_col, spacer2 = st.columns([1, 1, 3, 1], vertical_alignment="center")
+    with btn_col:
+        # Hidden marker so CSS can target only this button
+        st.markdown('<span id="new-analysis-marker"></span>', unsafe_allow_html=True)
+        if st.button("+ New Analysis", type="primary", width='stretch'):
+            SessionState.navigate_to_analyze()
+            st.rerun()
+    with title_col:
+        # 3D interlocking hexagons logo — matching Recraft design
+        _render_logo()
+
+    st.subheader("Available Analyses")
 
     # Search and filter section
     render_search_section()
@@ -36,7 +129,7 @@ def render_home_page() -> None:
 
 def render_search_section() -> None:
     """Render the search and filter controls."""
-    col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
+    col1, col2, col3 = st.columns([4, 1, 1])
 
     with col1:
         search_query = st.text_input(
@@ -67,11 +160,6 @@ def render_search_section() -> None:
             label_visibility="hidden"
         )
         SessionState.set('compound_view_mode', view_mode)
-
-    with col4:
-        if st.button("+ New Analysis", type="primary", width='stretch'):
-            SessionState.navigate_to_analyze()
-            st.rerun()
 
 
 def render_compound_browser() -> None:
@@ -139,6 +227,8 @@ def render_compound_browser() -> None:
         if entry_id:
             st.query_params["compound_id"] = entry_id
             st.query_params["tab"] = "overview"
+            # Mark as already applied so app.py deep link doesn't re-trigger with UUID
+            SessionState.set('_last_deep_link_id', entry_id)
         st.rerun()
 
 
@@ -230,10 +320,16 @@ def _execute_batch_delete(entry_ids: List[str]) -> None:
 
     if result.success:
         total_deleted = result.data.get('total_deleted', len(entry_ids)) if result.data else len(entry_ids)
-        st.success(f"Successfully deleted {total_deleted} compound(s)")
+        st.toast(f"✓ Deleted {total_deleted} compound(s)", icon="✅")
         # Show partial failure warning if some deletions failed
         if result.error:
             st.warning(result.error)
+        # Clear compound list cache so UI updates immediately
+        try:
+            from frontend.services import get_compounds_cached
+            get_compounds_cached.clear()
+        except Exception:
+            pass
         _exit_select_mode()
         st.rerun()
     else:
@@ -288,6 +384,7 @@ def _fetch_compounds() -> Optional[List[Dict[str, Any]]]:
                     "is_duplicate": compound.get("is_duplicate", False),
                     "parent_id": compound.get("parent_id"),
                     "parent_name": compound.get("parent_name"),
+                    "version_count": compound.get("version_count", 1),
                 })
             return compounds
 
