@@ -1280,97 +1280,101 @@ def _render_pains_analysis(df: pd.DataFrame) -> None:
 
     st.markdown("---")
 
-    # Detailed table
-    if flag_data:
-        col1, col2 = st.columns([1, 2])
+    # Flagged compounds as cards
+    flag_col_names = {name: info[0] for name, info in flags.items()}
+    flag_emojis = {name: info[1] for name, info in flags.items()}
+    flag_colors = {
+        'PAINS': '#ef4444', 'Aggregator': '#f97316', 'Redox': '#eab308',
+        'Fluorescence': '#3b82f6', 'Thiol': '#a855f7', 'BRENK': '#78716c', 'NIH': '#94a3b8',
+    }
+    available_flag_cols = [name for name, col in flag_col_names.items() if col in unique_df.columns]
 
-        with col1:
-            st.markdown("**Flag Summary**")
-            st.dataframe(pd.DataFrame(flag_data), width='stretch', hide_index=True, height=290)
+    if not available_flag_cols:
+        st.success("No compounds flagged for assay interference")
+    else:
+        any_flagged_mask = unique_df[[flag_col_names[n] for n in available_flag_cols]].any(axis=1)
+        flagged_rows = unique_df[any_flagged_mask]
 
-        with col2:
-            # Build unique compound rows with combined Flags and Details
-            flag_col_names = {name: info[0] for name, info in flags.items()}
-            available_flag_cols = [name for name, col in flag_col_names.items() if col in unique_df.columns]
+        if flagged_rows.empty:
+            st.success("No compounds flagged for assay interference")
+        else:
+            # Build card data
+            compound_cards = []
+            for _, row in flagged_rows.iterrows():
+                mol_name = row.get('Molecule_Name', '')
+                if pd.isna(mol_name) or not isinstance(mol_name, str):
+                    mol_name = ''
+                chembl_id = str(row.get('ChEMBL_ID', 'Unknown'))
 
-            if not available_flag_cols:
-                st.success("No compounds flagged for assay interference")
-            else:
-                # Build mask: any flag is True
-                any_flagged_mask = unique_df[[flag_col_names[n] for n in available_flag_cols]].any(axis=1)
-                flagged_rows = unique_df[any_flagged_mask]
+                active = []
+                for name in available_flag_cols:
+                    if row.get(flag_col_names[name], False):
+                        dcol = detail_col_map.get(name, '')
+                        detail = ''
+                        if dcol and dcol in row.index:
+                            val = row.get(dcol, '')
+                            if val and pd.notna(val) and str(val).strip():
+                                detail = str(val)
+                        active.append({'name': name, 'detail': detail})
 
-                if flagged_rows.empty:
-                    st.success("No compounds flagged for assay interference")
-                else:
-                    # Build one row per unique compound
-                    compound_records = []
-                    for _, row in flagged_rows.iterrows():
-                        mol_name = row.get('Molecule_Name', '')
-                        if pd.isna(mol_name) or not isinstance(mol_name, str):
-                            mol_name = ''
+                compound_cards.append({
+                    'chembl_id': chembl_id,
+                    'mol_name': mol_name,
+                    'flags': active,
+                })
 
-                        # Collect active flags
-                        active_flags = []
-                        for name in available_flag_cols:
-                            if row.get(flag_col_names[name], False):
-                                active_flags.append(name)
+            # Filter
+            all_flag_names = sorted(set(f['name'] for c in compound_cards for f in c['flags']))
+            fc1, fc2 = st.columns([3, 1])
+            fc1.markdown(f"**{len(compound_cards)} Flagged Compounds**")
+            selected_filter = fc2.selectbox(
+                "Filter", ["All"] + all_flag_names,
+                key="assay_flag_filter", label_visibility="collapsed",
+            )
+            if selected_filter != "All":
+                compound_cards = [c for c in compound_cards
+                                  if any(f['name'] == selected_filter for f in c['flags'])]
 
-                        # Collect details from detail columns
-                        details_parts = []
-                        for flag_name in active_flags:
-                            dcol = detail_col_map.get(flag_name, '')
-                            if dcol and dcol in row.index:
-                                val = row.get(dcol, '')
-                                if val and pd.notna(val) and str(val).strip():
-                                    details_parts.append(f"{flag_name}: {val}")
+            # Render cards
+            for c in compound_cards:
+                chembl_id = html.escape(c['chembl_id'])
+                mol_name = html.escape(c['mol_name']) if c['mol_name'] else ''
+                chembl_url = f"https://www.ebi.ac.uk/chembl/explore/compound/{chembl_id}"
 
-                        compound_records.append({
-                            'ChEMBL_ID': row.get('ChEMBL_ID', 'Unknown'),
-                            'Molecule': mol_name[:25] if mol_name else '',
-                            'Flags': ', '.join(active_flags),
-                            'Details': '; '.join(details_parts),
-                        })
+                # Flag pills
+                pills_html = ''
+                for f in c['flags']:
+                    color = flag_colors.get(f['name'], '#666')
+                    pills_html += (
+                        f'<span style="display:inline-block;padding:3px 10px;margin:2px 4px 2px 0;'
+                        f'border-radius:12px;font-size:13px;font-weight:600;'
+                        f'background:{color}22;color:{color};border:1px solid {color}44;">'
+                        f'{html.escape(f["name"])}</span>'
+                    )
 
-                    flagged_df = pd.DataFrame(compound_records)
-
-                    # Filter by flag type
-                    active_flag_names = sorted(set(
-                        f for rec in compound_records for f in rec['Flags'].split(', ') if f
-                    ))
-                    st.markdown("**Flagged Compounds**")
-                    if active_flag_names:
-                        selected_flags = st.multiselect(
-                            "Filter by flag type",
-                            options=active_flag_names,
-                            default=[],
-                            key="assay_interference_flag_filter",
-                            help="Select one or more flags to filter. Leave empty to show all."
+                # Details
+                details_html = ''
+                for f in c['flags']:
+                    if f['detail']:
+                        details_html += (
+                            f'<div style="font-size:14px;opacity:0.8;margin-top:4px;">'
+                            f'<b style="color:{flag_colors.get(f["name"], "#666")}">'
+                            f'{html.escape(f["name"])}:</b> {html.escape(f["detail"])}</div>'
                         )
-                        if selected_flags:
-                            mask = flagged_df['Flags'].apply(
-                                lambda x: any(f in x for f in selected_flags)
-                            )
-                            flagged_df = flagged_df[mask]
 
-                    # Make ChEMBL IDs clickable
-                    flagged_df['ChEMBL_ID'] = flagged_df['ChEMBL_ID'].apply(
-                        lambda x: f"https://www.ebi.ac.uk/chembl/explore/compound/{x}" if x and x != 'Unknown' else ""
-                    )
-                    st.dataframe(
-                        flagged_df,
-                        width='stretch',
-                        hide_index=True,
-                        column_config={
-                            'ChEMBL_ID': st.column_config.LinkColumn(
-                                'ChEMBL_ID', width='small',
-                                display_text=r"https://www\.ebi\.ac\.uk/chembl/explore/compound/(.*)",
-                            ),
-                            'Molecule': st.column_config.TextColumn('Molecule', width='small'),
-                            'Flags': st.column_config.TextColumn('Flags', width='medium'),
-                            'Details': st.column_config.TextColumn('Details', width='large'),
-                        },
-                    )
+                st.markdown(
+                    f'<div style="padding:14px;border-bottom:1px solid rgba(128,128,128,0.2);">'
+                    f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;">'
+                    f'<a href="{chembl_url}" target="_blank" '
+                    f'style="font-size:16px;font-weight:700;color:#3b82f6;text-decoration:none;">'
+                    f'{chembl_id}</a>'
+                    f'{("<span style=&quot;font-size:15px;opacity:0.7;&quot;>" + mol_name + "</span>") if mol_name else ""}'
+                    f'</div>'
+                    f'<div style="margin-bottom:4px;">{pills_html}</div>'
+                    f'{details_html}'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
 
     # PAINS patterns breakdown (if available)
     if 'PAINS_Pattern' in unique_df.columns:
@@ -2815,12 +2819,12 @@ def _pdb_pagination(entry_id: str, page_key: str, current_page: int, total_pages
     _, c_first, c_prev, c_label, c_next, c_last, _ = st.columns([2, 1, 1, 2, 1, 1, 2])
     with c_first:
         if st.button("⟪ First", key=f"pdb_first_{pos}_{entry_id}", disabled=current_page <= 1,
-                      use_container_width=True):
+                      width='stretch'):
             st.session_state[page_key] = 1
             st.rerun()
     with c_prev:
         if st.button("◁ Prev", key=f"pdb_prev_{pos}_{entry_id}", disabled=current_page <= 1,
-                      use_container_width=True):
+                      width='stretch'):
             st.session_state[page_key] = current_page - 1
             st.rerun()
     c_label.markdown(
@@ -2830,12 +2834,12 @@ def _pdb_pagination(entry_id: str, page_key: str, current_page: int, total_pages
     )
     with c_next:
         if st.button("Next ▷", key=f"pdb_next_{pos}_{entry_id}", disabled=current_page >= total_pages,
-                      use_container_width=True):
+                      width='stretch'):
             st.session_state[page_key] = current_page + 1
             st.rerun()
     with c_last:
         if st.button("Last ⟫", key=f"pdb_last_{pos}_{entry_id}", disabled=current_page >= total_pages,
-                      use_container_width=True):
+                      width='stretch'):
             st.session_state[page_key] = total_pages
             st.rerun()
 
@@ -2953,7 +2957,7 @@ def _render_pdb_evidence(
             )
             fig_donut.update_traces(textinfo='value+percent', textfont_size=13)
             apply_impulator_theme(fig_donut)
-            st.plotly_chart(fig_donut, use_container_width=True)
+            st.plotly_chart(fig_donut, width='stretch')
 
         with viz2:
             # Resolution distribution histogram
@@ -2979,7 +2983,7 @@ def _render_pdb_evidence(
                         showlegend=False,
                     )
                     apply_impulator_theme(fig_res)
-                    st.plotly_chart(fig_res, use_container_width=True)
+                    st.plotly_chart(fig_res, width='stretch')
 
     st.markdown("---")
 
@@ -3387,116 +3391,138 @@ def _render_drug_indications(data: Dict[str, Any]) -> None:
     st.markdown("---")
 
     # Search/filter
-    search_term = st.text_input("🔍 Search diseases", placeholder="Type to filter by disease name...")
+    sc1, sc2 = st.columns([3, 1])
+    search_term = sc1.text_input("Search", placeholder="Search diseases, compounds...",
+                                  key="indication_search", label_visibility="collapsed")
+    sort_opt = sc2.selectbox("Sort", ["Phase (highest)", "Phase (lowest)", "Disease A-Z"],
+                              key="indication_sort", label_visibility="collapsed")
 
     # Filter DataFrame
     display_df = indications_df.copy()
     if search_term:
-        mask = (
-            display_df['MESH_Heading'].str.contains(search_term, case=False, na=False) |
-            display_df['EFO_Term'].str.contains(search_term, case=False, na=False)
-        )
+        mask = pd.Series(False, index=display_df.index)
+        for col in ['MESH_Heading', 'EFO_Term', 'ChEMBL_ID']:
+            if col in display_df.columns:
+                mask |= display_df[col].str.contains(search_term, case=False, na=False)
         display_df = display_df[mask]
 
     if display_df.empty:
-        st.warning(f"No indications found matching '{search_term}'")
+        st.warning(f"No indications found matching '{search_term}'" if search_term else "No indications")
         return
 
-    st.markdown(f"**Showing {len(display_df)} indications:**")
+    # Sort
+    if 'Max_Phase' in display_df.columns:
+        if sort_opt == "Phase (highest)":
+            display_df = display_df.sort_values('Max_Phase', ascending=False)
+        elif sort_opt == "Phase (lowest)":
+            display_df = display_df.sort_values('Max_Phase', ascending=True)
+    if sort_opt == "Disease A-Z" and 'MESH_Heading' in display_df.columns:
+        display_df = display_df.sort_values('MESH_Heading', na_position='last')
 
-    # Build display DataFrame with URLs for clickable links (like PDB table)
-    # Pre-compile NCT ID pattern for validation (NCT followed by digits)
+    # Phase colors and labels
+    phase_styles = {
+        4: ('#22c55e', 'Approved'),
+        3: ('#3b82f6', 'Phase 3'),
+        2: ('#eab308', 'Phase 2'),
+        1: ('#f97316', 'Phase 1'),
+        0.5: ('#94a3b8', 'Early Phase 1'),
+        0: ('#666', 'Unknown'),
+    }
+
+    def get_phase_style(val):
+        for threshold in [4, 3, 2, 1, 0.5]:
+            if val >= threshold:
+                return phase_styles[threshold]
+        return phase_styles[0]
+
     nct_pattern = re.compile(r'^NCT\d+$')
-    table_data = []
+
+    st.caption(f"{len(display_df)} indications")
+
+    # Render cards
     for _, row in display_df.iterrows():
         mesh_id = str(row.get('MESH_ID', '')) if pd.notna(row.get('MESH_ID')) else ''
-        mesh_heading = str(row.get('MESH_Heading', '')) if pd.notna(row.get('MESH_Heading')) else ''
+        mesh_heading = str(row.get('MESH_Heading', '')) if pd.notna(row.get('MESH_Heading')) else 'Unknown Disease'
         efo_id = str(row.get('EFO_ID', '')) if pd.notna(row.get('EFO_ID')) else ''
+        chembl_id = str(row.get('ChEMBL_ID', '')) if pd.notna(row.get('ChEMBL_ID')) else ''
         max_phase_val = row.get('Max_Phase', 0)
         if pd.isna(max_phase_val):
             max_phase_val = 0
-        chembl_id = str(row.get('ChEMBL_ID', '')) if pd.notna(row.get('ChEMBL_ID')) else ''
 
-        # Phase badge
-        phase_badge = get_phase_badge(max_phase_val)
+        phase_color, phase_label = get_phase_style(max_phase_val)
 
-        # Build URLs directly (like PDB table does)
+        # Build URLs
         mesh_url = f"https://id.nlm.nih.gov/mesh/{mesh_id}.html" if mesh_id else ''
-        efo_url = f"https://www.ebi.ac.uk/ols4/ontologies/efo/classes/http%253A%252F%252Fwww.ebi.ac.uk%252Fefo%252F{efo_id.replace(':', '_')}" if efo_id else ''
+        efo_url = (f"https://www.ebi.ac.uk/ols4/ontologies/efo/classes/"
+                   f"http%253A%252F%252Fwww.ebi.ac.uk%252Fefo%252F{efo_id.replace(':', '_')}") if efo_id else ''
         chembl_url = f"https://www.ebi.ac.uk/chembl/compound_report_card/{chembl_id}/" if chembl_id else ''
 
-        # ClinicalTrials.gov - use NCT ID(s) if available, fallback to disease search
-        # Embed count/marker in URL fragment for display extraction via regex
+        # ClinicalTrials URL
         nct_ids_raw = str(row.get('Clinical_Trials_IDs', '')) if pd.notna(row.get('Clinical_Trials_IDs')) else ''
         ct_url = ''
-
+        ct_label = ''
         if nct_ids_raw:
-            # Handle multiple NCT IDs (may be comma or space separated)
-            nct_ids = [
-                nct.strip() for nct in nct_ids_raw.replace(',', ' ').split()
-                if nct.strip() and nct_pattern.match(nct.strip())
-            ]
+            nct_ids = [n.strip() for n in nct_ids_raw.replace(',', ' ').split()
+                       if n.strip() and nct_pattern.match(n.strip())]
             if nct_ids:
-                nct_search = '%20'.join(nct_ids)
-                # Add count as fragment: #[N] - will display as "[N]" via regex
-                ct_url = f"https://clinicaltrials.gov/search?term={nct_search}#[{len(nct_ids)}]"
-
-        # Fallback to disease search if no valid NCT IDs
+                ct_url = f"https://clinicaltrials.gov/search?term={'%20'.join(nct_ids)}"
+                ct_label = f"{len(nct_ids)} Trial{'s' if len(nct_ids) > 1 else ''}"
         if not ct_url and mesh_heading:
-            # Properly URL-encode disease name (handles special chars like & ' ( ) etc.)
-            ct_search = quote_plus(mesh_heading)
-            ct_url = f"https://clinicaltrials.gov/search?cond={ct_search}#[🔬]"
+            ct_url = f"https://clinicaltrials.gov/search?cond={quote_plus(mesh_heading)}"
+            ct_label = "Search Trials"
 
-        table_data.append({
-            'MESH_Link': mesh_url,
-            'Disease': mesh_heading[:60] + ('...' if len(mesh_heading) > 60 else '') if mesh_heading else 'N/A',
-            'EFO_Link': efo_url,
-            'Phase': phase_badge,
-            'ChEMBL_Link': chembl_url,
-            'ClinicalTrials': ct_url,
-        })
-
-    # Display as scrollable dataframe (matching PDB table style)
-    if table_data:
-        df_display = pd.DataFrame(table_data)
-
-        st.dataframe(
-            df_display,
-            width='stretch',
-            hide_index=True,
-            height=400,
-            column_order=["MESH_Link", "Disease", "EFO_Link", "Phase", "ChEMBL_Link", "ClinicalTrials"],
-            column_config={
-                "MESH_Link": st.column_config.LinkColumn(
-                    "MESH ID",
-                    help="Click to view MESH entry",
-                    display_text=r"https://id\.nlm\.nih\.gov/mesh/(.+)\.html",
-                    width="small"
-                ),
-                "Disease": st.column_config.TextColumn("Disease", width="large"),
-                "EFO_Link": st.column_config.LinkColumn(
-                    "EFO ID",
-                    help="Click to view EFO ontology entry",
-                    display_text=r".*efo%252F(.+)",
-                    width="small"
-                ),
-                "Phase": st.column_config.TextColumn("Phase", width="small"),
-                "ChEMBL_Link": st.column_config.LinkColumn(
-                    "Compound",
-                    help="Click to view ChEMBL entry",
-                    display_text=r"https://www\.ebi\.ac\.uk/chembl/compound_report_card/(.+)/",
-                    width="small"
-                ),
-                "ClinicalTrials": st.column_config.LinkColumn(
-                    "Trials",
-                    help="Click to search ClinicalTrials.gov ([N] = N linked trials, [🔬] = disease search)",
-                    display_text=r".*#(\[.+\])$",
-                    width="small"
-                ),
-            }
+        # Phase badge
+        phase_badge = (
+            f'<span style="display:inline-block;padding:4px 12px;border-radius:12px;font-size:13px;'
+            f'font-weight:700;background:{phase_color}22;color:{phase_color};'
+            f'border:1px solid {phase_color}44;">{html.escape(phase_label)}</span>'
         )
 
-        st.caption(f"📋 {len(table_data)} indications. Click links to view MESH, EFO, ChEMBL entries or search ClinicalTrials.gov. 📜 Scroll to see all.")
+        # Link buttons with gradients
+        def _grad_btn(url, label, id_text, grad_from, grad_to, shadow_color):
+            return (
+                f'<a href="{url}" target="_blank" '
+                f'style="display:inline-block;padding:6px 14px;font-size:13px;font-weight:600;'
+                f'color:#fff;text-decoration:none;border-radius:6px;margin:3px 4px 3px 0;'
+                f'background:linear-gradient(135deg,{grad_from},{grad_to});'
+                f'box-shadow:0 2px 6px {shadow_color};'
+                f'transition:transform 0.15s,box-shadow 0.15s;"'
+                f' onmouseover="this.style.transform=\'translateY(-1px)\';this.style.boxShadow=\'0 4px 10px {shadow_color}\'"'
+                f' onmouseout="this.style.transform=\'none\';this.style.boxShadow=\'0 2px 6px {shadow_color}\'">'
+                f'{label}: <b>{id_text}</b></a>'
+            )
+
+        links_html = ''
+        if mesh_url and mesh_id:
+            links_html += _grad_btn(mesh_url, 'MESH', html.escape(mesh_id),
+                                    '#3b82f6', '#6366f1', 'rgba(59,130,246,0.3)')
+        if efo_url and efo_id:
+            links_html += _grad_btn(efo_url, 'EFO', html.escape(efo_id),
+                                    '#8b5cf6', '#a855f7', 'rgba(139,92,246,0.3)')
+        if chembl_url and chembl_id:
+            links_html += _grad_btn(chembl_url, 'ChEMBL', html.escape(chembl_id),
+                                    '#f59e0b', '#f97316', 'rgba(245,158,11,0.3)')
+        if ct_url:
+            links_html += _grad_btn(ct_url, 'Trials', html.escape(ct_label),
+                                    '#22c55e', '#06b6d4', 'rgba(34,197,94,0.3)')
+
+        st.markdown(
+            f'<div style="display:flex;padding:14px;border-bottom:1px solid rgba(128,128,128,0.2);'
+            f'align-items:flex-start;gap:16px;">'
+            f'<div style="flex:1;min-width:0;">'
+            f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap;">'
+            f'<span style="font-size:18px;font-weight:600;">{html.escape(mesh_heading)}</span>'
+            f'{phase_badge}'
+            f'</div>'
+            f'<div style="font-size:15px;opacity:0.85;margin-bottom:8px;">'
+            f'<b>Compound:</b> <a href="{chembl_url}" target="_blank" '
+            f'style="color:#3b82f6;text-decoration:none;font-weight:600;">{html.escape(chembl_id)}</a>'
+            f'</div>'
+            f'<div style="display:flex;flex-wrap:wrap;">{links_html}</div>'
+            f'</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
     # Phase distribution chart
     if 'Max_Phase' in indications_df.columns and len(indications_df) > 1:

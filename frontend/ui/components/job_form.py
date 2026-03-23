@@ -395,7 +395,7 @@ def render_job_form() -> Optional[str]:
             header_cols[2].metric("Formula", mol_info['formula'])
             with header_cols[3]:
                 st.write("")  # spacer to align with metrics
-                if st.button("⛶ Expand", key="expand_mol_btn", type="primary", use_container_width=True):
+                if st.button("⛶ Expand", key="expand_mol_btn", type="primary", width='stretch'):
                     _show_expanded_molecule(mol_info['smiles'])
 
         # Pass resolved SMILES for InChI so OCL can render it
