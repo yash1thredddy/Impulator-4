@@ -90,15 +90,17 @@ class TestActiveJobResponseSchema:
         """Test valid active job response."""
         from backend.models.schemas import ActiveJobResponse
         from backend.models.enums import JobStatus
+        import uuid
 
+        test_id = uuid.uuid4()
         response = ActiveJobResponse(
-            id="test-123",
+            id=test_id,
             status=JobStatus.PROCESSING,
             progress=45.5,
             current_step="Fetching activities",
             compound_name="Aspirin"
         )
-        assert response.id == "test-123"
+        assert response.id == test_id
         assert response.progress == 45.5
 
 
@@ -271,25 +273,29 @@ class TestConsistentResponseModels:
     def test_delete_response(self):
         """Test DeleteResponse model."""
         from backend.models.schemas import DeleteResponse
+        import uuid
 
+        test_id = uuid.uuid4()
         response = DeleteResponse(
             message="Job deleted",
-            job_id="test-123",
+            job_id=test_id,
             compound_name="Aspirin"
         )
         assert response.message == "Job deleted"
-        assert response.job_id == "test-123"
+        assert response.job_id == test_id
 
     def test_cancel_response(self):
         """Test CancelResponse model."""
         from backend.models.schemas import CancelResponse
+        import uuid
 
+        batch_id = uuid.uuid4()
         response = CancelResponse(
-            batch_id="batch-123",
+            batch_id=batch_id,
             cancelled_count=5,
             message="Cancelled 5 jobs"
         )
-        assert response.batch_id == "batch-123"
+        assert response.batch_id == batch_id
         assert response.cancelled_count == 5
 
 
@@ -479,7 +485,8 @@ class TestResolveDuplicateRequestSchema:
         req2 = ResolveDuplicateRequest(
             **self._make_resolve(existing_entry_id="3a4f8c9e-1b2d-4e5f-9a1c-2d3e4f5a6b7c")
         )
-        assert req2.existing_entry_id == "3a4f8c9e-1b2d-4e5f-9a1c-2d3e4f5a6b7c"
+        import uuid
+        assert req2.existing_entry_id == uuid.UUID("3a4f8c9e-1b2d-4e5f-9a1c-2d3e4f5a6b7c")
 
 
 class TestCheckDuplicatesRequestSchema:

@@ -169,36 +169,16 @@ class TestUUIDBasedAzureOperations:
 class TestCompoundEntryWithEntryId:
     """Tests for Compound entry creation with entry_id."""
 
-    @pytest.fixture
-    def db_session(self):
-        """Create an in-memory test database session."""
-        from sqlalchemy import create_engine
-        from sqlalchemy.orm import sessionmaker
-        from backend.models._pg_base import PGBase
-        from backend.models.job import Job  # noqa: F401
-        from backend.models.compound import Compound  # noqa: F401
-        from backend.models.deleted_compound import DeletedCompound  # noqa: F401
-
-        engine = create_engine(
-            "sqlite:///:memory:",
-            connect_args={"check_same_thread": False}
-        )
-        PGBase.metadata.create_all(bind=engine)
-        Session = sessionmaker(bind=engine)
-        session = Session()
-        yield session
-        session.close()
-        engine.dispose()
-
     def test_create_compound_with_entry_id(self, db_session):
         """Test creating a compound with entry_id."""
         from backend.models.compound import Compound
 
-        entry_id = str(uuid.uuid4())
+        entry_id = uuid.uuid4()
         compound = Compound(
             entry_id=entry_id,
             compound_name="TestCompound",
-            smiles="CCO"
+            smiles="CCO",
+            similarity_threshold=90,
         )
         db_session.add(compound)
         db_session.commit()
@@ -217,12 +197,13 @@ class TestCompoundEntryWithEntryId:
         from backend.models.compound import Compound
         from sqlalchemy.exc import IntegrityError
 
-        entry_id = str(uuid.uuid4())
+        entry_id = uuid.uuid4()
 
         compound1 = Compound(
             entry_id=entry_id,
             compound_name="Compound1",
-            smiles="CCO"
+            smiles="CCO",
+            similarity_threshold=90,
         )
         db_session.add(compound1)
         db_session.commit()
@@ -231,26 +212,29 @@ class TestCompoundEntryWithEntryId:
         compound2 = Compound(
             entry_id=entry_id,  # Same entry_id
             compound_name="Compound2",
-            smiles="CO"
+            smiles="CO",
+            similarity_threshold=90,
         )
         db_session.add(compound2)
 
         with pytest.raises(IntegrityError):
             db_session.commit()
+        db_session.rollback()
 
     def test_compound_with_storage_path(self, db_session):
         """Test compound with UUID-based storage path."""
         from backend.models.compound import Compound
         from backend.core.azure_sync import get_storage_path_from_entry_id
 
-        entry_id = str(uuid.uuid4())
-        storage_path = get_storage_path_from_entry_id(entry_id)
+        entry_id = uuid.uuid4()
+        storage_path = get_storage_path_from_entry_id(str(entry_id))
 
         compound = Compound(
             entry_id=entry_id,
             compound_name="TestCompound",
             smiles="CCO",
-            storage_path=storage_path
+            storage_path=storage_path,
+            similarity_threshold=90,
         )
         db_session.add(compound)
         db_session.commit()
@@ -260,28 +244,29 @@ class TestCompoundEntryWithEntryId:
         ).first()
 
         assert retrieved.storage_path == storage_path
-        assert entry_id in retrieved.storage_path
+        assert str(entry_id) in retrieved.storage_path
 
     def test_duplicate_compound_with_different_entry_id(self, db_session):
         """Test that same compound name can exist with different entry_ids."""
         from backend.models.compound import Compound
 
         # Create two compounds with same name but different entry_ids
-        entry_id1 = str(uuid.uuid4())
-        entry_id2 = str(uuid.uuid4())
+        entry_id1 = uuid.uuid4()
+        entry_id2 = uuid.uuid4()
 
         compound1 = Compound(
             entry_id=entry_id1,
             compound_name="Quercetin",
             smiles="O=C1C(O)=C(O)C(=O)C2=C1C=C(O)C=C2O",
-            is_duplicate=False
+            similarity_threshold=90,
         )
         compound2 = Compound(
             entry_id=entry_id2,
-            compound_name="Quercetin_v2",  # Different name to satisfy name constraint
+            compound_name="Quercetin_v2",
             smiles="O=C1C(O)=C(O)C(=O)C2=C1C=C(O)C=C2O",
-            is_duplicate=True,
-            duplicate_of=entry_id1
+            parent_id=entry_id1,
+            version=2,
+            similarity_threshold=90,
         )
 
         db_session.add_all([compound1, compound2])
@@ -293,160 +278,4 @@ class TestCompoundEntryWithEntryId:
         ).all()
 
         assert len(compounds) == 2
-        assert compounds[1].is_duplicate is True
-        assert compounds[1].duplicate_of == entry_id1
-
-
-class TestJobServiceCompoundUpdate:
-    """Tests for JobService _update_compound_entry with entry_id."""
-
-    @pytest.fixture
-    def db_session(self):
-        """Create an in-memory test database session."""
-        from sqlalchemy import create_engine
-        from sqlalchemy.orm import sessionmaker
-        from backend.models._pg_base import PGBase
-        from backend.models.job import Job  # noqa: F401
-        from backend.models.compound import Compound  # noqa: F401
-        from backend.models.deleted_compound import DeletedCompound  # noqa: F401
-
-        engine = create_engine(
-            "sqlite:///:memory:",
-            connect_args={"check_same_thread": False}
-        )
-        PGBase.metadata.create_all(bind=engine)
-        Session = sessionmaker(bind=engine)
-        session = Session()
-        yield session
-        session.close()
-        engine.dispose()
-
-    @pytest.fixture
-    def service(self):
-        """Create a JobService instance."""
-        from backend.services.job_service import JobService
-        return JobService()
-
-    def test_update_compound_entry_creates_new(self, service, db_session):
-        """Test that _update_compound_entry creates new entry."""
-        from backend.models.compound import Compound
-
-        entry_id = str(uuid.uuid4())
-        result_summary = {
-            "compound_name": "NewCompound",
-            "smiles": "CCO",
-            "entry_id": entry_id,
-            "storage_path": f"results/{entry_id[:2]}/{entry_id}.zip",
-            "total_activities": 10,
-            "imp_candidates": 2
-        }
-
-        service._update_compound_entry(
-            db_session,
-            result_summary,
-            "local/path.zip"
-        )
-        db_session.commit()
-
-        # Verify compound was created
-        compound = db_session.query(Compound).filter(
-            Compound.compound_name == "NewCompound"
-        ).first()
-
-        assert compound is not None
-        assert compound.entry_id == entry_id
-        assert compound.total_activities == 10
-
-    def test_update_compound_entry_updates_existing(self, service, db_session):
-        """Test that _update_compound_entry updates existing entry."""
-        from backend.models.compound import Compound
-        from backend.services.job_service import generate_inchikey
-
-        smiles = "CCO"
-        inchikey = generate_inchikey(smiles)
-
-        # Create existing compound
-        existing = Compound(
-            entry_id=str(uuid.uuid4()),
-            compound_name="Ethanol",
-            smiles=smiles,
-            inchikey=inchikey,
-            total_activities=5
-        )
-        db_session.add(existing)
-        db_session.commit()
-
-        # Update with new data
-        new_entry_id = str(uuid.uuid4())
-        result_summary = {
-            "compound_name": "Ethanol",
-            "smiles": smiles,
-            "entry_id": new_entry_id,
-            "storage_path": f"results/{new_entry_id[:2]}/{new_entry_id}.zip",
-            "total_activities": 15,  # Updated
-            "imp_candidates": 3
-        }
-
-        service._update_compound_entry(
-            db_session,
-            result_summary,
-            "local/path.zip"
-        )
-        db_session.commit()
-
-        # Verify compound was updated (not duplicated)
-        compounds = db_session.query(Compound).filter(
-            Compound.compound_name == "Ethanol"
-        ).all()
-
-        assert len(compounds) == 1
-        assert compounds[0].total_activities == 15
-
-    def test_update_compound_entry_creates_duplicate(self, service, db_session):
-        """Test that _update_compound_entry creates duplicate entry when requested."""
-        from backend.models.compound import Compound
-        from backend.services.job_service import generate_inchikey
-
-        smiles = "CCO"
-        original_entry_id = str(uuid.uuid4())
-
-        # Create original compound
-        original = Compound(
-            entry_id=original_entry_id,
-            compound_name="Ethanol",
-            smiles=smiles,
-            inchikey=generate_inchikey(smiles)
-        )
-        db_session.add(original)
-        db_session.commit()
-
-        # Create duplicate entry
-        duplicate_entry_id = str(uuid.uuid4())
-        result_summary = {
-            "compound_name": "Ethanol_v2",
-            "smiles": smiles,
-            "entry_id": duplicate_entry_id,
-            "storage_path": f"results/{duplicate_entry_id[:2]}/{duplicate_entry_id}.zip",
-            "total_activities": 10
-        }
-
-        service._update_compound_entry(
-            db_session,
-            result_summary,
-            "local/path.zip",
-            is_duplicate=True,
-            duplicate_of=original_entry_id
-        )
-        db_session.commit()
-
-        # Verify both compounds exist
-        all_compounds = db_session.query(Compound).all()
-        assert len(all_compounds) == 2
-
-        duplicate = db_session.query(Compound).filter(
-            Compound.entry_id == duplicate_entry_id
-        ).first()
-
-        assert duplicate is not None
-        assert duplicate.is_duplicate is True
-        assert duplicate.duplicate_of == original_entry_id
+        assert compounds[1].parent_id == entry_id1

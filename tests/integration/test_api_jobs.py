@@ -122,14 +122,14 @@ class TestJobRetrieval:
         assert resp.status_code == 200
 
         job = JobResponse(**resp.json())
-        assert job.id == job_id
+        assert str(job.id) == job_id
         assert job.compound_name == "TestCompound"
         assert job.status.value == "pending"
 
     def test_get_job_not_found(self, client):
-        """GET /api/v1/jobs/nonexistent-id returns 404."""
+        """GET /api/v1/jobs/00000000-0000-4000-8000-000000000001 returns 404."""
         resp = client.get(
-            "/api/v1/jobs/nonexistent-uuid-id", headers=_headers()
+            "/api/v1/jobs/00000000-0000-4000-8000-000000000002", headers=_headers()
         )
         assert resp.status_code == 404
 
@@ -190,9 +190,9 @@ class TestJobCancelDelete:
         assert job.status.value == "cancelled"
 
     def test_cancel_nonexistent_job(self, client):
-        """POST /api/v1/jobs/fake-id/cancel returns 404."""
+        """POST /api/v1/jobs/{nonexistent-uuid}/cancel returns 404."""
         resp = client.post(
-            "/api/v1/jobs/fake-nonexistent-id/cancel", headers=_headers()
+            "/api/v1/jobs/00000000-0000-4000-8000-000000000003/cancel", headers=_headers()
         )
         assert resp.status_code == 404
 
@@ -221,13 +221,13 @@ class TestJobCancelDelete:
         assert resp.status_code == 200
 
         result = DeleteResponse(**resp.json())
-        assert result.job_id == job_id
+        assert str(result.job_id) == job_id
         assert "message" in result.model_dump()
 
     def test_delete_nonexistent_job(self, client):
-        """DELETE /api/v1/jobs/fake-id returns 404."""
+        """DELETE /api/v1/jobs/{nonexistent-uuid} returns 404."""
         resp = client.delete(
-            "/api/v1/jobs/fake-nonexistent-id", headers=_headers()
+            "/api/v1/jobs/00000000-0000-4000-8000-000000000003", headers=_headers()
         )
         assert resp.status_code == 404
 
@@ -257,7 +257,10 @@ class TestJobDetailAndOwnership:
         assert resp.status_code == 200
         data = resp.json()
         assert data["id"] == job_id
-        assert "input_params" in data
+        assert "compound_name" in data
+        assert "smiles" in data
+        assert "similarity_threshold" in data
+        assert "activity_types" in data
 
     def test_get_job_wrong_session_returns_403(self, client):
         """Accessing a job with a different session ID returns 403."""
@@ -312,7 +315,7 @@ class TestJobSubmissionWithScheduler:
     """Tests for job submission that verify scheduler behavior."""
 
     @pytest.fixture
-    def client_with_mock_scheduler(self, test_engine, mock_azure):
+    def client_with_mock_scheduler(self, pg_engine, mock_azure):
         """Create test client with mocked scheduler and proper test database."""
         from backend.main import app
         from backend.core import database as db_module
@@ -323,10 +326,10 @@ class TestJobSubmissionWithScheduler:
         original_session_local = db_module.SessionLocal
 
         # Create new SessionLocal bound to test engine
-        TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+        TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=pg_engine)
 
         # Patch the module-level engine and SessionLocal
-        db_module.engine = test_engine
+        db_module.engine = pg_engine
         db_module.SessionLocal = TestSessionLocal
 
         def override_get_db():
@@ -338,13 +341,10 @@ class TestJobSubmissionWithScheduler:
 
         app.dependency_overrides[get_db] = override_get_db
 
-        # Mock the scheduler at both import sites:
-        # - backend.api.v1.jobs.job_scheduler (single job route)
-        # - backend.core.scheduler.job_scheduler (used by job_service.submit_batch via runtime import)
-        with patch('backend.api.v1.jobs.job_scheduler') as mock_scheduler:
-            with patch('backend.core.scheduler.job_scheduler', mock_scheduler):
-                with TestClient(app) as c:
-                    yield c, mock_scheduler
+        # Mock the scheduler trigger to prevent background job processing
+        with patch('backend.core.scheduler.trigger') as mock_trigger:
+            with TestClient(app) as c:
+                yield c, mock_trigger
 
         # Restore original values
         app.dependency_overrides.clear()
@@ -369,7 +369,7 @@ class TestJobSubmissionWithScheduler:
         assert data["status"] == "pending"
 
         # Verify scheduler was triggered
-        mock_scheduler.trigger.assert_called()
+        mock_scheduler.assert_called()
 
     def test_submit_batch_job_triggers_scheduler_once(self, client_with_mock_scheduler):
         """Test that batch submission triggers scheduler only once."""
@@ -392,7 +392,7 @@ class TestJobSubmissionWithScheduler:
         assert data["total_submitted"] == 3
 
         # Scheduler should be triggered once (not per job)
-        assert mock_scheduler.trigger.call_count == 1
+        assert mock_scheduler.call_count == 1
 
     def test_job_status_is_pending_after_submission(self, client_with_mock_scheduler):
         """Test that job status is PENDING after submission (scheduler handles processing)."""
@@ -426,16 +426,16 @@ class TestBatchJobOperations:
     """Tests for batch job operations."""
 
     @pytest.fixture
-    def client(self, test_engine, mock_azure):
-        """Override client to patch job_scheduler at the API module level."""
+    def client(self, pg_engine, mock_azure):
+        """Override client to patch scheduler trigger at the module level."""
         from backend.main import app
         from backend.core import database as db_module
         from backend.core.database import get_db
 
         original_engine = db_module.engine
         original_session_local = db_module.SessionLocal
-        TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
-        db_module.engine = test_engine
+        TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=pg_engine)
+        db_module.engine = pg_engine
         db_module.SessionLocal = TestSessionLocal
 
         def override_get_db():
@@ -447,7 +447,7 @@ class TestBatchJobOperations:
 
         app.dependency_overrides[get_db] = override_get_db
 
-        with patch('backend.api.v1.jobs.job_scheduler'):
+        with patch('backend.core.scheduler.trigger'):
             with TestClient(app) as c:
                 yield c
 
@@ -502,7 +502,7 @@ class TestBatchJobOperations:
 
     def test_batch_nonexistent_returns_404(self, client):
         """Test getting non-existent batch returns 404."""
-        response = client.get("/api/v1/jobs/batch/nonexistent-batch-id")
+        response = client.get("/api/v1/jobs/batch/00000000-0000-4000-8000-000000000005")
         assert response.status_code == 404
 
     def test_batch_skips_internal_structure_duplicates(self, client):

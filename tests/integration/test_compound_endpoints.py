@@ -26,28 +26,41 @@ from backend.models.schemas import (
 
 
 def _seed_compound(session, name="TestCompound", smiles="CCO", **overrides):
-    """Seed a compound into the database and return its entry_id."""
+    """Seed a compound into the database and return its entry_id.
+
+    Translates legacy is_duplicate/duplicate_of to parent_id/version.
+    """
     from backend.models.compound import Compound
 
-    entry_id = str(uuid.uuid4())
+    entry_id = overrides.pop("entry_id", str(uuid.uuid4()))
+
+    # Translate legacy fields to new schema
+    is_duplicate = overrides.pop("is_duplicate", False)
+    duplicate_of = overrides.pop("duplicate_of", None)
+
     defaults = {
         "entry_id": entry_id,
         "compound_name": name,
         "smiles": smiles,
         "inchikey": "LFQSCWFLJHTTHZ-UHFFFAOYSA-N",
+        "inchikey_structure_key": "LFQSCWFLJHTTHZ-UHFFFAOYSA",
         "similarity_threshold": 90,
-        "activity_types": "IC50",
+        "activity_types": ["IC50"],
         "total_activities": 50,
         "imp_score": 0.75,
         "qed": 0.8,
         "author_name": "Test Author",
         "processed_at": datetime.now(timezone.utc),
     }
+    if is_duplicate and duplicate_of:
+        defaults["parent_id"] = duplicate_of if isinstance(duplicate_of, uuid.UUID) else uuid.UUID(duplicate_of)
+        defaults["version"] = 2
     defaults.update(overrides)
     comp = Compound(**defaults)
     session.add(comp)
     session.commit()
-    return entry_id
+    session.refresh(comp)
+    return str(entry_id)
 
 
 # ─────────────────────────────────────────────────
@@ -124,13 +137,13 @@ class TestCompoundDetail:
         assert response.status_code == 200
 
         detail = CompoundDetailResponse(**response.json())
-        assert detail.entry_id == entry_id
+        assert str(detail.entry_id) == entry_id
         assert detail.compound_name == "Aspirin"
         assert detail.smiles == "CC(=O)OC1=CC=CC=C1C(=O)O"
 
     def test_get_compound_not_found(self, client):
         """Nonexistent entry_id returns 404."""
-        response = client.get("/api/v1/compounds/nonexistent-id")
+        response = client.get("/api/v1/compounds/00000000-0000-4000-8000-000000000009")
         assert response.status_code == 404
 
 
@@ -152,7 +165,7 @@ class TestCompoundVersions:
         assert response.status_code == 200
 
         result = CompoundVersionsResponse(**response.json())
-        assert result.current_entry_id == entry_id
+        assert str(result.current_entry_id) == entry_id
         # Single compound -- versions may be empty or contain just itself
         # depending on whether it has an InChIKey structure key match
         assert isinstance(result.versions, list)
@@ -178,15 +191,15 @@ class TestCompoundVersions:
         assert response.status_code == 200
 
         result = CompoundVersionsResponse(**response.json())
-        assert result.current_entry_id == id1
+        assert str(result.current_entry_id) == id1
         assert len(result.versions) == 2
-        version_ids = {v.entry_id for v in result.versions}
+        version_ids = {str(v.entry_id) for v in result.versions}
         assert id1 in version_ids
         assert id2 in version_ids
 
     def test_get_versions_not_found(self, client):
         """Nonexistent compound returns 404."""
-        response = client.get("/api/v1/compounds/nonexistent-id/versions")
+        response = client.get("/api/v1/compounds/00000000-0000-4000-8000-000000000008/versions")
         assert response.status_code == 404
 
 
@@ -208,7 +221,7 @@ class TestCompoundDelete:
         assert response.status_code == 200
 
         result = CompoundDeleteResponse(**response.json())
-        assert result.entry_id == entry_id
+        assert str(result.entry_id) == entry_id
         assert result.status == "deleted"
         assert "message" in result.model_dump()
 
@@ -218,7 +231,7 @@ class TestCompoundDelete:
 
     def test_delete_compound_not_found(self, client):
         """Deleting nonexistent compound returns 404."""
-        response = client.delete("/api/v1/compounds/nonexistent-id")
+        response = client.delete("/api/v1/compounds/00000000-0000-4000-8000-000000000009")
         assert response.status_code == 404
 
     def test_batch_delete(self, test_engine, client):
@@ -365,7 +378,7 @@ class TestGetCompound:
 
     def test_get_nonexistent_compound_returns_404(self, client):
         """Nonexistent entry_id returns 404."""
-        response = client.get("/api/v1/compounds/nonexistent-id")
+        response = client.get("/api/v1/compounds/00000000-0000-4000-8000-000000000009")
         assert response.status_code == 404
 
 
@@ -395,7 +408,7 @@ class TestDeleteCompound:
 
     def test_delete_nonexistent_returns_404(self, client):
         """Deleting nonexistent compound returns 404."""
-        response = client.delete("/api/v1/compounds/nonexistent-id")
+        response = client.delete("/api/v1/compounds/00000000-0000-4000-8000-000000000009")
         assert response.status_code == 404
 
     def test_delete_creates_audit_record(self, test_engine, client):
@@ -428,9 +441,11 @@ class TestDeleteCompound:
         parent_id = _seed_compound(session, name="Parent")
         child1_id = _seed_compound(
             session, name="Child1", is_duplicate=True, duplicate_of=parent_id,
+            version=2,
         )
         child2_id = _seed_compound(
             session, name="Child2", is_duplicate=True, duplicate_of=parent_id,
+            version=3,
         )
         session.close()
 
@@ -441,9 +456,9 @@ class TestDeleteCompound:
         session = Session()
         child1 = session.query(Compound).filter(Compound.entry_id == child1_id).first()
         child2 = session.query(Compound).filter(Compound.entry_id == child2_id).first()
-        assert child1.is_duplicate is False
-        assert child1.duplicate_of is None
-        assert child2.duplicate_of == child1_id  # Re-pointed to promoted child
+        assert child1.parent_id is None  # Promoted to root
+        assert child1.version == 1
+        assert str(child2.parent_id) == child1_id  # Re-pointed to promoted child
         session.close()
 
     def test_delete_duplicate_does_not_promote(self, test_engine, client):
@@ -464,7 +479,7 @@ class TestDeleteCompound:
         session = Session()
         parent = session.query(Compound).filter(Compound.entry_id == parent_id).first()
         assert parent is not None
-        assert parent.is_duplicate is False
+        assert parent.parent_id is None  # Still root
         session.close()
 
 
@@ -501,7 +516,7 @@ class TestBatchDeleteCompounds:
 
         response = client.post(
             "/api/v1/compounds/batch-delete",
-            json={"entry_ids": [real_id, "fake-id"]},
+            json={"entry_ids": [real_id, "00000000-0000-4000-8000-000000000099"]},
         )
         assert response.status_code == 200
         data = response.json()
@@ -580,8 +595,8 @@ class TestBatchDeleteCompounds:
 
         session = Session()
         child = session.query(Compound).filter(Compound.entry_id == child_id).first()
-        assert child.is_duplicate is False
-        assert child.duplicate_of is None
+        assert child.parent_id is None  # Promoted to root
+        assert child.version == 1
         session.close()
 
 

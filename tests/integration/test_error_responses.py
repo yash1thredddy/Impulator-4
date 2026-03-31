@@ -20,7 +20,7 @@ class TestErrorResponseShape:
 
     def test_404_returns_standard_error_shape(self, client):
         """GET a nonexistent compound returns 404 with standard shape."""
-        resp = client.get("/api/v1/compounds/nonexistent-entry-id-12345")
+        resp = client.get("/api/v1/compounds/00000000-0000-4000-8000-000000000007")
         assert resp.status_code == 404
 
         body = resp.json()
@@ -55,7 +55,7 @@ class TestErrorResponseShape:
             assert "message" in err, f"Missing 'message' in error entry: {err}"
             assert "type" in err, f"Missing 'type' in error entry: {err}"
 
-    def test_500_internal_error_shape(self, test_engine, mock_azure):
+    def test_500_internal_error_shape(self, pg_engine, mock_azure):
         """Unhandled exception produces standard error shape with INTERNAL_ERROR."""
         from backend.main import app
         from backend.core import database as db_module
@@ -65,10 +65,10 @@ class TestErrorResponseShape:
         from unittest.mock import patch
 
         # Need a TestClient with raise_server_exceptions=False to inspect 500 body
-        TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+        TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=pg_engine)
         original_engine = db_module.engine
         original_session_local = db_module.SessionLocal
-        db_module.engine = test_engine
+        db_module.engine = pg_engine
         db_module.SessionLocal = TestSessionLocal
 
         def override_get_db():
@@ -86,7 +86,7 @@ class TestErrorResponseShape:
 
         app.add_api_route("/api/v1/_test_500", raise_unhandled, methods=["GET"])
         try:
-            with patch('backend.core.scheduler.job_scheduler.trigger'):
+            with patch('backend.core.scheduler.trigger'):
                 with TestClient(app, raise_server_exceptions=False) as c:
                     resp = c.get("/api/v1/_test_500")
                     assert resp.status_code == 500
@@ -112,7 +112,7 @@ class TestErrorResponseShape:
         request_ids = []
 
         # 404
-        r1 = client.get("/api/v1/compounds/nonexistent-1")
+        r1 = client.get("/api/v1/compounds/00000000-0000-4000-8000-00000000000a")
         assert r1.status_code == 404
         request_ids.append(r1.json()["request_id"])
 
@@ -122,7 +122,7 @@ class TestErrorResponseShape:
         request_ids.append(r2.json()["request_id"])
 
         # Another 404
-        r3 = client.get("/api/v1/compounds/nonexistent-2")
+        r3 = client.get("/api/v1/compounds/00000000-0000-4000-8000-00000000000b")
         assert r3.status_code == 404
         request_ids.append(r3.json()["request_id"])
 
@@ -139,7 +139,7 @@ class TestErrorResponseShape:
     def test_error_code_matches_status(self, client):
         """Verify error_code corresponds to the HTTP status code."""
         # 404 -> NOT_FOUND
-        r404 = client.get("/api/v1/compounds/nonexistent-id")
+        r404 = client.get("/api/v1/compounds/00000000-0000-4000-8000-000000000009")
         assert r404.status_code == 404
         assert r404.json()["error_code"] == "NOT_FOUND"
 

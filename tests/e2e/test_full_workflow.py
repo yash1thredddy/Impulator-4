@@ -10,9 +10,7 @@ import pytest
 import uuid
 from unittest.mock import patch
 
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 from fastapi.testclient import TestClient
 
 
@@ -21,33 +19,21 @@ def generate_valid_session_id(prefix: str = "") -> str:
     return str(uuid.uuid4())
 
 
-@pytest.fixture(scope="module")
-def test_engine():
-    """Create a test database engine once per module."""
-    from backend.models._pg_base import PGBase
-    from backend.models.job import Job  # noqa: F401
-    from backend.models.compound import Compound  # noqa: F401
-    from backend.models.deleted_compound import DeletedCompound  # noqa: F401
-
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    PGBase.metadata.create_all(bind=engine)
-    yield engine
-    PGBase.metadata.drop_all(bind=engine)
-    engine.dispose()
+@pytest.fixture
+def test_engine(pg_engine):
+    """Alias for pg_engine from root conftest."""
+    return pg_engine
 
 
 @pytest.fixture(autouse=True)
-def _clean_tables(test_engine):
+def _clean_tables(pg_engine):
     """Truncate all tables after each test to isolate state."""
     yield
-    from backend.models._pg_base import PGBase
-    with test_engine.connect() as conn:
-        for table in reversed(PGBase.metadata.sorted_tables):
-            conn.execute(table.delete())
+    from sqlalchemy import text
+    with pg_engine.connect() as conn:
+        conn.execute(text(
+            "TRUNCATE TABLE audit_events, deleted_compounds, compounds, jobs CASCADE"
+        ))
         conn.commit()
 
 
@@ -92,7 +78,7 @@ def client_with_db(test_engine, mock_azure):
     # Mock the scheduler trigger to prevent background job processing.
     # Without this, the executor spawns threads that outlive the test,
     # causing "no such table" errors when the original engine is restored.
-    with patch('backend.core.scheduler.job_scheduler.trigger'):
+    with patch('backend.core.scheduler.trigger'):
         client = TestClient(app)
         yield client
 

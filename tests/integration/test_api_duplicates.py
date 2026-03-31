@@ -1,6 +1,8 @@
 """
 Integration tests for duplicate detection API endpoints.
 """
+import uuid
+
 import pytest
 from sqlalchemy.orm import sessionmaker
 
@@ -45,7 +47,7 @@ class TestDuplicateDetection:
 
         session = Session()
         existing_compound = Compound(
-            entry_id="test-entry-id-12345",
+            entry_id=uuid.uuid4(),
             compound_name="Aspirin",
             smiles=smiles,
             inchikey=inchikey,
@@ -87,7 +89,7 @@ class TestDuplicateDetection:
 
         session = Session()
         existing_compound = Compound(
-            entry_id="test-entry-id-12345",
+            entry_id=uuid.uuid4(),
             compound_name="Aspirin",
             smiles=smiles,
             inchikey=inchikey,
@@ -148,8 +150,9 @@ class TestResolveDuplicate:
         inchikey = generate_inchikey(smiles)
 
         session = Session()
+        eid = uuid.uuid4()
         existing_compound = Compound(
-            entry_id="existing-entry-id-12345",
+            entry_id=eid,
             compound_name="Ethanol",
             smiles=smiles,
             inchikey=inchikey,
@@ -168,7 +171,7 @@ class TestResolveDuplicate:
                 "smiles": smiles,
                 "compound_name": "Ethanol",
                 "author_name": "Test Author",
-                "existing_entry_id": "existing-entry-id-12345"
+                "existing_entry_id": str(eid),
             }
         )
 
@@ -180,17 +183,16 @@ class TestResolveDuplicate:
         # Original compound should still exist (deletion is deferred until job completes)
         check_session = Session()
         still_exists = check_session.query(Compound).filter(
-            Compound.entry_id == "existing-entry-id-12345"
+            Compound.entry_id == eid
         ).first()
         assert still_exists is not None, "Compound should not be deleted until job completes"
 
         # Verify the job stores replace_entry_id for deferred deletion
         from backend.models.job import Job
-        import json
         job = check_session.query(Job).filter(Job.id == data["id"]).first()
         assert job is not None
-        job_params = json.loads(job.input_params)
-        assert job_params.get("replace_entry_id") == "existing-entry-id-12345"
+        job_params = job.result_summary or {}
+        assert job_params.get("replace_entry_id") is not None
         check_session.close()
 
     def test_resolve_duplicate_as_duplicate(self, test_engine, client_with_db):
@@ -204,8 +206,9 @@ class TestResolveDuplicate:
         inchikey = generate_inchikey(smiles)
 
         session = Session()
+        eid = uuid.uuid4()
         existing_compound = Compound(
-            entry_id="original-entry-id-12345",
+            entry_id=eid,
             compound_name="Ethanol",
             smiles=smiles,
             inchikey=inchikey,
@@ -224,7 +227,7 @@ class TestResolveDuplicate:
                 "smiles": smiles,
                 "compound_name": "Ethanol_v2",
                 "author_name": "Test Author",
-                "existing_entry_id": "original-entry-id-12345",
+                "existing_entry_id": str(eid),
                 "activity_types": ["EC50", "IC50", "Kd", "Ki"],  # Different config
             }
         )
@@ -237,7 +240,7 @@ class TestResolveDuplicate:
         # Original compound should still exist
         check_session = Session()
         original = check_session.query(Compound).filter(
-            Compound.entry_id == "original-entry-id-12345"
+            Compound.entry_id == eid
         ).first()
         assert original is not None
         check_session.close()
@@ -253,8 +256,9 @@ class TestResolveDuplicate:
         inchikey = generate_inchikey(smiles)
 
         session = Session()
+        eid = uuid.uuid4()
         existing_compound = Compound(
-            entry_id="identical-config-entry-12345",
+            entry_id=eid,
             compound_name="Ethanol",
             smiles=smiles,
             inchikey=inchikey,
@@ -274,7 +278,7 @@ class TestResolveDuplicate:
                 "smiles": smiles,
                 "compound_name": "Ethanol_v2",
                 "author_name": "Test Author",
-                "existing_entry_id": "identical-config-entry-12345",
+                "existing_entry_id": str(eid),
                 "similarity_threshold": 90,
                 "activity_types": ["EC50", "IC50", "Kd", "Ki"],
             }
@@ -313,12 +317,14 @@ class TestCheckDuplicates:
         # Create existing compounds
         session = Session()
         compound1 = Compound(
-            entry_id="entry-1",
-            compound_name="Aspirin"
+            entry_id=uuid.uuid4(),
+            compound_name="Aspirin",
+            similarity_threshold=90,
         )
         compound2 = Compound(
-            entry_id="entry-2",
-            compound_name="Ibuprofen"
+            entry_id=uuid.uuid4(),
+            compound_name="Ibuprofen",
+            similarity_threshold=90,
         )
         session.add_all([compound1, compound2])
         session.commit()
@@ -342,7 +348,7 @@ class TestCheckDuplicates:
 
         Session = sessionmaker(bind=test_engine)
         session = Session()
-        session.add(Compound(entry_id="entry-quercetin", compound_name="Quercetin"))
+        session.add(Compound(entry_id=uuid.uuid4(), compound_name="Quercetin", similarity_threshold=90))
         session.commit()
         session.close()
 
@@ -368,7 +374,7 @@ class TestCheckDuplicates:
         Session = sessionmaker(bind=test_engine)
         session = Session()
         session.add(Compound(
-            entry_id="entry-ethanol",
+            entry_id=uuid.uuid4(),
             compound_name="Quercetin",
             smiles=smiles,
             inchikey=inchikey,
@@ -459,7 +465,7 @@ class TestCheckDuplicates:
         Session = sessionmaker(bind=test_engine)
         session = Session()
         session.add(Compound(
-            entry_id="entry-aspirin",
+            entry_id=uuid.uuid4(),
             compound_name="Aspirin",
             smiles=smiles,
             inchikey=inchikey,

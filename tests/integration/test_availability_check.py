@@ -9,13 +9,35 @@ These endpoints probe ChEMBL for similarity data before job submission
 to prevent wasting time on compounds with no ChEMBL data.
 """
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from sqlalchemy.orm import sessionmaker
 
 
-def _mock_probe_data_available(smiles, threshold):
+# ---------------------------------------------------------------------------
+# Async mock helpers
+# ---------------------------------------------------------------------------
+# The single-availability path calls:
+#   create_chembl_client() -> async context manager yielding httpx.AsyncClient
+#   probe_all_thresholds(client, smiles, start_threshold)
+#   quick_has_bioactivity(client, smiles, threshold, activity_types)
+#
+# The batch-availability path calls (no client arg -- bug, but matches code):
+#   probe_all_thresholds(smiles, compound_threshold)
+#   quick_has_bioactivity(smiles, compound_threshold, activity_types)
+#
+# Using *args/**kwargs so the same mock handles both call patterns.
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def _mock_chembl_client():
+    """Mock async context manager for create_chembl_client."""
+    yield MagicMock()
+
+
+async def _mock_probe_data_available(*args, **kwargs):
     """Mock probe_all_thresholds returning data at multiple thresholds."""
     return [
         {"threshold": 90, "count": 5},
@@ -27,7 +49,7 @@ def _mock_probe_data_available(smiles, threshold):
     ]
 
 
-def _mock_probe_no_data(smiles, threshold):
+async def _mock_probe_no_data(*args, **kwargs):
     """Mock probe_all_thresholds returning no data at any threshold."""
     return [
         {"threshold": 90, "count": 0},
@@ -39,7 +61,7 @@ def _mock_probe_no_data(smiles, threshold):
     ]
 
 
-def _mock_probe_low_thresholds_only(smiles, threshold):
+async def _mock_probe_low_thresholds_only(*args, **kwargs):
     """Mock probe_all_thresholds with data only at lower thresholds."""
     return [
         {"threshold": 90, "count": 0},
@@ -51,11 +73,23 @@ def _mock_probe_low_thresholds_only(smiles, threshold):
     ]
 
 
+async def _mock_has_bioactivity_true(*args, **kwargs):
+    """Mock quick_has_bioactivity returning True."""
+    return True
+
+
+async def _mock_has_bioactivity_false(*args, **kwargs):
+    """Mock quick_has_bioactivity returning False."""
+    return False
+
+
 class TestCheckAvailabilitySingle:
     """Tests for POST /api/v1/jobs/check-availability."""
 
+    @patch('backend.modules.api_client.create_chembl_client', side_effect=_mock_chembl_client)
+    @patch('backend.modules.api_client.quick_has_bioactivity', side_effect=_mock_has_bioactivity_true)
     @patch('backend.modules.api_client.probe_all_thresholds', side_effect=_mock_probe_data_available)
-    def test_compound_with_data_returns_available(self, mock_probe, client):
+    def test_compound_with_data_returns_available(self, mock_probe, mock_bio, mock_client, client):
         """Compound with ChEMBL data at requested threshold should return available=True."""
         response = client.post(
             "/api/v1/jobs/check-availability",
@@ -74,8 +108,10 @@ class TestCheckAvailabilitySingle:
         assert result["count_at_threshold"] == 5
         assert len(result["thresholds"]) > 0
 
+    @patch('backend.modules.api_client.create_chembl_client', side_effect=_mock_chembl_client)
+    @patch('backend.modules.api_client.quick_has_bioactivity', side_effect=_mock_has_bioactivity_false)
     @patch('backend.modules.api_client.probe_all_thresholds', side_effect=_mock_probe_no_data)
-    def test_compound_without_data_returns_unavailable(self, mock_probe, client):
+    def test_compound_without_data_returns_unavailable(self, mock_probe, mock_bio, mock_client, client):
         """Compound with no ChEMBL data should return available=False, has_any_data=False."""
         response = client.post(
             "/api/v1/jobs/check-availability",
@@ -91,8 +127,10 @@ class TestCheckAvailabilitySingle:
         assert result["has_any_data"] is False
         assert result["count_at_threshold"] == 0
 
+    @patch('backend.modules.api_client.create_chembl_client', side_effect=_mock_chembl_client)
+    @patch('backend.modules.api_client.quick_has_bioactivity', side_effect=_mock_has_bioactivity_false)
     @patch('backend.modules.api_client.probe_all_thresholds', side_effect=_mock_probe_low_thresholds_only)
-    def test_data_at_lower_thresholds_only(self, mock_probe, client):
+    def test_data_at_lower_thresholds_only(self, mock_probe, mock_bio, mock_client, client):
         """Compound with data only at lower thresholds: available=False but has_any_data=True."""
         response = client.post(
             "/api/v1/jobs/check-availability",
@@ -112,8 +150,10 @@ class TestCheckAvailabilitySingle:
         assert threshold_counts[70] == 3
         assert threshold_counts[40] == 30
 
+    @patch('backend.modules.api_client.create_chembl_client', side_effect=_mock_chembl_client)
+    @patch('backend.modules.api_client.quick_has_bioactivity', side_effect=_mock_has_bioactivity_true)
     @patch('backend.modules.api_client.probe_all_thresholds', side_effect=_mock_probe_data_available)
-    def test_existing_compound_included_in_response(self, mock_probe, test_engine, client):
+    def test_existing_compound_included_in_response(self, mock_probe, mock_bio, mock_client, test_engine, client):
         """Existing compounds with same structure key should be in existing_compounds."""
         from backend.models.compound import Compound
         from backend.services.job_service import generate_inchikey, _inchikey_structure_key
@@ -164,8 +204,10 @@ class TestCheckAvailabilitySingle:
 class TestCheckAvailabilityBatch:
     """Tests for POST /api/v1/jobs/check-availability/batch."""
 
+    @patch('backend.modules.api_client.create_chembl_client', side_effect=_mock_chembl_client)
+    @patch('backend.modules.api_client.quick_has_bioactivity', side_effect=_mock_has_bioactivity_true)
     @patch('backend.modules.api_client.probe_all_thresholds', side_effect=_mock_probe_data_available)
-    def test_batch_with_multiple_compounds(self, mock_probe, client):
+    def test_batch_with_multiple_compounds(self, mock_probe, mock_bio, mock_client, client):
         """Batch check with multiple compounds returns per-compound results."""
         response = client.post(
             "/api/v1/jobs/check-availability/batch",
@@ -185,8 +227,10 @@ class TestCheckAvailabilityBatch:
         assert data["available_count"] == 2
         assert data["no_data_count"] == 0
 
+    @patch('backend.modules.api_client.create_chembl_client', side_effect=_mock_chembl_client)
+    @patch('backend.modules.api_client.quick_has_bioactivity', side_effect=_mock_has_bioactivity_false)
     @patch('backend.modules.api_client.probe_all_thresholds', side_effect=_mock_probe_no_data)
-    def test_batch_all_no_data(self, mock_probe, client):
+    def test_batch_all_no_data(self, mock_probe, mock_bio, mock_client, client):
         """Batch where no compounds have data should report no_data_count."""
         response = client.post(
             "/api/v1/jobs/check-availability/batch",
@@ -204,16 +248,27 @@ class TestCheckAvailabilityBatch:
         assert data["available_count"] == 0
         assert data["no_data_count"] == 2
 
+    @patch('backend.modules.api_client.create_chembl_client', side_effect=_mock_chembl_client)
+    @patch('backend.modules.api_client.quick_has_bioactivity')
     @patch('backend.modules.api_client.probe_all_thresholds')
-    def test_batch_mixed_availability(self, mock_probe, client):
+    def test_batch_mixed_availability(self, mock_probe, mock_bio, mock_client, client):
         """Batch with mixed results: some available, some not."""
-        def mixed_probe(smiles, threshold):
+        async def mixed_probe(*args, **kwargs):
+            # Extract smiles: could be positional arg 0 (batch) or 1 (single)
+            smiles = args[0] if len(args) <= 2 else args[1]
             if "OC1=CC=CC=C1" in smiles:  # Aspirin-like
-                return _mock_probe_data_available(smiles, threshold)
+                return await _mock_probe_data_available(*args, **kwargs)
             else:
-                return _mock_probe_no_data(smiles, threshold)
+                return await _mock_probe_no_data(*args, **kwargs)
+
+        async def mixed_bio(*args, **kwargs):
+            smiles = args[0] if len(args) <= 3 else args[1]
+            if "OC1=CC=CC=C1" in smiles:
+                return True
+            return False
 
         mock_probe.side_effect = mixed_probe
+        mock_bio.side_effect = mixed_bio
 
         response = client.post(
             "/api/v1/jobs/check-availability/batch",
@@ -231,8 +286,10 @@ class TestCheckAvailabilityBatch:
         assert data["available_count"] == 1
         assert data["no_data_count"] == 1
 
+    @patch('backend.modules.api_client.create_chembl_client', side_effect=_mock_chembl_client)
+    @patch('backend.modules.api_client.quick_has_bioactivity', side_effect=_mock_has_bioactivity_true)
     @patch('backend.modules.api_client.probe_all_thresholds', side_effect=_mock_probe_data_available)
-    def test_batch_returns_summary_counts(self, mock_probe, client):
+    def test_batch_returns_summary_counts(self, mock_probe, mock_bio, mock_client, client):
         """Batch response should include summary counts."""
         response = client.post(
             "/api/v1/jobs/check-availability/batch",
@@ -250,8 +307,10 @@ class TestCheckAvailabilityBatch:
         assert "no_data_count" in data
         assert "results" in data
 
+    @patch('backend.modules.api_client.create_chembl_client', side_effect=_mock_chembl_client)
+    @patch('backend.modules.api_client.quick_has_bioactivity', side_effect=_mock_has_bioactivity_false)
     @patch('backend.modules.api_client.probe_all_thresholds', side_effect=Exception("API timeout"))
-    def test_batch_handles_probe_failure_gracefully(self, mock_probe, client):
+    def test_batch_handles_probe_failure_gracefully(self, mock_probe, mock_bio, mock_client, client):
         """If probe fails for a compound, it should be reported as unavailable, not crash."""
         response = client.post(
             "/api/v1/jobs/check-availability/batch",
@@ -262,7 +321,7 @@ class TestCheckAvailabilityBatch:
                 "similarity_threshold": 90,
             }
         )
-        # Should not crash — either returns 200 with unavailable result or 500
+        # Should not crash -- either returns 200 with unavailable result or 500
         assert response.status_code in (200, 500)
 
     def test_batch_empty_compounds_returns_422(self, client):
@@ -277,8 +336,10 @@ class TestCheckAvailabilityBatch:
         # Should fail validation (empty list)
         assert response.status_code in (200, 422)
 
+    @patch('backend.modules.api_client.create_chembl_client', side_effect=_mock_chembl_client)
+    @patch('backend.modules.api_client.quick_has_bioactivity', side_effect=_mock_has_bioactivity_true)
     @patch('backend.modules.api_client.probe_all_thresholds', side_effect=_mock_probe_data_available)
-    def test_batch_existing_compounds_matched(self, mock_probe, test_engine, client):
+    def test_batch_existing_compounds_matched(self, mock_probe, mock_bio, mock_client, test_engine, client):
         """Batch should find existing compounds by InChIKey for each input."""
         from backend.models.compound import Compound
         from backend.services.job_service import generate_inchikey, _inchikey_structure_key

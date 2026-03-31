@@ -1,6 +1,6 @@
 """
 Integration tests for repository layer coverage.
-Tests repositories with real SQLite (in-memory) via existing fixtures.
+Tests repositories with real Postgres via existing fixtures.
 """
 import uuid
 from datetime import datetime, timezone
@@ -15,10 +15,11 @@ class TestJobRepository:
         from backend.models.enums import JobStatus, JobType
 
         defaults = {
-            "id": str(uuid.uuid4()),
+            "id": uuid.uuid4(),
             "status": JobStatus.PENDING,
-            "session_id": str(uuid.uuid4()),
+            "session_id": uuid.uuid4(),
             "job_type": JobType.SINGLE,
+            "compound_name": "TestCompound",
         }
         defaults.update(overrides)
         job = Job(**defaults)
@@ -38,14 +39,14 @@ class TestJobRepository:
     def test_get_by_job_id_not_found(self, db_session):
         """Test returns None for nonexistent job."""
         from backend.repositories.job_repository import job_repo
-        assert job_repo.get_by_job_id(db_session, "nonexistent") is None
+        assert job_repo.get_by_job_id(db_session, uuid.uuid4()) is None
 
     def test_get_active_jobs(self, db_session):
         """Test getting active (pending/processing) jobs."""
         from backend.repositories.job_repository import job_repo
         from backend.models.enums import JobStatus
 
-        sid = str(uuid.uuid4())
+        sid = uuid.uuid4()
         self._create_job(db_session, status=JobStatus.PENDING, session_id=sid)
         self._create_job(db_session, status=JobStatus.COMPLETED, session_id=sid)
 
@@ -68,7 +69,7 @@ class TestJobRepository:
         """Test paginated job listing."""
         from backend.repositories.job_repository import job_repo
 
-        sid = str(uuid.uuid4())
+        sid = uuid.uuid4()
         for _ in range(5):
             self._create_job(db_session, session_id=sid)
 
@@ -94,7 +95,7 @@ class TestJobRepository:
         """Test finding job by idempotency key."""
         from backend.repositories.job_repository import job_repo
 
-        sid = str(uuid.uuid4())
+        sid = uuid.uuid4()
         idem_key = "idem-123"
         job = self._create_job(db_session, session_id=sid, idempotency_key=idem_key)
 
@@ -106,7 +107,7 @@ class TestJobRepository:
         """Test getting all jobs in a batch."""
         from backend.repositories.job_repository import job_repo
 
-        batch_id = str(uuid.uuid4())
+        batch_id = uuid.uuid4()
         self._create_job(db_session, batch_id=batch_id)
         self._create_job(db_session, batch_id=batch_id)
         self._create_job(db_session)  # Different batch
@@ -119,11 +120,11 @@ class TestJobRepository:
         from backend.repositories.job_repository import job_repo
         from backend.models.enums import JobStatus
 
-        batch_id = str(uuid.uuid4())
+        batch_id = uuid.uuid4()
         self._create_job(db_session, batch_id=batch_id, status=JobStatus.COMPLETED,
-                         input_params='{"compound_name": "Aspirin", "smiles": "CC"}')
+                         compound_name="Aspirin")
         self._create_job(db_session, batch_id=batch_id, status=JobStatus.PENDING,
-                         input_params='{"compound_name": "Caffeine", "smiles": "CN"}')
+                         compound_name="Caffeine")
 
         summary = job_repo.get_batch_summary(db_session, batch_id)
         assert summary["total_jobs"] == 2
@@ -134,7 +135,7 @@ class TestJobRepository:
     def test_get_batch_summary_empty(self, db_session):
         """Test batch summary for nonexistent batch."""
         from backend.repositories.job_repository import job_repo
-        summary = job_repo.get_batch_summary(db_session, "nonexistent-batch")
+        summary = job_repo.get_batch_summary(db_session, uuid.uuid4())
         assert summary == {}
 
     def test_count_by_status(self, db_session):
@@ -178,24 +179,24 @@ class TestJobRepository:
         assert job_repo.claim_next_pending_job(db_session) is None
 
     def test_create_job(self, db_session):
-        """Test write-locked job creation."""
+        """Test job creation via repository."""
         from backend.repositories.job_repository import job_repo
         from backend.models.enums import JobStatus, JobType
 
-        job_id = str(uuid.uuid4())
+        job_id = uuid.uuid4()
         job = job_repo.create_job(
             db_session,
             id=job_id,
             job_type=JobType.SINGLE,
-            session_id="test-session",
-            input_params='{"compound_name": "test"}',
+            session_id=uuid.uuid4(),
+            compound_name="test",
         )
         db_session.commit()
         assert job.id == job_id
         assert job.status == JobStatus.PENDING
 
     def test_update_status(self, db_session):
-        """Test write-locked status update."""
+        """Test status update."""
         from backend.repositories.job_repository import job_repo
         from backend.models.enums import JobStatus
 
@@ -218,7 +219,7 @@ class TestJobRepository:
         assert result is None  # Blocked by resurrection guard
 
     def test_update_progress(self, db_session):
-        """Test write-locked progress update."""
+        """Test progress update."""
         from backend.repositories.job_repository import job_repo
         from backend.models.enums import JobStatus
 
@@ -233,7 +234,7 @@ class TestJobRepository:
         from backend.repositories.job_repository import job_repo
         from backend.models.enums import JobStatus
 
-        batch_id = str(uuid.uuid4())
+        batch_id = uuid.uuid4()
         self._create_job(db_session, batch_id=batch_id, status=JobStatus.PENDING)
         self._create_job(db_session, batch_id=batch_id, status=JobStatus.PROCESSING)
         self._create_job(db_session, batch_id=batch_id, status=JobStatus.COMPLETED)
@@ -243,7 +244,7 @@ class TestJobRepository:
         assert cancelled == 2
 
     def test_delete_job(self, db_session):
-        """Test write-locked job deletion."""
+        """Test job deletion."""
         from backend.repositories.job_repository import job_repo
 
         job = self._create_job(db_session)
@@ -255,7 +256,7 @@ class TestJobRepository:
     def test_delete_job_not_found(self, db_session):
         """Test delete returns False for nonexistent job."""
         from backend.repositories.job_repository import job_repo
-        assert job_repo.delete_job(db_session, "nonexistent") is False
+        assert job_repo.delete_job(db_session, uuid.uuid4()) is False
 
     def test_get_by_status(self, db_session):
         """Test getting all jobs by status."""
@@ -307,7 +308,7 @@ class TestCompoundRepository:
     def test_get_by_entry_id_not_found(self, db_session):
         """Test returns None for nonexistent entry_id."""
         from backend.repositories.compound_repository import compound_repo
-        assert compound_repo.get_by_entry_id(db_session, "nonexistent") is None
+        assert compound_repo.get_by_entry_id(db_session, uuid.uuid4()) is None
 
     def test_get_compounds_paginated(self, db_session, seed_compound):
         """Test paginated compound listing."""
@@ -327,7 +328,8 @@ class TestCompoundRepository:
 
         compounds, total = compound_repo.get_compounds_paginated(db_session, search="Aspirin")
         assert total == 1
-        assert compounds[0].compound_name == "Aspirin"
+        # compounds is list of tuples (Compound, parent_name, version_count)
+        assert compounds[0][0].compound_name == "Aspirin"
 
     def test_get_compounds_paginated_sort_asc(self, db_session, seed_compound):
         """Test paginated listing with ascending sort."""
@@ -338,7 +340,7 @@ class TestCompoundRepository:
         compounds, _ = compound_repo.get_compounds_paginated(
             db_session, sort_by="compound_name", sort_order="asc"
         )
-        assert compounds[0].compound_name == "Alpha"
+        assert compounds[0][0].compound_name == "Alpha"
 
     def test_get_versions_with_siblings(self, db_session, seed_compound):
         """Test getting structural siblings by InChIKey."""
@@ -354,7 +356,7 @@ class TestCompoundRepository:
     def test_get_versions_not_found(self, db_session):
         """Test get_versions returns empty for nonexistent compound."""
         from backend.repositories.compound_repository import compound_repo
-        assert compound_repo.get_versions(db_session, "nonexistent") == []
+        assert compound_repo.get_versions(db_session, uuid.uuid4()) == []
 
     def test_get_versions_no_inchikey(self, db_session, seed_compound):
         """Test get_versions returns empty when compound has no InChIKey."""
@@ -377,8 +379,8 @@ class TestCompoundRepository:
         from backend.repositories.compound_repository import compound_repo
 
         c1 = seed_compound(name="Main")
-        seed_compound(name="Dup", is_duplicate=True, duplicate_of=c1.entry_id,
-                     entry_id=str(uuid.uuid4()))  # duplicate row
+        seed_compound(name="Dup", parent_id=c1.entry_id, version=2,
+                     entry_id=str(uuid.uuid4()))  # child row
 
         dups = compound_repo.find_duplicates_by_structure_key(db_session, c1.inchikey_structure_key)
         assert len(dups) == 2
@@ -389,7 +391,7 @@ class TestCompoundRepository:
 
         comp = compound_repo.create_compound(
             db_session,
-            entry_id=str(uuid.uuid4()),
+            entry_id=uuid.uuid4(),
             compound_name="AutoKey",
             smiles="CCO",
             inchikey="LFQSCWFLJHTTHZ-UHFFFAOYSA-N",
@@ -399,7 +401,7 @@ class TestCompoundRepository:
         assert comp.inchikey_structure_key == "LFQSCWFLJHTTHZ-UHFFFAOYSA"
 
     def test_update_compound(self, db_session, seed_compound):
-        """Test write-locked compound update."""
+        """Test compound update."""
         from backend.repositories.compound_repository import compound_repo
 
         comp = seed_compound(name="Original")
@@ -412,7 +414,7 @@ class TestCompoundRepository:
     def test_update_compound_not_found(self, db_session):
         """Test update returns None for nonexistent compound."""
         from backend.repositories.compound_repository import compound_repo
-        assert compound_repo.update_compound(db_session, "nonexistent", compound_name="X") is None
+        assert compound_repo.update_compound(db_session, uuid.uuid4(), compound_name="X") is None
 
     def test_archive_compound(self, db_session, seed_compound):
         """Test archiving a compound to DeletedCompound table."""
@@ -420,50 +422,12 @@ class TestCompoundRepository:
 
         comp = seed_compound(name="ToArchive")
         deleted_record = compound_repo.archive_compound(
-            db_session, comp, session_id="test-session", deletion_reason="test"
+            db_session, comp, deleted_by=uuid.uuid4(), deletion_reason="test"
         )
         db_session.commit()
 
         assert deleted_record.compound_name == "ToArchive"
-        assert deleted_record.deleted_by_session == "test-session"
         assert deleted_record.deletion_reason == "test"
-
-    def test_handle_children_before_delete(self, db_session, seed_compound):
-        """Test child promotion and reparenting on parent deletion."""
-        from backend.repositories.compound_repository import compound_repo
-
-        parent = seed_compound(name="Parent")
-        child1 = seed_compound(name="Child1", is_duplicate=True, duplicate_of=parent.entry_id,
-                               entry_id=str(uuid.uuid4()))
-        child2 = seed_compound(name="Child2", is_duplicate=True, duplicate_of=parent.entry_id,
-                               entry_id=str(uuid.uuid4()))
-
-        count = compound_repo.handle_children_before_delete(db_session, parent.entry_id)
-        db_session.commit()
-
-        assert count >= 2  # promoted + reparented
-
-        # Refresh to see changes
-        db_session.refresh(child1)
-        db_session.refresh(child2)
-
-        # One child should be promoted (is_duplicate=False)
-        promoted = [c for c in [child1, child2] if not c.is_duplicate]
-        assert len(promoted) == 1
-
-    def test_handle_children_no_children(self, db_session, seed_compound):
-        """Test handle_children returns 0 when no children exist."""
-        from backend.repositories.compound_repository import compound_repo
-        comp = seed_compound(name="NoChildren")
-        assert compound_repo.handle_children_before_delete(db_session, comp.entry_id) == 0
-
-    def test_handle_children_duplicate_compound(self, db_session, seed_compound):
-        """Test handle_children returns 0 for duplicate compounds."""
-        from backend.repositories.compound_repository import compound_repo
-        parent = seed_compound(name="Parent")
-        child = seed_compound(name="Child", is_duplicate=True, duplicate_of=parent.entry_id,
-                              entry_id=str(uuid.uuid4()))
-        assert compound_repo.handle_children_before_delete(db_session, child.entry_id) == 0
 
     def test_find_by_name_case_insensitive(self, db_session, seed_compound):
         """Test case-insensitive name search."""
@@ -493,52 +457,3 @@ class TestCompoundRepository:
         seed_compound(name="Aspirin")
         seed_compound(name="Caffeine", entry_id=str(uuid.uuid4()))
         assert compound_repo.count_compounds(db_session, search="Aspirin") == 1
-
-
-class TestBaseRepository:
-    """Tests for BaseRepository generic methods."""
-
-    def test_get_by_id(self, db_session, seed_compound):
-        """Test get_by_id on compound."""
-        from backend.repositories.compound_repository import compound_repo
-        comp = seed_compound(name="GetById")
-        found = compound_repo.get_by_id(db_session, comp.id, id_column="id")
-        assert found is not None
-        assert found.compound_name == "GetById"
-
-    def test_get_all_with_limit(self, db_session, seed_compound):
-        """Test get_all with pagination."""
-        from backend.repositories.compound_repository import compound_repo
-        for i in range(4):
-            seed_compound(name=f"C{i}", entry_id=str(uuid.uuid4()))
-
-        results = compound_repo.get_all(db_session, offset=0, limit=2)
-        assert len(results) == 2
-
-    def test_count(self, db_session, seed_compound):
-        """Test count method."""
-        from backend.repositories.compound_repository import compound_repo
-        seed_compound(name="CountMe")
-        assert compound_repo.count(db_session) >= 1
-
-    def test_add_entity(self, db_session):
-        """Test add entity with write lock."""
-        from backend.repositories.compound_repository import compound_repo
-        from backend.models.compound import Compound
-
-        comp = Compound(
-            entry_id=str(uuid.uuid4()),
-            compound_name="Added",
-            smiles="CCO",
-        )
-        compound_repo.add(db_session, comp)
-        db_session.commit()
-        assert comp.id is not None
-
-    def test_delete_entity(self, db_session, seed_compound):
-        """Test delete entity with write lock."""
-        from backend.repositories.compound_repository import compound_repo
-        comp = seed_compound(name="ToDelete")
-        compound_repo.delete(db_session, comp)
-        db_session.commit()
-        assert compound_repo.get_by_entry_id(db_session, comp.entry_id) is None

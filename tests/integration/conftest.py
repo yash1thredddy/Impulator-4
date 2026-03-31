@@ -2,64 +2,46 @@
 Shared fixtures for integration tests.
 
 Provides:
-- test_engine: In-memory SQLite with all tables created (module-scoped for speed)
+- pg_engine: Postgres engine from root conftest (session-scoped, Alembic-provisioned)
 - mock_azure: Patches Azure sync functions to no-ops
-- client: FastAPI TestClient wired to the test database
+- client: FastAPI TestClient wired to the test Postgres database
+- db_session: Per-test database session
+- seed_compound: Factory fixture for creating test compounds
 """
 import pytest
 from unittest.mock import patch
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import text
 
 
-@pytest.fixture(scope="module")
-def test_engine():
-    """Create a test database engine once per module (faster than per-function)."""
-    from backend.models._pg_base import PGBase
-    from backend.models.job import Job  # noqa: F401
-    from backend.models.compound import Compound  # noqa: F401
-    from backend.models.deleted_compound import DeletedCompound  # noqa: F401
-
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    PGBase.metadata.create_all(bind=engine)
-    yield engine
-    PGBase.metadata.drop_all(bind=engine)
-    engine.dispose()
+@pytest.fixture
+def test_engine(pg_engine):
+    """Alias for pg_engine — used by integration tests that predate the rename."""
+    return pg_engine
 
 
 @pytest.fixture(autouse=True)
-def _clean_tables(test_engine):
-    """Truncate all tables after each test to isolate state."""
+def _clean_tables(pg_engine):
+    """Truncate all tables after each test for isolation."""
     yield
-    from backend.models._pg_base import PGBase
-    with test_engine.connect() as conn:
-        for table in reversed(PGBase.metadata.sorted_tables):
-            conn.execute(table.delete())
+    with pg_engine.connect() as conn:
+        conn.execute(text(
+            "TRUNCATE TABLE audit_events, deleted_compounds, compounds, jobs CASCADE"
+        ))
         conn.commit()
 
 
 @pytest.fixture
-def db_session(test_engine):
-    """Create a database session bound to the test engine.
-
-    Eliminates the repeated `Session = sessionmaker(bind=test_engine)` boilerplate
-    in every test method that needs to seed data.
-    """
-    from sqlalchemy.orm import sessionmaker
-
-    Session = sessionmaker(bind=test_engine)
+def db_session(pg_engine):
+    """Per-test database session."""
+    Session = sessionmaker(bind=pg_engine)
     session = Session()
     yield session
     session.close()
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def mock_azure():
     """Mock Azure storage for tests.
 
@@ -70,27 +52,17 @@ def mock_azure():
             yield
 
 
-@pytest.fixture
-def client(test_engine, mock_azure):
-    """Create a test client for the FastAPI app with proper test database.
-
-    Wires the app's get_db dependency to the in-memory test engine,
-    patches the scheduler trigger to prevent background processing,
-    and restores all originals on teardown.
-    """
+@pytest.fixture(scope="module")
+def client(pg_engine, mock_azure):
+    """FastAPI TestClient wired to test Postgres."""
     from backend.main import app
     from backend.core import database as db_module
     from backend.core.database import get_db
 
-    # Save original values
     original_engine = db_module.engine
     original_session_local = db_module.SessionLocal
-
-    # Create new SessionLocal bound to test engine
-    TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
-
-    # Patch the module-level engine and SessionLocal
-    db_module.engine = test_engine
+    TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=pg_engine)
+    db_module.engine = pg_engine
     db_module.SessionLocal = TestSessionLocal
 
     def override_get_db():
@@ -101,13 +73,9 @@ def client(test_engine, mock_azure):
             session.close()
 
     app.dependency_overrides[get_db] = override_get_db
-
-    # Mock the scheduler to prevent background job processing after test teardown
-    with patch('backend.core.scheduler.job_scheduler.trigger'):
+    with patch('backend.core.scheduler.trigger'):
         with TestClient(app) as c:
             yield c
-
-    # Restore original values
     app.dependency_overrides.clear()
     db_module.engine = original_engine
     db_module.SessionLocal = original_session_local

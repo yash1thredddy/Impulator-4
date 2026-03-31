@@ -104,9 +104,12 @@ class Settings(BaseSettings):
         # so also check the environment variable directly
         import os
         testing = os.environ.get("TESTING", "").lower() in ("true", "1", "yes")
-        # TEMPORARY: SQLite test fallback removed in Phase 20 (TST-01)
         if testing:
-            return v if v else "sqlite:///:memory:"
+            # In TESTING mode, skip postgresql:// validation.
+            # Tests provide their own DATABASE_URL via session fixtures.
+            # Return a valid-looking placeholder so create_engine() doesn't
+            # crash at import time (fixtures override it before any DB access).
+            return v if v else "postgresql://test:test@localhost:5432/test_placeholder"
 
         if not v:
             raise ValueError(

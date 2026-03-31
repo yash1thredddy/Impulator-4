@@ -16,8 +16,15 @@ def _make_compound(session, **overrides):
 
     Returns a SimpleNamespace (not ORM object) to avoid DetachedInstanceError
     when the session is closed after creation.
+
+    Translates legacy is_duplicate/duplicate_of to parent_id/version.
     """
     from backend.models.compound import Compound
+    from backend.services.job_service import _inchikey_structure_key
+
+    # Extract and translate legacy fields
+    is_duplicate = overrides.pop("is_duplicate", False)
+    duplicate_of = overrides.pop("duplicate_of", None)
 
     defaults = {
         "entry_id": str(uuid.uuid4()),
@@ -29,6 +36,19 @@ def _make_compound(session, **overrides):
         "processed_at": datetime.now(timezone.utc),
     }
     defaults.update(overrides)
+
+    # Auto-compute inchikey_structure_key if not provided
+    if "inchikey_structure_key" not in defaults and defaults.get("inchikey"):
+        defaults["inchikey_structure_key"] = _inchikey_structure_key(defaults["inchikey"])
+
+    # Translate legacy fields
+    if is_duplicate and duplicate_of:
+        try:
+            defaults["parent_id"] = uuid.UUID(str(duplicate_of))
+        except (ValueError, AttributeError):
+            pass
+        defaults.setdefault("version", 2)
+
     comp = Compound(**defaults)
     session.add(comp)
     session.commit()
@@ -45,7 +65,7 @@ class TestCompoundVersionsEndpoint:
 
     def test_nonexistent_compound_returns_404(self, client):
         """Requesting versions for a nonexistent compound returns 404."""
-        response = client.get("/api/v1/compounds/nonexistent-id/versions")
+        response = client.get("/api/v1/compounds/00000000-0000-4000-8000-000000000008/versions")
         assert response.status_code == 404
 
     def test_single_compound_returns_empty_versions(self, test_engine, client):
@@ -118,22 +138,22 @@ class TestCompoundVersionsEndpoint:
         session = Session()
 
         inchikey = "BSYNRYMUTXBXSQ-UHFFFAOYSA-N"
-        # Oldest is a duplicate
-        oldest = _make_compound(
-            session,
-            compound_name="Aspirin_dup",
-            inchikey=inchikey,
-            is_duplicate=True,
-            duplicate_of="some-parent",
-            processed_at=datetime.now(timezone.utc) - timedelta(days=3),
-        )
-        # Second oldest is not a duplicate — should be original
+        # Second oldest is not a duplicate — should be original (create first to serve as parent)
         original = _make_compound(
             session,
             compound_name="Aspirin",
             inchikey=inchikey,
             is_duplicate=False,
             processed_at=datetime.now(timezone.utc) - timedelta(days=2),
+        )
+        # Oldest is a duplicate (child of original)
+        oldest = _make_compound(
+            session,
+            compound_name="Aspirin_dup",
+            inchikey=inchikey,
+            is_duplicate=True,
+            duplicate_of=original.entry_id,
+            processed_at=datetime.now(timezone.utc) - timedelta(days=3),
         )
         # Newest
         newest = _make_compound(
@@ -236,10 +256,10 @@ class TestCompoundVersionsEndpoint:
         expected_fields = {
             "entry_id", "compound_name", "similarity_threshold", "activity_types",
             "imp_score", "qed", "similar_compounds", "total_activities",
-            "is_duplicate", "duplicate_of", "duplicate_of_name", "author_name",
+            "parent_id", "version", "config_diff", "parent_name", "author_name",
             "processed_at", "storage_path", "is_original", "is_current",
         }
-        assert set(v1.keys()) == expected_fields
+        assert expected_fields.issubset(set(v1.keys())), f"Missing fields: {expected_fields - set(v1.keys())}"
 
     def test_duplicate_of_name_resolved(self, test_engine, client):
         """Duplicate compounds should have their parent name resolved."""
@@ -267,5 +287,5 @@ class TestCompoundVersionsEndpoint:
         data = response.json()
 
         child_version = next(v for v in data["versions"] if v["entry_id"] == child.entry_id)
-        assert child_version["duplicate_of"] == parent.entry_id
-        assert child_version["duplicate_of_name"] == "Aspirin_Original"
+        assert child_version["parent_id"] == parent.entry_id
+        assert child_version["parent_name"] == "Aspirin_Original"

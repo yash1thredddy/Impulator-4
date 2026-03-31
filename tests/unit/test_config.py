@@ -31,7 +31,7 @@ class TestSettingsDefaults:
         with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
-        assert settings.APP_VERSION == "2.1.3"
+        assert settings.APP_VERSION == "2.2.0-dev"
 
     def test_default_debug_false(self):
         """Test debug is False by default."""
@@ -60,14 +60,14 @@ class TestSettingsDefaults:
 
         assert settings.FRONTEND_PORT == 7860
 
-    def test_default_max_workers(self):
-        """Test default max workers."""
+    def test_default_max_concurrent_jobs(self):
+        """Test default max concurrent jobs."""
         from backend.config import Settings
 
         with patch.dict(os.environ, {'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
-        assert settings.MAX_WORKERS == 2
+        assert settings.MAX_CONCURRENT_JOBS == 10
 
     def test_default_job_timeout(self):
         """Test default job timeout."""
@@ -109,23 +109,23 @@ class TestSettingsOverrides:
 
         assert settings.API_PORT == 9000
 
-    def test_override_max_workers(self):
-        """Test MAX_WORKERS can be overridden."""
+    def test_override_max_concurrent_jobs(self):
+        """Test MAX_CONCURRENT_JOBS can be overridden."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {'MAX_WORKERS': '4', 'TESTING': 'true'}, clear=True):
+        with patch.dict(os.environ, {'MAX_CONCURRENT_JOBS': '20', 'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
-        assert settings.MAX_WORKERS == 4
+        assert settings.MAX_CONCURRENT_JOBS == 20
 
     def test_override_database_url(self):
         """Test DATABASE_URL can be overridden."""
         from backend.config import Settings
 
-        with patch.dict(os.environ, {'DATABASE_URL': 'sqlite:///./test.db', 'TESTING': 'true'}, clear=True):
+        with patch.dict(os.environ, {'DATABASE_URL': 'postgresql://test:test@localhost/testdb', 'TESTING': 'true'}, clear=True):
             settings = Settings(_env_file=None)
 
-        assert settings.DATABASE_URL == 'sqlite:///./test.db'
+        assert settings.DATABASE_URL == 'postgresql://test:test@localhost/testdb'
 
     def test_override_azure_connection_string(self):
         """Test AZURE_CONNECTION_STRING can be overridden."""

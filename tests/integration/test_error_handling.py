@@ -11,19 +11,16 @@ Tests error handling throughout the application including:
 import pytest
 from unittest.mock import patch
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 
 def _force_stop_scheduler_thread() -> None:
-    """Stop global scheduler thread between tests to avoid DB races."""
-    from backend.core.scheduler import job_scheduler
+    """Stop global scheduler task between tests to avoid DB races."""
+    from backend.core import scheduler as sched_mod
 
-    job_scheduler._running = False
-    if job_scheduler._thread and job_scheduler._thread.is_alive():
-        # Poll interval is 6s; wait slightly longer for graceful exit.
-        job_scheduler._thread.join(timeout=7)
-    job_scheduler._thread = None
+    if sched_mod._scheduler_task and not sched_mod._scheduler_task.done():
+        sched_mod._scheduler_task.cancel()
+    sched_mod._scheduler_task = None
 
 
 @pytest.fixture(autouse=True)
@@ -34,38 +31,10 @@ def isolate_scheduler():
     _force_stop_scheduler_thread()
 
 
-@pytest.fixture(scope="module")
-def test_engine():
-    """In-memory engine shared across tests in this module.
-
-    Uses StaticPool for connection sharing across threads via TestClient.
-    """
-    from backend.models._pg_base import PGBase
-    from backend.models.job import Job  # noqa: F401
-    from backend.models.compound import Compound  # noqa: F401
-    from backend.models.deleted_compound import DeletedCompound  # noqa: F401
-    from sqlalchemy.pool import StaticPool
-
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    PGBase.metadata.create_all(bind=engine)
-    yield engine
-    PGBase.metadata.drop_all(bind=engine)
-    engine.dispose()
-
-
-@pytest.fixture(autouse=True)
-def _clean_tables(test_engine):
-    """Truncate all tables after each test."""
-    yield
-    from backend.models._pg_base import PGBase
-    with test_engine.connect() as conn:
-        for table in reversed(PGBase.metadata.sorted_tables):
-            conn.execute(table.delete())
-        conn.commit()
+@pytest.fixture
+def test_engine(pg_engine):
+    """Alias for shared pg_engine fixture."""
+    return pg_engine
 
 
 @pytest.fixture
@@ -186,19 +155,19 @@ class TestNonExistentResourceHandling:
 
     def test_get_nonexistent_job(self, client_with_db):
         """Test getting a job that doesn't exist."""
-        response = client_with_db.get("/api/v1/jobs/nonexistent-id")
+        response = client_with_db.get("/api/v1/jobs/00000000-0000-4000-8000-000000000001")
 
         assert response.status_code == 404
 
     def test_cancel_nonexistent_job(self, client_with_db):
         """Test cancelling a job that doesn't exist."""
-        response = client_with_db.post("/api/v1/jobs/nonexistent-id/cancel")
+        response = client_with_db.post("/api/v1/jobs/00000000-0000-4000-8000-000000000001/cancel")
 
         assert response.status_code == 404
 
     def test_delete_nonexistent_job(self, client_with_db):
         """Test deleting a job that doesn't exist."""
-        response = client_with_db.delete("/api/v1/jobs/nonexistent-id")
+        response = client_with_db.delete("/api/v1/jobs/00000000-0000-4000-8000-000000000001")
 
         assert response.status_code == 404
 
@@ -324,7 +293,7 @@ class TestDatabaseErrorHandling:
         app.dependency_overrides[get_db] = broken_db
 
         try:
-            with patch('backend.core.scheduler.job_scheduler.trigger'):
+            with patch('backend.core.scheduler.trigger'):
                 with TestClient(app, raise_server_exceptions=False) as client:
                     response = client.get("/api/v1/jobs")
 
@@ -351,18 +320,20 @@ class TestExternalServiceFailures:
                 # Some implementations may raise
                 pass
 
-    def test_pdb_api_failure_handled(self):
+    async def test_pdb_api_failure_handled(self):
         """Test that PDB API failure is handled gracefully."""
         from backend.modules.pdb_client import search_similar_ligands
-        import requests
+        import httpx
 
-        with patch('backend.modules.pdb_client.requests.post',
-                   side_effect=requests.exceptions.ConnectionError("PDB unavailable")):
+        mock_client = httpx.AsyncClient()
+        with patch.object(mock_client, 'post',
+                          side_effect=httpx.ConnectError("PDB unavailable")):
             search_similar_ligands.cache_clear()
-            result = search_similar_ligands("CCO")
+            result = await search_similar_ligands(mock_client, "CCO")
 
             # Should return empty list
             assert result == []
+        await mock_client.aclose()
 
 
 class TestConcurrentRequests:
@@ -401,7 +372,7 @@ class TestConcurrentRequests:
         app.dependency_overrides[get_db] = override_get_db
 
         try:
-            with patch('backend.core.scheduler.job_scheduler.trigger'):
+            with patch('backend.core.scheduler.trigger'):
                 with TestClient(app) as client:
                     results = []
 
@@ -460,7 +431,7 @@ class TestConcurrentRequests:
         app.dependency_overrides[get_db] = override_get_db
 
         try:
-            with patch('backend.core.scheduler.job_scheduler.trigger'):
+            with patch('backend.core.scheduler.trigger'):
                 with TestClient(app) as client:
                     results = []
 

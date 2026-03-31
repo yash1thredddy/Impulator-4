@@ -7,21 +7,26 @@ license: other
 
 # 🔬 IMPs Navigator (Impulator 3)
 
-[![CI](https://github.com/yash1thredddy/Impulator-4/actions/workflows/ci.yml/badge.svg)](https://github.com/yash1thredddy/Impulator-4/actions/workflows/ci.yml) ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue) ![License](https://img.shields.io/badge/license-Proprietary-red)
+[![CI](https://github.com/yash1thredddy/Impulator-4/actions/workflows/ci.yml/badge.svg)](https://github.com/yash1thredddy/Impulator-4/actions/workflows/ci.yml) ![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue) ![License](https://img.shields.io/badge/license-Proprietary-red)
 
 **Compound Library & Analysis Tool for better Insights**
 
 A powerful Streamlit application for analyzing chemical compounds, calculating efficiency indices (SEI, BEI, etc.), and integrating data from ChEMBL and PDB.
 
+**Requirements:** Python 3.13+, Supabase Postgres database
+
 ## 🚀 Quick Start
 
 ### Run Locally
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Install dependencies (editable install with test extras)
+pip install -e ".[test]"
 
-# Run the app
-streamlit run app.py
+# Set DATABASE_URL to your Supabase Postgres connection
+export DATABASE_URL=postgresql://user:pass@host:5432/dbname
+
+# Run the app (starts both backend + frontend)
+./start.sh
 ```
 
 ### Documentation

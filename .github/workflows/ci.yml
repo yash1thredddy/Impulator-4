@@ -14,6 +14,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_impulator
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -56,7 +71,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
           TESTING: "true"
           AZURE_CONNECTION_STRING: ""
-          DATABASE_URL: "sqlite:///:memory:"
+          TEST_DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/test_impulator"
 
       - name: Upload coverage report
         uses: codecov/codecov-action@v4

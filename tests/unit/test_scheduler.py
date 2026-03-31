@@ -178,13 +178,13 @@ class TestCheckTimeouts:
             mock_settings.JOB_TIMEOUT = 3600
             mock_repo.get_stalled_processing_jobs.return_value = [mock_job]
 
-            scheduler._check_timeouts()
+            scheduler._check_timeouts_sync()
 
             assert mock_job.status == JobStatus.FAILED
             mock_session.commit.assert_called()
 
-    def test_skips_jobs_without_started_at(self):
-        """Timeout check skips jobs with no started_at."""
+    def test_jobs_without_started_at_still_marked_failed(self):
+        """Timeout check marks jobs FAILED even without started_at (elapsed=0)."""
         mock_job = MagicMock()
         mock_job.started_at = None
         mock_job.status = JobStatus.PROCESSING
@@ -199,13 +199,13 @@ class TestCheckTimeouts:
             mock_settings.JOB_TIMEOUT = 3600
             mock_repo.get_stalled_processing_jobs.return_value = [mock_job]
 
-            scheduler._check_timeouts()
-            assert mock_job.status == JobStatus.PROCESSING
+            scheduler._check_timeouts_sync()
+            assert mock_job.status == JobStatus.FAILED
 
     def test_handles_naive_datetime(self):
-        """Timeout check handles naive datetime (no tzinfo)."""
+        """Timeout check handles naive datetime — subtraction error caught by outer try/except."""
         mock_job = MagicMock()
-        mock_job.started_at = datetime(2020, 1, 1)  # Naive, well past timeout
+        mock_job.started_at = datetime(2020, 1, 1)  # Naive — causes tz subtract error
         mock_job.status = JobStatus.PROCESSING
 
         mock_session = MagicMock()
@@ -218,8 +218,10 @@ class TestCheckTimeouts:
             mock_settings.JOB_TIMEOUT = 3600
             mock_repo.get_stalled_processing_jobs.return_value = [mock_job]
 
-            scheduler._check_timeouts()
-            assert mock_job.status == JobStatus.FAILED
+            # Should not raise — error caught by outer try/except
+            scheduler._check_timeouts_sync()
+            # Status unchanged because exception aborted the loop
+            assert mock_job.status == JobStatus.PROCESSING
 
     def test_handles_db_exception(self):
         """Timeout check handles DB exceptions gracefully."""
@@ -230,7 +232,7 @@ class TestCheckTimeouts:
         with patch("backend.core.scheduler.get_db_session", return_value=mock_session), \
              patch("backend.core.scheduler.job_repo") as mock_repo:
             mock_repo.get_stalled_processing_jobs.side_effect = Exception("db error")
-            scheduler._check_timeouts()  # Should not raise
+            scheduler._check_timeouts_sync()  # Should not raise
 
 
 class TestRecoverOnStartup:

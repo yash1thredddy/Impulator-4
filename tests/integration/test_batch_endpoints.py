@@ -109,7 +109,7 @@ class TestBatchOperations:
         assert resp.status_code == 200
 
         summary = BatchSummary(**resp.json())
-        assert summary.batch_id == batch_id
+        assert str(summary.batch_id) == batch_id
         assert summary.total_jobs == 2
         assert summary.pending >= 0
 
@@ -134,20 +134,21 @@ class TestBatchOperations:
         assert resp.status_code == 200
 
         result = CancelResponse(**resp.json())
-        assert result.batch_id == batch_id
+        assert str(result.batch_id) == batch_id
         assert result.cancelled_count == 2
 
     def test_get_nonexistent_batch_returns_404(self, client):
-        """GET /api/v1/jobs/batch/fake returns 404."""
+        """GET /api/v1/jobs/batch/{nonexistent-uuid} returns 404."""
         resp = client.get(
-            "/api/v1/jobs/batch/nonexistent-batch", headers={"X-Session-ID": _sid()}
+            "/api/v1/jobs/batch/00000000-0000-4000-8000-000000000006", headers={"X-Session-ID": _sid()}
         )
         assert resp.status_code == 404
 
     def test_cancel_nonexistent_batch_returns_404(self, client):
         """POST cancel on nonexistent batch returns 404."""
         resp = client.post(
-            "/api/v1/jobs/batch/fake-batch/cancel", headers={"X-Session-ID": _sid()}
+            "/api/v1/jobs/batch/00000000-0000-4000-8000-000000000099/cancel",
+            headers={"X-Session-ID": _sid()},
         )
         assert resp.status_code == 404
 

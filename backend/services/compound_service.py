@@ -1425,19 +1425,10 @@ def batch_delete_with_cleanup(
     compounds_to_delete.sort(key=lambda c: (c.parent_id is None, c.compound_name))
 
     for compound in compounds_to_delete:
-        eid = compound.entry_id
-        # Reparent any remaining children of this compound before deleting
-        children = db.scalars(
-            select(Compound).where(Compound.parent_id == eid)
-        ).all()
-        for child in children:
-            child.parent_id = compound.parent_id  # Point to grandparent or None
-        if children:
-            db.flush()
-
+        eid = str(compound.entry_id)
         compound_name = compound.compound_name
 
-        # Archive to deleted_compounds
+        # Archive to deleted_compounds (before delete triggers reparenting)
         compound_repo.archive_compound(
             db,
             compound,

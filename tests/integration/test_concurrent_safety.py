@@ -21,7 +21,7 @@ def client_with_db(client):
 class TestConcurrentJobCreation:
     """Tests for concurrent job creation safety."""
 
-    def test_parallel_job_creation_no_corruption(self, test_engine, mock_azure):
+    def test_parallel_job_creation_no_corruption(self, pg_engine, mock_azure):
         """Test that parallel job submissions don't corrupt database.
 
         Note: SQLite in-memory databases have limited concurrency support.
@@ -35,8 +35,8 @@ class TestConcurrentJobCreation:
         original_engine = db_module.engine
         original_session_local = db_module.SessionLocal
 
-        TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
-        db_module.engine = test_engine
+        TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=pg_engine)
+        db_module.engine = pg_engine
         db_module.SessionLocal = TestSessionLocal
         lock = threading.Lock()
 
@@ -51,7 +51,7 @@ class TestConcurrentJobCreation:
 
         try:
             # Mock the scheduler to prevent background job processing after test teardown
-            scheduler_patch = patch('backend.core.scheduler.job_scheduler.trigger')
+            scheduler_patch = patch('backend.core.scheduler.trigger')
             scheduler_patch.start()
             client = TestClient(app)
             results = []
@@ -117,17 +117,17 @@ class TestConcurrentJobCreation:
             db_module.engine = original_engine
             db_module.SessionLocal = original_session_local
 
-    def test_parallel_progress_updates(self, test_engine, mock_azure):
+    def test_parallel_progress_updates(self, pg_engine, mock_azure):
         """Test that concurrent progress updates don't lose data."""
         from backend.services.job_service import job_service
         from backend.models.job import JobType, JobStatus
         from backend.core import database as db_module
 
         # Setup test database
-        TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+        TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=pg_engine)
         original_engine = db_module.engine
         original_session_local = db_module.SessionLocal
-        db_module.engine = test_engine
+        db_module.engine = pg_engine
         db_module.SessionLocal = TestSessionLocal
 
         try:
@@ -136,8 +136,10 @@ class TestConcurrentJobCreation:
             job = job_service.create_job(
                 session,
                 JobType.SINGLE,
-                {"compound_name": "TestCompound", "smiles": "CCO", "similarity_threshold": 90},
-                session_id="a2345670-1234-4123-8123-123456789012"
+                compound_name="TestCompound",
+                smiles="CCO",
+                similarity_threshold=90,
+                session_id="a2345670-1234-4123-8123-123456789012",
             )
             job_id = job.id
             # First update to PROCESSING state

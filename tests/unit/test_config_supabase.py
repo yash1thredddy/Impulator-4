@@ -4,7 +4,7 @@ Tests DATABASE_URL validation:
 - Rejects empty URLs in production mode
 - Rejects non-Postgres URLs in production mode
 - Normalizes postgres:// to postgresql://
-- Allows SQLite in TESTING mode for CI compatibility
+- TESTING mode skips postgresql:// validation (fixtures provide URL)
 """
 import os
 
@@ -50,18 +50,19 @@ class TestDatabaseUrlValidation:
             assert s.DATABASE_URL.startswith("postgresql://")
             assert not s.DATABASE_URL.startswith("postgres://user")
 
-    def test_sqlite_allowed_in_testing_mode(self):
-        """SQLite URL is allowed when TESTING=true (CI compatibility)."""
+    def test_testing_mode_accepts_any_url(self):
+        """TESTING mode skips postgresql:// validation."""
         with patch.dict(os.environ, {"TESTING": "true"}, clear=False):
             from backend.config import Settings
 
-            s = Settings(DATABASE_URL="sqlite:///:memory:", TESTING=True)
-            assert s.DATABASE_URL == "sqlite:///:memory:"
+            s = Settings(DATABASE_URL="postgresql://test:test@localhost/testdb", TESTING=True)
+            assert s.DATABASE_URL == "postgresql://test:test@localhost/testdb"
 
-    def test_empty_url_gets_default_in_testing(self):
-        """Empty DATABASE_URL gets sqlite:///:memory: default in TESTING mode."""
+    def test_empty_url_returns_placeholder_in_testing(self):
+        """Empty DATABASE_URL in TESTING mode returns a valid placeholder (fixtures override before DB access)."""
         with patch.dict(os.environ, {"TESTING": "true"}, clear=False):
             from backend.config import Settings
 
             s = Settings(DATABASE_URL="", TESTING=True)
-            assert s.DATABASE_URL == "sqlite:///:memory:"
+            assert s.DATABASE_URL.startswith("postgresql://")
+            assert "test_placeholder" in s.DATABASE_URL

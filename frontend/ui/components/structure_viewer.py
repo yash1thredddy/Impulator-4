@@ -86,6 +86,10 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                     opacity: 1;
                     transform: scale(1);
                 }}
+                #sv-panel-${{CHART_ID}}.pinned {{
+                    border-color: #667eea;
+                    box-shadow: 0 4px 20px rgba(102,126,234,0.35);
+                }}
                 #sv-panel-${{CHART_ID}}.dragging {{
                     box-shadow: 0 8px 24px rgba(0,0,0,0.3);
                     opacity: 0.95;
@@ -216,6 +220,7 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
             closeBtn.onclick = (e) => {{
                 e.preventDefault(); e.stopPropagation();
                 panel.classList.remove('open');
+                panel.classList.remove('pinned');
             }};
 
             // Drag support
@@ -331,49 +336,79 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
                 name: {repr(name_col) if name_col else 'null'}
             }};
 
-            // Debounced hover (150ms)
+            // ── Hover: show preview (auto-hides on unhover) ─────────────
             plotlyDiv.on('plotly_hover', function(data) {{
                 if (!data.points || data.points.length === 0) return;
+                if (panel.classList.contains('pinned')) return; // Don't override pinned panel
                 const pt = data.points[0];
 
                 clearTimeout(hoverTimer);
                 hoverTimer = setTimeout(() => {{
-                    // Extract SMILES from customdata[0]
                     if (!pt.customdata) return;
                     const smiles = pt.customdata[0];
                     if (!smiles || smiles === 'null') return;
 
-                    if (smiles === lastSmiles) {{
-                        // Same molecule, just reposition
-                        positionPanel(mouseX, mouseY);
-                        panel.classList.add('open');
-                        return;
+                    if (smiles !== lastSmiles) {{
+                        lastSmiles = smiles;
+                        let molName = null, molId = null;
+                        if (pt.customdata.length >= 3) {{ molName = pt.customdata[1]; molId = pt.customdata[2]; }}
+                        else if (pt.customdata.length === 2) {{ molName = pt.customdata[1]; }}
+                        renderOCL(smiles, molName, molId, pt);
                     }}
-                    lastSmiles = smiles;
-
-                    // Extract name and ID
-                    let molName = null, molId = null;
-                    if (pt.customdata.length >= 3) {{
-                        molName = pt.customdata[1];
-                        molId = pt.customdata[2];
-                    }} else if (pt.customdata.length === 2) {{
-                        molName = pt.customdata[1];
-                    }}
-
-                    // Render with OCL
-                    renderOCL(smiles, molName, molId, pt);
                     positionPanel(mouseX, mouseY);
                     panel.classList.add('open');
                 }}, 150);
             }});
 
-            // Hide on unhover (with small delay to prevent flicker)
+            // ── Unhover: hide unless pinned ──────────────────────────────
             plotlyDiv.on('plotly_unhover', function() {{
                 clearTimeout(hoverTimer);
                 hoverTimer = null;
+                if (panel.classList.contains('pinned')) return; // Stay open if pinned
                 setTimeout(() => {{
-                    if (!hoverTimer) panel.classList.remove('open');
+                    if (!hoverTimer && !panel.classList.contains('pinned')) {{
+                        panel.classList.remove('open');
+                    }}
                 }}, 200);
+            }});
+
+            // ── Click: pin the panel (stays until X or click outside) ────
+            plotlyDiv.on('plotly_click', function(data) {{
+                if (!data.points || data.points.length === 0) return;
+                const pt = data.points[0];
+                if (!pt.customdata) return;
+                const smiles = pt.customdata[0];
+                if (!smiles || smiles === 'null') return;
+
+                // If clicking same molecule that's already pinned, unpin
+                if (panel.classList.contains('pinned') && smiles === lastSmiles) {{
+                    panel.classList.remove('pinned');
+                    panel.classList.remove('open');
+                    lastSmiles = '';
+                    return;
+                }}
+
+                lastSmiles = smiles;
+                let molName = null, molId = null;
+                if (pt.customdata.length >= 3) {{ molName = pt.customdata[1]; molId = pt.customdata[2]; }}
+                else if (pt.customdata.length === 2) {{ molName = pt.customdata[1]; }}
+
+                renderOCL(smiles, molName, molId, pt);
+                positionPanel(mouseX, mouseY);
+                panel.classList.add('open');
+                panel.classList.add('pinned');
+            }});
+
+            // ── Click outside: unpin and close ───────────────────────────
+            parentDoc.addEventListener('mousedown', function(e) {{
+                if (!panel.classList.contains('pinned')) return;
+                // Check if click is inside the panel
+                if (panel.contains(e.target)) return;
+                // Check if click is inside the plotly chart (let plotly_click handle it)
+                if (plotlyDiv.contains(e.target)) return;
+                panel.classList.remove('pinned');
+                panel.classList.remove('open');
+                lastSmiles = '';
             }});
 
             // ── Render molecule with OpenChemLib ─────────────────────────
@@ -499,6 +534,41 @@ def get_structure_viewer_component(chart_id="plotly_chart", x_col=None, y_col=No
         if (container) {{
             observer.observe(container, {{ childList: true, subtree: true }});
         }}
+
+        // ── Cleanup when iframe is removed (toggle off / Streamlit rerender) ─
+        // When the toggle is turned off, Streamlit removes this iframe but the
+        // panel/style we injected into parentDoc stay behind. Watch for our
+        // iframe disappearing and clean up.
+        function cleanup() {{
+            const p = parentDoc.getElementById('sv-panel-' + CHART_ID);
+            if (p) p.remove();
+            const s = parentDoc.getElementById('sv-style-' + CHART_ID);
+            if (s) s.remove();
+            observer.disconnect();
+            // Remove hover flag from chart so it can be re-attached later
+            const chart = findChart();
+            if (chart) delete chart['_sv_' + CHART_ID];
+        }}
+
+        // Detect iframe removal via periodic check (MutationObserver can't
+        // observe its own removal). Runs every 2s, very lightweight.
+        const aliveCheck = setInterval(() => {{
+            let found = false;
+            for (const iframe of parentDoc.querySelectorAll('iframe')) {{
+                try {{ if (iframe.contentWindow === window) {{ found = true; break; }} }}
+                catch (e) {{}}
+            }}
+            if (!found) {{
+                clearInterval(aliveCheck);
+                cleanup();
+            }}
+        }}, 2000);
+
+        // Also clean up on page unload
+        window.addEventListener('unload', () => {{
+            clearInterval(aliveCheck);
+            cleanup();
+        }});
     }})();
     </script>
     """
@@ -522,6 +592,6 @@ def get_structure_viewer_hint():
         gap: 8px;
     ">
         <span style="font-size: 16px;">&#x1F9EC;</span>
-        <span><strong>Tip:</strong> Hover over any data point to preview its 2D molecular structure</span>
+        <span><strong>Tip:</strong> Hover to preview, click to pin the 2D molecular structure</span>
     </div>
     """

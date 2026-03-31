@@ -29,7 +29,7 @@ class TestCorrelationIdHeader:
 
     def test_error_response_has_x_request_id_header(self, client):
         """Error response includes X-Request-ID header matching body request_id."""
-        resp = client.get("/api/v1/compounds/nonexistent-id")
+        resp = client.get("/api/v1/compounds/00000000-0000-4000-8000-000000000009")
         assert resp.status_code == 404
 
         header_rid = resp.headers.get("X-Request-ID")

@@ -11,11 +11,13 @@ Tests the complete IMP Score pipeline with weights (sum to 100%):
 """
 
 import pytest
+import httpx
 import pandas as pd
+from unittest.mock import AsyncMock, patch
 
 from backend.modules.imp_scoring import (
+    calculate_imp_score,
     calculate_imp_score_phase1,
-    calculate_imp_score_phase2,
     get_imp_score_breakdown,
     interpret_imp_score,
     WEIGHT_EFFICIENCY,
@@ -71,10 +73,10 @@ class TestIMPScoreFullPipeline:
             'MW': [350.0],
         })
 
-    def test_full_imp_score_pipeline(self, sample_dataframe):
+    async def test_full_imp_score_pipeline(self, sample_dataframe):
         """Integration test for complete IMP Score scoring pipeline."""
-        # Run Phase 2 without actual PDB calls
-        result = calculate_imp_score_phase2(sample_dataframe, use_pdb=False)
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        result = await calculate_imp_score(mock_client, sample_dataframe, use_pdb=False)
 
         # Verify all expected columns exist
         expected_cols = [
@@ -90,9 +92,10 @@ class TestIMPScoreFullPipeline:
         # Verify score is in valid range
         assert 0 <= result['IMP_Final_Score'].iloc[0] <= 1, "Final score out of range"
 
-    def test_contributions_sum_to_final_score(self, sample_dataframe):
+    async def test_contributions_sum_to_final_score(self, sample_dataframe):
         """Verify contributions sum correctly to final score (contributions include QED multiplier)."""
-        result = calculate_imp_score_phase2(sample_dataframe, use_pdb=False)
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        result = await calculate_imp_score(mock_client, sample_dataframe, use_pdb=False)
 
         # Contributions include QED multiplier, so they sum to FINAL score
         total_contrib = (
@@ -105,26 +108,29 @@ class TestIMPScoreFullPipeline:
         assert abs(total_contrib - result['IMP_Final_Score'].iloc[0]) < 0.001, \
             f"Contributions should sum to final score: {total_contrib} vs {result['IMP_Final_Score'].iloc[0]}"
 
-    def test_qed_multiplier_formula(self, sample_dataframe):
+    async def test_qed_multiplier_formula(self, sample_dataframe):
         """Verify QED multiplier uses correct formula: 0.75 + 0.25 * QED."""
-        result = calculate_imp_score_phase2(sample_dataframe, use_pdb=False)
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        result = await calculate_imp_score(mock_client, sample_dataframe, use_pdb=False)
 
         # With QED=0.75: 0.75 + 0.25 * 0.75 = 0.9375
         expected_mult = 0.75 + 0.25 * 0.75
         assert abs(result['QED_Multiplier'].iloc[0] - expected_mult) < 0.001, \
             f"QED multiplier should be {expected_mult}, got {result['QED_Multiplier'].iloc[0]}"
 
-    def test_final_score_equals_base_times_qed(self, sample_dataframe):
+    async def test_final_score_equals_base_times_qed(self, sample_dataframe):
         """Verify final score = base score * QED multiplier."""
-        result = calculate_imp_score_phase2(sample_dataframe, use_pdb=False)
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        result = await calculate_imp_score(mock_client, sample_dataframe, use_pdb=False)
 
         expected_final = result['IMP_Base_Score'].iloc[0] * result['QED_Multiplier'].iloc[0]
         assert abs(result['IMP_Final_Score'].iloc[0] - expected_final) < 0.001, \
             "Final score should equal base * QED multiplier"
 
-    def test_score_breakdown_function(self, sample_dataframe):
+    async def test_score_breakdown_function(self, sample_dataframe):
         """Test score breakdown helper function."""
-        result = calculate_imp_score_phase2(sample_dataframe, use_pdb=False)
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        result = await calculate_imp_score(mock_client, sample_dataframe, use_pdb=False)
         breakdown = get_imp_score_breakdown(result.iloc[0])
 
         # Verify structure
