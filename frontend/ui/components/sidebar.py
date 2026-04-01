@@ -75,6 +75,18 @@ def _sort_jobs_for_sidebar(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
+def _mark_completed_jobs_viewed() -> None:
+    """Hide completed sidebar jobs after an explicit navigation action."""
+    set_session_id(SessionState.get_session_id())
+    client = get_api_client()
+    try:
+        for job in client.get_active_jobs():
+            if job.get('status') == 'completed' and job.get('id'):
+                _mark_job_viewed(job['id'])
+    except Exception as exc:
+        logger.debug(f"Unable to clear completed sidebar jobs: {exc}")
+
+
 def _render_sidebar_logo() -> None:
     """Render the IMPULATOR logo in the sidebar — uses PNG logos with theme detection."""
     static_dir = Path(__file__).parent.parent.parent / "static"
@@ -132,11 +144,13 @@ def render_sidebar() -> None:
         col1, col2 = st.columns(2)
         with col1:
             if st.button("Home", key="nav_home", width='stretch'):
+                _mark_completed_jobs_viewed()
                 SessionState.navigate_to_home()
                 st.query_params.clear()
                 st.rerun()
         with col2:
             if st.button("+ New", key="nav_analyze", width='stretch'):
+                _mark_completed_jobs_viewed()
                 SessionState.navigate_to_analyze()
                 st.rerun()
 
@@ -214,6 +228,7 @@ def render_active_jobs_polling() -> None:
             get_compounds_cached.clear()
             st.success("✅ All jobs completed!")
             if st.button("🔄 Refresh Home", key="refresh_home_completed", width='stretch'):
+                _mark_completed_jobs_viewed()
                 SessionState.navigate_to_home()
                 st.rerun()
 
@@ -268,13 +283,6 @@ def _fetch_and_check_jobs():
         # Filter out viewed jobs (only applies to completed, not failed)
         viewed_ids = _get_viewed_jobs()
         non_failed = [j for j in non_failed if j.get('id') not in viewed_ids]
-
-        # Home should only show currently active work, not stale "View Results" cards.
-        if SessionState.get_current_view() == "home":
-            non_failed = [
-                job for job in non_failed
-                if job.get('status') in ('pending', 'processing', 'pending_upload')
-            ]
 
         non_failed = _sort_jobs_for_sidebar(non_failed)
         failed_jobs = _sort_jobs_for_sidebar(failed_jobs)
