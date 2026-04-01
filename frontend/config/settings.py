@@ -13,7 +13,6 @@ Environment variables can override defaults (read at module import time):
 
 import os
 from dataclasses import dataclass, field
-from typing import FrozenSet
 
 
 def _get_int_env(name: str, default: int) -> int:
@@ -106,7 +105,7 @@ class ImpulatorConfig:
     MAX_FILE_SIZE_MB: int = field(
         default_factory=lambda: _get_int_env('MAX_FILE_SIZE_MB', 10)
     )
-    ALLOWED_EXTENSIONS: FrozenSet[str] = frozenset({'.csv', '.xlsx'})
+    ALLOWED_EXTENSIONS: frozenset[str] = frozenset({'.csv', '.xlsx'})
 
     # Batch processing limits
     MAX_ROWS_LIMIT: int = 1000

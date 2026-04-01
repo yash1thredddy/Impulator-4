@@ -5,7 +5,6 @@ the resolve-duplicate endpoint with action="duplicate" to force processing.
 It then verifies ALL result_summary fields.
 """
 import asyncio
-import json
 import sys
 import time
 import uuid

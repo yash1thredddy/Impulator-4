@@ -30,7 +30,7 @@ import json
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Optional
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -115,13 +115,13 @@ class GeneTarget:
     """Aggregated info for a unique gene target."""
     geneid: int = 0
     genename: str = ""
-    sources: Set[str] = field(default_factory=set)
-    actions: Set[str] = field(default_factory=set)
-    species: Set[str] = field(default_factory=set)
-    uniprot: Set[str] = field(default_factory=set)
-    protein_names: Set[str] = field(default_factory=set)
-    activity_types: Set[str] = field(default_factory=set)
-    activity_values: List[Tuple[str, str]] = field(default_factory=list)
+    sources: set[str] = field(default_factory=set)
+    actions: set[str] = field(default_factory=set)
+    species: set[str] = field(default_factory=set)
+    uniprot: set[str] = field(default_factory=set)
+    protein_names: set[str] = field(default_factory=set)
+    activity_types: set[str] = field(default_factory=set)
+    activity_values: list[tuple[str, str]] = field(default_factory=list)
     pmid_count: int = 0
     interaction_count: int = 0
 
@@ -144,7 +144,7 @@ def resolve_cid(compound_name: str) -> Optional[int]:
     return None
 
 
-def fetch_all_interactions(compound_name: str) -> Tuple[List[Interaction], int]:
+def fetch_all_interactions(compound_name: str) -> tuple[list[Interaction], int]:
     """Fetch ALL Chemical-Target Interactions for a compound.
 
     Uses consolidatedcompoundtarget SDQ collection.
@@ -226,9 +226,9 @@ def fetch_all_interactions(compound_name: str) -> Tuple[List[Interaction], int]:
 #  Analysis Functions
 # ═══════════════════════════════════════════════════════════════════════════
 
-def build_gene_map(interactions: List[Interaction]) -> Dict[str, GeneTarget]:
+def build_gene_map(interactions: list[Interaction]) -> dict[str, GeneTarget]:
     """Aggregate interactions by unique gene name."""
-    gene_map: Dict[str, GeneTarget] = {}
+    gene_map: dict[str, GeneTarget] = {}
 
     for ix in interactions:
         key = ix.genename or f"gene_{ix.geneid}"
@@ -260,11 +260,11 @@ def build_gene_map(interactions: List[Interaction]) -> Dict[str, GeneTarget]:
 
 
 def filter_interactions(
-    interactions: List[Interaction],
+    interactions: list[Interaction],
     source: Optional[str] = None,
     human_only: bool = False,
     gene: Optional[str] = None,
-) -> List[Interaction]:
+) -> list[Interaction]:
     """Filter interactions by source, species, or gene."""
     filtered = interactions
     if source:
@@ -294,8 +294,8 @@ def print_header(text: str):
 
 
 def display_summary(compound_name: str, cid: Optional[int],
-                    interactions: List[Interaction],
-                    gene_map: Dict[str, GeneTarget]):
+                    interactions: list[Interaction],
+                    gene_map: dict[str, GeneTarget]):
     """Print overview summary."""
     sep = "-" * 90
 
@@ -356,7 +356,7 @@ def display_summary(compound_name: str, cid: Optional[int],
             print(f"  {at:<50} {count:>8}")
 
 
-def display_unique_genes(gene_map: Dict[str, GeneTarget]):
+def display_unique_genes(gene_map: dict[str, GeneTarget]):
     """Print unique genes table sorted by interaction count."""
     print_header("UNIQUE GENE TARGETS")
     sep = "-" * 90
@@ -412,7 +412,7 @@ def _build_evidence(ix: Interaction) -> str:
     return ", ".join(parts)
 
 
-def display_full_table(interactions: List[Interaction]):
+def display_full_table(interactions: list[Interaction]):
     """Print complete interaction table matching PubChem's column layout.
 
     PubChem columns: CID, Compound, Protein Accession, Protein, Gene ID,
@@ -464,7 +464,7 @@ def display_full_table(interactions: List[Interaction]):
     print(f"\n  Total: {len(interactions)} interactions")
 
 
-def display_gene_detail(gene_map: Dict[str, GeneTarget], gene_name: str):
+def display_gene_detail(gene_map: dict[str, GeneTarget], gene_name: str):
     """Print detailed view for a specific gene."""
     gene_upper = gene_name.upper()
     matches = {k: v for k, v in gene_map.items() if gene_upper in k.upper()}
@@ -495,7 +495,7 @@ def display_gene_detail(gene_map: Dict[str, GeneTarget], gene_name: str):
 #  Export Functions
 # ═══════════════════════════════════════════════════════════════════════════
 
-def export_csv(interactions: List[Interaction], filepath: str):
+def export_csv(interactions: list[Interaction], filepath: str):
     """Export interactions to CSV matching PubChem's table columns exactly."""
     # Column mapping: PubChem display name -> Interaction field
     columns = [
@@ -541,8 +541,8 @@ def export_csv(interactions: List[Interaction], filepath: str):
 
 
 def export_json(compound_name: str, cid: Optional[int],
-                interactions: List[Interaction],
-                gene_map: Dict[str, GeneTarget]) -> str:
+                interactions: list[Interaction],
+                gene_map: dict[str, GeneTarget]) -> str:
     """Export full data as JSON."""
     data = {
         "compound": compound_name,

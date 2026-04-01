@@ -16,7 +16,6 @@ Exit codes:
 """
 import os
 import sys
-from typing import List, Tuple
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
@@ -28,7 +27,7 @@ def verify_schema(database_url: str) -> bool:
         database_url = "postgresql://" + database_url[len("postgres://"):]
 
     engine = create_engine(database_url)
-    results: List[Tuple[str, bool, str]] = []
+    results: list[tuple[str, bool, str]] = []
 
     with engine.connect() as conn:
         # ============================================================

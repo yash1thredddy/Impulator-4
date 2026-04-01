@@ -28,7 +28,7 @@ Run: python scripts/test_chembl_performance.py
 import time
 import logging
 import sys
-from typing import List, Optional, Tuple
+from typing import Optional
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -127,7 +127,7 @@ SESSION = create_session()
 # API STATUS CHECK
 # =============================================================================
 
-def check_api_status() -> Tuple[bool, str]:
+def check_api_status() -> tuple[bool, str]:
     """
     Check if ChEMBL API is available.
 
@@ -153,7 +153,7 @@ def check_api_status() -> Tuple[bool, str]:
 # REST API TESTS (Direct HTTP requests)
 # =============================================================================
 
-def rest_api_activities(chembl_ids: List[str], limit: int = MAX_LIMIT) -> TestResult:
+def rest_api_activities(chembl_ids: list[str], limit: int = MAX_LIMIT) -> TestResult:
     """
     Fetch activities using direct REST API.
 
@@ -214,7 +214,7 @@ def rest_api_activities(chembl_ids: List[str], limit: int = MAX_LIMIT) -> TestRe
         )
 
 
-def rest_api_molecules(chembl_ids: List[str]) -> TestResult:
+def rest_api_molecules(chembl_ids: list[str]) -> TestResult:
     """Fetch molecule data using direct REST API."""
     url = f"{BASE_URL}/molecule.json"
     ids_param = ",".join(chembl_ids)
@@ -253,7 +253,7 @@ def rest_api_molecules(chembl_ids: List[str]) -> TestResult:
         )
 
 
-def rest_api_targets(target_ids: List[str]) -> TestResult:
+def rest_api_targets(target_ids: list[str]) -> TestResult:
     """Fetch target names using direct REST API."""
     url = f"{BASE_URL}/target.json"
     ids_param = ",".join(target_ids)
@@ -291,7 +291,7 @@ def rest_api_targets(target_ids: List[str]) -> TestResult:
         )
 
 
-def rest_api_drug_indications(chembl_ids: List[str]) -> TestResult:
+def rest_api_drug_indications(chembl_ids: list[str]) -> TestResult:
     """Fetch drug indications using direct REST API (batch query)."""
     url = f"{BASE_URL}/drug_indication.json"
     ids_param = ",".join(chembl_ids)
@@ -396,7 +396,7 @@ def get_library_client(max_limit: int = 20):
     return new_client, original_limit
 
 
-def library_activities(chembl_ids: List[str], max_limit: int = 20) -> TestResult:
+def library_activities(chembl_ids: list[str], max_limit: int = 20) -> TestResult:
     """Fetch activities using library with specified limit."""
     method_name = f"Library (MAX_LIMIT={max_limit})"
 
@@ -441,7 +441,7 @@ def library_activities(chembl_ids: List[str], max_limit: int = 20) -> TestResult
         )
 
 
-def library_molecules(chembl_ids: List[str], max_limit: int = 20) -> TestResult:
+def library_molecules(chembl_ids: list[str], max_limit: int = 20) -> TestResult:
     """Fetch molecule data using library."""
     method_name = f"Library (MAX_LIMIT={max_limit})"
 
@@ -481,7 +481,7 @@ def library_molecules(chembl_ids: List[str], max_limit: int = 20) -> TestResult:
         )
 
 
-def library_targets(target_ids: List[str], max_limit: int = 20) -> TestResult:
+def library_targets(target_ids: list[str], max_limit: int = 20) -> TestResult:
     """Fetch target names using library."""
     method_name = f"Library (MAX_LIMIT={max_limit})"
 
@@ -519,7 +519,7 @@ def library_targets(target_ids: List[str], max_limit: int = 20) -> TestResult:
         )
 
 
-def library_drug_indications_sequential(chembl_ids: List[str]) -> TestResult:
+def library_drug_indications_sequential(chembl_ids: list[str]) -> TestResult:
     """
     Fetch drug indications using library (sequential per-compound).
 
@@ -613,7 +613,7 @@ def print_header(text: str):
     logger.info("=" * 80)
 
 
-def print_results_table(results: List[TestResult], endpoint: str):
+def print_results_table(results: list[TestResult], endpoint: str):
     """Print results in a formatted table."""
     logger.info(f"\n{endpoint.upper()} Results:")
     logger.info("-" * 80)

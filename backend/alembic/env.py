@@ -27,7 +27,7 @@ if database_url.startswith("postgres://"):
 config.set_main_option("sqlalchemy.url", database_url)
 
 # target_metadata -- PGBase contains all Postgres ORM model metadata
-from backend.models._pg_base import PGBase
+from backend.models._pg_base import PGBase  # noqa: E402
 target_metadata = PGBase.metadata
 
 

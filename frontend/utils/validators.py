@@ -14,7 +14,6 @@ import re
 import html
 import logging
 from dataclasses import dataclass, field
-from typing import List
 from pathlib import Path
 
 import pandas as pd
@@ -53,8 +52,8 @@ class ValidationResult:
         ...     process_data()
     """
     is_valid: bool
-    errors: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
     def __bool__(self) -> bool:
         """Allow using result in boolean context."""
@@ -416,7 +415,7 @@ class DataFrameValidator:
     def validate(
         cls,
         df: pd.DataFrame,
-        required_columns: List[str] = None
+        required_columns: list[str] = None
     ) -> ValidationResult:
         """Validate DataFrame structure and content.
 
@@ -475,7 +474,7 @@ class DataFrameValidator:
         return column in df.columns
 
     @classmethod
-    def get_numeric_columns(cls, df: pd.DataFrame) -> List[str]:
+    def get_numeric_columns(cls, df: pd.DataFrame) -> list[str]:
         """Get list of numeric column names.
 
         Args:
@@ -493,7 +492,7 @@ class DataFrameValidator:
         cls,
         df: pd.DataFrame,
         max_cardinality: int = None
-    ) -> List[str]:
+    ) -> list[str]:
         """Get list of categorical column names.
 
         A column is considered categorical if it has fewer unique values

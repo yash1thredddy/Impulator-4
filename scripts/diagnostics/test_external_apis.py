@@ -19,7 +19,7 @@ import sys
 import time
 import argparse
 import requests
-from typing import Optional, Dict, List, Tuple
+from typing import Optional
 
 # ── Test compounds ──────────────────────────────────────────────────────────
 # Aspirin: well-characterized, guaranteed to exist in all databases
@@ -56,7 +56,7 @@ class TestResult:
         self.passed = False
         self.error: Optional[str] = None
         self.latency_ms: float = 0
-        self.details: Dict = {}
+        self.details: dict = {}
 
     def pass_(self, latency_ms: float, **details):
         self.passed = True
@@ -69,7 +69,7 @@ class TestResult:
         self.latency_ms = latency_ms
 
 
-def timed_request(method: str, url: str, **kwargs) -> Tuple[Optional[requests.Response], float, Optional[str]]:
+def timed_request(method: str, url: str, **kwargs) -> tuple[Optional[requests.Response], float, Optional[str]]:
     """Make a request and return (response, latency_ms, error_type).
 
     error_type is None on success, 'timeout' on timeout, 'connection' on connection error,
@@ -475,7 +475,7 @@ def run_tests(api_filter: Optional[str] = None, verbose: bool = False) -> bool:
     print(f"  Timeouts: default={TIMEOUT}s, ChEMBL similarity={TIMEOUT_CHEMBL_SIMILARITY}s, PDB search={TIMEOUT_PDB_SEARCH}s")
     print("=" * 72)
 
-    results: List[TestResult] = []
+    results: list[TestResult] = []
     api_groups = {api_filter: ALL_TESTS[api_filter]} if api_filter else ALL_TESTS
 
     for api_group, tests in api_groups.items():

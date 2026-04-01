@@ -22,7 +22,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -164,8 +164,8 @@ class Counts:
     raw_total: int = 0               # All activities returned by API
     type_filtered: int = 0           # After activity type filter
     value_filtered: int = 0          # After standard_value + unit filter (= app count)
-    by_type_raw: Dict[str, int] = field(default_factory=dict)
-    by_type_filtered: Dict[str, int] = field(default_factory=dict)
+    by_type_raw: dict[str, int] = field(default_factory=dict)
+    by_type_filtered: dict[str, int] = field(default_factory=dict)
     dropped_no_value: int = 0
     dropped_bad_value: int = 0
     dropped_bad_units: int = 0
@@ -181,7 +181,7 @@ class CompoundResult:
     smiles: str
     threshold: int
     # Similarity
-    rest_compounds: List[str] = field(default_factory=list)
+    rest_compounds: list[str] = field(default_factory=list)
     sim_rest_ms: float = 0.0
     sim_rest_error: Optional[str] = None
     # Activities (REST)
@@ -192,11 +192,11 @@ class CompoundResult:
     pdb_error: Optional[str] = None
     # Drug Indications
     drug_indications: int = 0
-    indication_details: List[str] = field(default_factory=list)
+    indication_details: list[str] = field(default_factory=list)
     ind_time_ms: float = 0.0
     ind_error: Optional[str] = None
     # PubChem Similarity
-    pubchem_cids: List[int] = field(default_factory=list)
+    pubchem_cids: list[int] = field(default_factory=list)
     sim_pubchem_ms: float = 0.0
     sim_pubchem_error: Optional[str] = None
     # PubChem Bioactivity
@@ -204,16 +204,16 @@ class CompoundResult:
     pubchem_active_assays: int = 0
     pubchem_type_filtered_total: int = 0
     pubchem_type_filtered_active: int = 0
-    pubchem_by_type_filtered: Dict[str, int] = field(default_factory=dict)
-    pubchem_by_type_filtered_active: Dict[str, int] = field(default_factory=dict)
+    pubchem_by_type_filtered: dict[str, int] = field(default_factory=dict)
+    pubchem_by_type_filtered_active: dict[str, int] = field(default_factory=dict)
     pubchem_unique_targets: int = 0
     pubchem_response_kb: float = 0.0
     pubchem_bio_time_ms: float = 0.0
     pubchem_bio_error: Optional[str] = None
     # PubChem Drug Indications (Open Targets)
     pubchem_indications: int = 0
-    pubchem_indication_details: List[str] = field(default_factory=list)
-    pubchem_indication_by_phase: Dict[str, int] = field(default_factory=dict)
+    pubchem_indication_details: list[str] = field(default_factory=list)
+    pubchem_indication_by_phase: dict[str, int] = field(default_factory=dict)
     pubchem_ind_time_ms: float = 0.0
     pubchem_ind_error: Optional[str] = None
 
@@ -266,7 +266,7 @@ def classify_drop_reason(act: dict) -> str:
 #  REST API functions
 # ═══════════════════════════════════════════════════════════════════════════
 
-def rest_similarity_search(smiles: str, threshold: int) -> Tuple[List[str], float, Optional[str]]:
+def rest_similarity_search(smiles: str, threshold: int) -> tuple[list[str], float, Optional[str]]:
     start = time.perf_counter()
     all_ids = []
     offset = 0
@@ -294,7 +294,7 @@ def rest_similarity_search(smiles: str, threshold: int) -> Tuple[List[str], floa
     return all_ids, ms, error
 
 
-def rest_fetch_activities(chembl_ids: List[str], activity_types: List[str]) -> Counts:
+def rest_fetch_activities(chembl_ids: list[str], activity_types: list[str]) -> Counts:
     """Fetch activities via REST and apply both type and value filters."""
     counts = Counts()
     if not chembl_ids:
@@ -371,7 +371,7 @@ def rest_fetch_activities(chembl_ids: List[str], activity_types: List[str]) -> C
 #  PDB + Drug Indications (REST only)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def search_pdb(smiles: str) -> Tuple[int, float, Optional[str]]:
+def search_pdb(smiles: str) -> tuple[int, float, Optional[str]]:
     start = time.perf_counter()
     try:
         query = {
@@ -393,7 +393,7 @@ def search_pdb(smiles: str) -> Tuple[int, float, Optional[str]]:
         return 0, (time.perf_counter() - start) * 1000, str(e)
 
 
-def fetch_drug_indications(chembl_ids: List[str]) -> Tuple[int, List[str], float, Optional[str]]:
+def fetch_drug_indications(chembl_ids: list[str]) -> tuple[int, list[str], float, Optional[str]]:
     if not chembl_ids:
         return 0, [], 0.0, None
     start = time.perf_counter()
@@ -459,7 +459,7 @@ def resolve_smiles_to_cid(smiles: str) -> Optional[int]:
 
 
 def pc_similarity_search(smiles: str, threshold: int
-                         ) -> Tuple[List[int], float, Optional[str]]:
+                         ) -> tuple[list[int], float, Optional[str]]:
     """PubChem 2D similarity search. Returns (cids, ms, error)."""
     start = time.perf_counter()
     pubchem_rate_limited()
@@ -487,8 +487,8 @@ class PubChemBioResult:
     active: int = 0
     type_filtered_total: int = 0
     type_filtered_active: int = 0
-    by_type_filtered: Dict[str, int] = field(default_factory=dict)
-    by_type_filtered_active: Dict[str, int] = field(default_factory=dict)
+    by_type_filtered: dict[str, int] = field(default_factory=dict)
+    by_type_filtered_active: dict[str, int] = field(default_factory=dict)
     unique_targets: int = 0
     size_kb: float = 0.0
     ms: float = 0.0
@@ -558,7 +558,7 @@ def pc_fetch_bioactivity(cid: int) -> PubChemBioResult:
 
 
 def pc_fetch_drug_indications(cid: int
-                              ) -> Tuple[int, List[str], Dict[str, int], float, Optional[str]]:
+                              ) -> tuple[int, list[str], dict[str, int], float, Optional[str]]:
     """Fetch drug indications from PubChem SDQ (Open Targets).
 
     Returns (total, disease_names, by_phase, ms, error).
@@ -588,7 +588,7 @@ def pc_fetch_drug_indications(cid: int
         rows = output.get("rows", [])
         total = output.get("totalCount", len(rows))
         diseases = []
-        by_phase: Dict[str, int] = {}
+        by_phase: dict[str, int] = {}
         for row in rows:
             disease = row.get("srcdiseasename", "")
             phase = str(row.get("maxphase", "") or "")
@@ -768,7 +768,7 @@ def main():
     print("  Sources:         ChEMBL REST, RCSB PDB, PubChem")
 
     # Collect compounds
-    compounds_to_run: List[Tuple[str, str]] = []
+    compounds_to_run: list[tuple[str, str]] = []
 
     if args.smiles:
         compounds_to_run.append((args.name or "Custom", args.smiles))

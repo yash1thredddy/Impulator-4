@@ -115,24 +115,29 @@ async def lifespan(app: FastAPI):  # pragma: no cover -- startup/shutdown lifecy
     # Run Alembic migrations (auto-upgrade to head on every startup)
     # No-op if already at head (one quick SELECT on alembic_version).
     # If migration fails, startup aborts -- container orchestrator restarts.
-    try:
-        from pathlib import Path as _Path
-        from alembic.config import Config as AlembicConfig
-        from alembic import command as alembic_command
+    # Skip in tests -- pg_engine fixture already ran migrations on the testcontainer.
+    import os as _os
+    if not _os.environ.get("TESTING"):
+        try:
+            from pathlib import Path as _Path
+            from alembic.config import Config as AlembicConfig
+            from alembic import command as alembic_command
 
-        _alembic_ini = str(_Path(__file__).parent / "alembic.ini")
-        _alembic_cfg = AlembicConfig(_alembic_ini)
-        # Override script_location to absolute path (ini uses relative "alembic"
-        # which resolves against cwd, not ini file location)
-        _alembic_cfg.set_main_option(
-            "script_location",
-            str(_Path(__file__).parent / "alembic"),
-        )
-        alembic_command.upgrade(_alembic_cfg, "head")
-        logger.info("Alembic migrations applied (upgrade head)")
-    except Exception as exc:
-        logger.error("Alembic migration failed: %s", exc, exc_info=True)
-        raise
+            _alembic_ini = str(_Path(__file__).parent / "alembic.ini")
+            _alembic_cfg = AlembicConfig(_alembic_ini)
+            # Override script_location to absolute path (ini uses relative "alembic"
+            # which resolves against cwd, not ini file location)
+            _alembic_cfg.set_main_option(
+                "script_location",
+                str(_Path(__file__).parent / "alembic"),
+            )
+            alembic_command.upgrade(_alembic_cfg, "head")
+            logger.info("Alembic migrations applied (upgrade head)")
+        except Exception as exc:
+            logger.error("Alembic migration failed: %s", exc, exc_info=True)
+            raise
+    else:
+        logger.info("TESTING mode — skipping Alembic migrations")
 
     # Note: Legacy compound table sync removed - database is the source of truth
     # for all compound metadata. UUID-based storage paths are the only supported format.

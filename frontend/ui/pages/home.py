@@ -9,7 +9,7 @@ Data flow:
 
 import html
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, Any
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -213,7 +213,7 @@ def render_search_section() -> None:
         SessionState.set('compound_view_mode', view_mode)
 
 
-def render_compound_browser(compounds: List[Dict[str, Any]]) -> None:
+def render_compound_browser(compounds: list[dict[str, Any]]) -> None:
     """Render the compound browser grid or list."""
     # Apply search filter: text match on name/chembl/smiles, or RDKit substructure match
     search_query = SessionState.get('compound_search_query', '').strip()
@@ -286,7 +286,7 @@ def render_compound_browser(compounds: List[Dict[str, Any]]) -> None:
         st.rerun()
 
 
-def _render_selection_action_bar(compounds: List[Dict[str, Any]]) -> None:
+def _render_selection_action_bar(compounds: list[dict[str, Any]]) -> None:
     """Render the selection action bar with Select All, Deselect All, and Delete Selected."""
     # Collect entry_ids of all visible compounds
     all_entry_ids = [c.get('entry_id') for c in compounds if c.get('entry_id')]
@@ -358,7 +358,7 @@ def _render_selection_action_bar(compounds: List[Dict[str, Any]]) -> None:
                 st.caption(f"{selected_count} of {len(all_entry_ids)} selected")
 
 
-def _get_selected_entry_ids(all_entry_ids: List[str]) -> set:
+def _get_selected_entry_ids(all_entry_ids: list[str]) -> set:
     """Get the set of currently selected entry IDs from session state."""
     selected = set()
     for eid in all_entry_ids:
@@ -367,7 +367,7 @@ def _get_selected_entry_ids(all_entry_ids: List[str]) -> set:
     return selected
 
 
-def _execute_batch_delete(entry_ids: List[str]) -> None:
+def _execute_batch_delete(entry_ids: list[str]) -> None:
     """Execute batch deletion and show result."""
     api_client = get_api_client()
     result = api_client.delete_compounds_batch(entry_ids)
@@ -432,7 +432,7 @@ def _exit_select_mode() -> None:
         del st.session_state[k]
 
 
-def _filter_compounds(compounds: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+def _filter_compounds(compounds: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
     """Filter compounds by text match or RDKit substructure search.
 
     If the query looks like a SMILES/SMARTS pattern (contains chemistry characters
@@ -513,7 +513,7 @@ def _compound_from_api(compound: dict) -> dict:
     }
 
 
-def _fetch_compounds() -> Optional[List[Dict[str, Any]]]:
+def _fetch_compounds() -> Optional[list[dict[str, Any]]]:
     """Fetch ALL compounds from database, paginating through the API.
 
     Backend caps at 100 per page, so we loop until all pages are fetched.

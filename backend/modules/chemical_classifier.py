@@ -20,7 +20,6 @@ Usage:
 
 import asyncio
 import time
-from typing import Dict
 
 import httpx
 import structlog
@@ -392,7 +391,7 @@ def extract_classyfire_fields(cf_data: dict | None) -> dict[str, str]:
         return empty
 
 
-def classify_compound_type(classification: Dict) -> str:
+def classify_compound_type(classification: dict) -> str:
     """
     Determine if compound is natural product, synthetic, or semi-synthetic.
 
@@ -436,7 +435,7 @@ def classify_compound_type(classification: Dict) -> str:
     return "Synthetic"
 
 
-def get_classification_summary(classification: Dict) -> str:
+def get_classification_summary(classification: dict) -> str:
     """
     Generate human-readable summary of classification.
 

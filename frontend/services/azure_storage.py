@@ -18,7 +18,7 @@ import zipfile
 import logging
 import uuid
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, Any
 from functools import lru_cache
 from datetime import datetime, timezone
 
@@ -109,7 +109,7 @@ def _get_container_client():
         return None
 
 
-def list_local_results() -> List[Dict[str, Any]]:
+def list_local_results() -> list[dict[str, Any]]:
     """
     List all locally cached result files.
 
@@ -143,7 +143,7 @@ def list_local_results() -> List[Dict[str, Any]]:
     return results
 
 
-def list_results(use_local_cache: bool = True) -> List[Dict[str, Any]]:
+def list_results(use_local_cache: bool = True) -> list[dict[str, Any]]:
     """
     List all result files, checking local cache first.
 
@@ -320,7 +320,7 @@ def _evict_oldest_from_cache() -> int:
         return 0
 
 
-def get_cache_stats() -> Dict[str, Any]:
+def get_cache_stats() -> dict[str, Any]:
     """
     Get cache statistics.
 
@@ -407,7 +407,7 @@ def load_result_dataframe(entry_id: str, filename: str = "similar_compounds.csv"
     return load_result_dataframe_by_entry_id(entry_id, filename=filename)
 
 
-def load_result_json(entry_id: str, filename: str = "summary.json") -> Optional[Dict]:
+def load_result_json(entry_id: str, filename: str = "summary.json") -> Optional[dict]:
     """
     Load a specific JSON from a result ZIP file by entry_id (UUID).
 
@@ -421,7 +421,7 @@ def load_result_json(entry_id: str, filename: str = "summary.json") -> Optional[
     return load_result_json_by_entry_id(entry_id, filename=filename)
 
 
-def get_result_files(entry_id: str) -> List[str]:
+def get_result_files(entry_id: str) -> list[str]:
     """
     List all files in a result ZIP by entry_id (UUID).
 
@@ -445,7 +445,7 @@ def get_result_files(entry_id: str) -> List[str]:
 
 
 @lru_cache(maxsize=50)
-def get_cached_result(entry_id: str) -> Optional[Dict]:
+def get_cached_result(entry_id: str) -> Optional[dict]:
     """
     Get cached result summary for a compound by entry_id (UUID).
 
@@ -706,7 +706,7 @@ def load_result_dataframe_by_entry_id(entry_id: str, filename: str = "similar_co
         return None
 
 
-def load_result_json_by_entry_id(entry_id: str, filename: str = "summary.json") -> Optional[Dict]:
+def load_result_json_by_entry_id(entry_id: str, filename: str = "summary.json") -> Optional[dict]:
     """
     Load a specific JSON from a result ZIP file by entry_id.
 
@@ -777,7 +777,7 @@ def smart_load_summary(
     entry_id: str = None,
     storage_path: str = None,
     force_refresh: bool = False
-) -> Optional[Dict]:
+) -> Optional[dict]:
     """
     Smart summary loader that tries multiple strategies.
 

@@ -174,32 +174,37 @@ class TestCachePerformance:
         """Cache decorator operations should be fast."""
         from backend.modules.api_client import cache_non_none
 
+        import asyncio
+
         # Test the cache decorator performance
         call_count = [0]
 
         @cache_non_none(maxsize=1000, ttl_seconds=3600)
-        def cached_function(key):
+        async def cached_function(key):
             call_count[0] += 1
             return f'value_{key}'
 
-        # Time initial cache population
-        start = time.time()
-        for i in range(1000):
-            cached_function(f'key_{i}')
-        populate_elapsed = time.time() - start
+        async def _run():
+            # Time initial cache population
+            start = time.time()
+            for i in range(1000):
+                await cached_function(f'key_{i}')
+            populate_elapsed = time.time() - start
 
-        assert populate_elapsed < 1.0, f"Cache populate too slow: {populate_elapsed:.2f}s"
+            assert populate_elapsed < 1.0, f"Cache populate too slow: {populate_elapsed:.2f}s"
 
-        # Time cache hits
-        start = time.time()
-        for i in range(1000):
-            cached_function(f'key_{i}')  # These should be cache hits
-        hit_elapsed = time.time() - start
+            # Time cache hits
+            start = time.time()
+            for i in range(1000):
+                await cached_function(f'key_{i}')  # These should be cache hits
+            hit_elapsed = time.time() - start
 
-        assert hit_elapsed < 0.5, f"Cache hit too slow: {hit_elapsed:.2f}s"
+            assert hit_elapsed < 0.5, f"Cache hit too slow: {hit_elapsed:.2f}s"
 
-        # Verify caching worked (function called only 1000 times, not 2000)
-        assert call_count[0] == 1000, f"Expected 1000 calls, got {call_count[0]}"
+            # Verify caching worked (function called only 1000 times, not 2000)
+            assert call_count[0] == 1000, f"Expected 1000 calls, got {call_count[0]}"
+
+        asyncio.run(_run())
 
 
 class TestAPIRateLimiterPerformance:
@@ -208,40 +213,48 @@ class TestAPIRateLimiterPerformance:
     @pytest.mark.benchmark
     def test_rate_limiter_check_performance(self):
         """Rate limiter checks should be fast even with many sessions."""
+        import asyncio
         from backend.core.rate_limiter import RateLimiter
 
         limiter = RateLimiter(window_seconds=60)
 
-        # Add many sessions
-        start = time.time()
-        for i in range(1000):
-            allowed, remaining = limiter.check_rate_limit(f'session_{i}', 10)
-            assert allowed  # First request for each session should be allowed
-        elapsed = time.time() - start
+        async def _run():
+            # Add many sessions
+            start = time.time()
+            for i in range(1000):
+                allowed, remaining = await limiter.check_rate_limit(f'session_{i}', 10)
+                assert allowed  # First request for each session should be allowed
+            elapsed = time.time() - start
 
-        assert elapsed < 0.5, f"Rate limiter too slow: {elapsed:.2f}s for 1000 sessions"
+            assert elapsed < 0.5, f"Rate limiter too slow: {elapsed:.2f}s for 1000 sessions"
 
-        # Check active session count
-        assert limiter.active_session_count <= 1000
+            # Check active session count
+            assert limiter.active_session_count <= 1000
+
+        asyncio.run(_run())
 
     @pytest.mark.benchmark
     def test_rate_limiter_cleanup_performance(self):
         """Rate limiter cleanup should not block."""
+        import asyncio
         from backend.core.rate_limiter import RateLimiter
 
         limiter = RateLimiter(window_seconds=0.2)  # 0.2 second window
 
-        # Add sessions
-        for i in range(100):
-            limiter.check_rate_limit(f'session_{i}', 10)
+        async def _run():
+            # Add sessions
+            for i in range(100):
+                await limiter.check_rate_limit(f'session_{i}', 10)
 
-        # Wait for window to expire
-        time.sleep(0.25)
+            # Wait for window to expire
+            await asyncio.sleep(0.25)
 
-        # Check should trigger cleanup
-        start = time.time()
-        allowed, remaining = limiter.check_rate_limit('new_session', 10)
-        elapsed = time.time() - start
+            # Check should trigger cleanup
+            start = time.time()
+            allowed, remaining = await limiter.check_rate_limit('new_session', 10)
+            elapsed = time.time() - start
 
-        assert elapsed < 0.1, f"Cleanup too slow: {elapsed:.2f}s"
-        assert allowed  # New session should be allowed
+            assert elapsed < 0.1, f"Cleanup too slow: {elapsed:.2f}s"
+            assert allowed  # New session should be allowed
+
+        asyncio.run(_run())

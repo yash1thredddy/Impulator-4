@@ -18,6 +18,7 @@ load_dotenv(env_path, override=True)
 # postgres_url fixture with a disposable testcontainer URL before any DB access.
 os.environ["TESTING"] = "true"
 os.environ["DATABASE_URL"] = "postgresql://test:test@localhost:1/test_placeholder"
+os.environ["DIRECT_DATABASE_URL"] = ""  # Prevent Alembic from connecting to real Supabase
 
 # Now import and clear settings cache to pick up overridden values
 from backend.config import get_settings  # noqa: E402
@@ -51,6 +52,7 @@ def pg_engine(postgres_url):
     from sqlalchemy import create_engine
 
     os.environ["DATABASE_URL"] = postgres_url
+    os.environ["DIRECT_DATABASE_URL"] = ""  # Force Alembic to use test DB, not real Supabase
     get_settings.cache_clear()
 
     engine = create_engine(postgres_url)

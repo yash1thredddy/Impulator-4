@@ -51,8 +51,8 @@ def client_with_db(test_engine, mock_azure):
     """Create a test client with properly configured database.
 
     Mocks the scheduler to prevent background job processing during tests.
-    Without this, the scheduler picks up jobs and submits them to the
-    ThreadPoolExecutor, which then tries to query the database after
+    Without this, the scheduler picks up jobs and submits them as
+    asyncio.Tasks, which then try to query the database after
     the test fixture has already restored the original engine.
     """
     from backend.main import app
@@ -76,8 +76,8 @@ def client_with_db(test_engine, mock_azure):
     app.dependency_overrides[get_db] = override_get_db
 
     # Mock the scheduler trigger to prevent background job processing.
-    # Without this, the executor spawns threads that outlive the test,
-    # causing "no such table" errors when the original engine is restored.
+    # Without this, the executor spawns asyncio.Tasks that outlive the test,
+    # causing errors when the original engine is restored.
     with patch('backend.core.scheduler.trigger'):
         client = TestClient(app)
         yield client
@@ -177,8 +177,9 @@ class TestDuplicateDetectionWorkflow:
         TestSessionLocal = sessionmaker(bind=test_engine)
         session = TestSessionLocal()
 
+        import uuid
         existing = Compound(
-            entry_id="existing-12345678",
+            entry_id=str(uuid.uuid4()),
             compound_name="Ethanol",
             smiles="CCO",
             inchikey="LFQSCWFLJHTTHZ-UHFFFAOYSA-N",  # InChIKey for ethanol

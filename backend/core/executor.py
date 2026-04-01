@@ -9,7 +9,8 @@ Note: job_id is uuid.UUID throughout (Postgres migration v2.2). Dict keys
 use str(job_id) for serialization safety.
 """
 import asyncio
-from typing import Any, Awaitable, Callable
+from typing import Any
+from collections.abc import Awaitable, Callable
 
 import structlog
 

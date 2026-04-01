@@ -8,7 +8,7 @@ import html
 import logging
 import base64
 from io import BytesIO
-from typing import Dict, Any, Optional
+from typing import Any, Optional
 
 import streamlit as st
 
@@ -47,7 +47,7 @@ def _imp_score_badge_css(score: float | None) -> str:
     return ""
 
 
-def render_compound_card(compound: Dict[str, Any], key_prefix: str = "", select_mode: bool = False) -> bool:
+def render_compound_card(compound: dict[str, Any], key_prefix: str = "", select_mode: bool = False) -> bool:
     """Render a compound card in the grid view (matching old UI style).
 
     Args:

@@ -10,7 +10,8 @@ import re
 import uuid
 import logging
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict
+from typing import Any
+from collections.abc import Callable
 
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -626,7 +627,7 @@ class JobService:
         page: int = 1,
         page_size: int = 20,
         session_id: str | None = None,
-    ) -> Dict:
+    ) -> dict:
         """
         List jobs with optional status filter, session filter, and pagination.
 
@@ -768,7 +769,7 @@ class JobService:
 
         return result
 
-    def get_batch_summary(self, db: Session, batch_id: str) -> Dict:
+    def get_batch_summary(self, db: Session, batch_id: str) -> dict:
         """
         Get summary statistics for a batch of jobs using single aggregated query.
 

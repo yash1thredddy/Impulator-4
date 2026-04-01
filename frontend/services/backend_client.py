@@ -9,7 +9,7 @@ import logging
 import threading
 import contextvars
 from dataclasses import dataclass
-from typing import Optional, Dict, List, Any
+from typing import Optional, Any
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -39,7 +39,7 @@ class JobResponse:
 class CompoundListResponse:
     """Response from compound listing API."""
     success: bool
-    compounds: List[dict] = None
+    compounds: list[dict] = None
     total: int = 0
     error: Optional[str] = None
 
@@ -96,7 +96,7 @@ class ImpulatorAPIClient:
         """Set session ID for user isolation (thread-safe via contextvars)."""
         _session_id_var.set(value)
 
-    def _get_headers(self) -> Dict[str, str]:
+    def _get_headers(self) -> dict[str, str]:
         """Get request headers including session ID if set."""
         headers = {}
         sid = _session_id_var.get(None)
@@ -143,7 +143,7 @@ class ImpulatorAPIClient:
         compound_name: str,
         smiles: str,
         similarity_threshold: int = None,
-        activity_types: List[str] = None,
+        activity_types: list[str] = None,
         author_name: str = "",
         duplicate_action: str = None,
     ) -> JobResponse:
@@ -207,11 +207,11 @@ class ImpulatorAPIClient:
 
     def check_duplicates(
         self,
-        compound_names: List[str] = None,
-        compounds: List[Dict[str, Any]] = None,
+        compound_names: list[str] = None,
+        compounds: list[dict[str, Any]] = None,
         similarity_threshold: Optional[int] = None,
-        activity_types: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        activity_types: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
         """Check which compounds already exist or are being processed.
 
         Supports two modes:
@@ -271,8 +271,8 @@ class ImpulatorAPIClient:
         self,
         smiles: str,
         similarity_threshold: int = 90,
-        activity_types: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        activity_types: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
         """Check ChEMBL data availability for a single compound before submission.
 
         Args:
@@ -311,10 +311,10 @@ class ImpulatorAPIClient:
 
     def check_availability_batch(
         self,
-        compounds: List[Dict[str, Any]],
+        compounds: list[dict[str, Any]],
         similarity_threshold: int = 90,
-        activity_types: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        activity_types: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
         """Batch availability check for multiple compounds.
 
         Args:
@@ -363,7 +363,7 @@ class ImpulatorAPIClient:
         existing_entry_id: Optional[str] = None,
         new_compound_name: Optional[str] = None,
         similarity_threshold: int = None,
-        activity_types: List[str] = None,
+        activity_types: list[str] = None,
         author_name: Optional[str] = None,
     ) -> JobResponse:
         """Resolve a duplicate compound situation.
@@ -433,9 +433,9 @@ class ImpulatorAPIClient:
 
     def submit_batch_job(
         self,
-        compounds: List[Dict[str, Any]],
-        duplicate_decisions: Optional[Dict[str, str]] = None
-    ) -> Dict[str, Any]:
+        compounds: list[dict[str, Any]],
+        duplicate_decisions: Optional[dict[str, str]] = None
+    ) -> dict[str, Any]:
         """Submit a batch of compound analysis jobs.
 
         Args:
@@ -485,7 +485,7 @@ class ImpulatorAPIClient:
         except requests.exceptions.RequestException as e:
             return {"success": False, "error": str(e)}
 
-    def get_batch_summary(self, batch_id: str) -> Dict[str, Any]:
+    def get_batch_summary(self, batch_id: str) -> dict[str, Any]:
         """Get summary of a batch of jobs.
 
         Args:
@@ -512,7 +512,7 @@ class ImpulatorAPIClient:
         except requests.exceptions.RequestException as e:
             return {"success": False, "error": str(e)}
 
-    def cancel_batch(self, batch_id: str) -> Dict[str, Any]:
+    def cancel_batch(self, batch_id: str) -> dict[str, Any]:
         """Cancel all jobs in a batch.
 
         Args:
@@ -571,7 +571,7 @@ class ImpulatorAPIClient:
         except requests.exceptions.RequestException as e:
             return JobResponse(success=False, error=str(e))
 
-    def get_active_jobs(self) -> Optional[List[dict]]:
+    def get_active_jobs(self) -> Optional[list[dict]]:
         """Get list of active jobs.
 
         Returns:
@@ -755,7 +755,7 @@ class ImpulatorAPIClient:
         except requests.exceptions.RequestException as e:
             return JobResponse(success=False, error=str(e))
 
-    def delete_compounds_batch(self, entry_ids: List[str]) -> JobResponse:
+    def delete_compounds_batch(self, entry_ids: list[str]) -> JobResponse:
         """Delete multiple compounds through the backend API.
 
         Deletion must remain backend-authoritative so database state, storage
@@ -853,7 +853,7 @@ class ImpulatorAPIClient:
             logger.error(f"PubChem resolution error for {inchikey}: {e}")
             return None
 
-    def resolve_inchikeys_batch(self, inchikeys: List[str]) -> Dict[str, str]:
+    def resolve_inchikeys_batch(self, inchikeys: list[str]) -> dict[str, str]:
         """Resolve multiple InChIKeys to SMILES via PubChem batch POST.
 
         Args:

@@ -36,7 +36,7 @@ More flags = stronger evidence the compound is a genuine IMP (assay artifact).
 
 import asyncio
 import logging
-from typing import Callable, Dict
+from collections.abc import Callable
 
 import httpx
 import numpy as np
@@ -826,7 +826,7 @@ def add_imp_score_interpretation(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def get_imp_score_summary(df: pd.DataFrame) -> Dict:
+def get_imp_score_summary(df: pd.DataFrame) -> dict:
     """Generate summary statistics about IMP scores in the dataset."""
     if 'IMP_Final_Score' not in df.columns:
         return {'error': 'No IMP scores found'}

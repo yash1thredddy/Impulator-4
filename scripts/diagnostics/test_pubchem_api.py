@@ -15,7 +15,7 @@ import sys
 import time
 import argparse
 import requests
-from typing import Optional, Dict, List, Tuple
+from typing import Optional
 
 # ── Test compounds ──────────────────────────────────────────────────────────
 ASPIRIN_INCHIKEY = "BSYNRYMUTXBXSQ-UHFFFAOYSA-N"
@@ -40,7 +40,7 @@ class TestResult:
         self.passed = False
         self.error: Optional[str] = None
         self.latency_ms: float = 0
-        self.details: Dict = {}
+        self.details: dict = {}
 
     def pass_(self, latency_ms: float, **details):
         self.passed = True
@@ -55,7 +55,7 @@ class TestResult:
 
 def timed_request(
     method: str, url: str, **kwargs
-) -> Tuple[Optional[requests.Response], float, Optional[str]]:
+) -> tuple[Optional[requests.Response], float, Optional[str]]:
     """Make a request and return (response, latency_ms, error_or_none)."""
     kwargs.setdefault('timeout', TIMEOUT)
     start = time.perf_counter()
@@ -406,7 +406,7 @@ def run_tests(api_filter: Optional[str] = None, verbose: bool = False) -> bool:
     print("  InChIKey -> SMILES Resolution")
     print("=" * 72)
 
-    results: List[TestResult] = []
+    results: list[TestResult] = []
 
     for group, tests in ALL_TESTS.items():
         if api_filter and group != api_filter:

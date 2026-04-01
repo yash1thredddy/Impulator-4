@@ -11,7 +11,7 @@ Smart Polling:
 
 import html as html_mod
 import logging
-from typing import Dict, Any
+from typing import Any
 
 import base64
 from pathlib import Path
@@ -66,7 +66,7 @@ def _mark_job_viewed(job_id: str) -> None:
     st.session_state[_VIEWED_JOBS_KEY] = viewed
 
 
-def _sort_jobs_for_sidebar(jobs: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+def _sort_jobs_for_sidebar(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep actively running jobs ahead of completed items in the sidebar."""
     jobs = sorted(jobs, key=lambda job: job.get('created_at', ''), reverse=True)
     return sorted(
@@ -318,7 +318,7 @@ def _render_failed_jobs_section(failed_jobs: list) -> None:
         render_job_card(job)
 
 
-def render_job_card(job: Dict[str, Any]) -> None:
+def render_job_card(job: dict[str, Any]) -> None:
     """Render a single job card in the sidebar.
 
     Args:
@@ -522,7 +522,7 @@ def _resubmit_all_at_best_threshold(jobs: list) -> None:
         st.toast(f"Failed to resubmit {failed} jobs")
 
 
-def _resubmit_at_threshold(job: Dict[str, Any], threshold: int) -> None:
+def _resubmit_at_threshold(job: dict[str, Any], threshold: int) -> None:
     """Resubmit a failed job at a lower similarity threshold."""
     client = get_api_client()
     params = job.get('input_params', {})

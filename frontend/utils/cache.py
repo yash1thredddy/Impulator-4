@@ -10,7 +10,8 @@ import time
 import hashlib
 import logging
 from functools import wraps, lru_cache
-from typing import Any, Callable, Dict, Optional, TypeVar
+from typing import Any, Optional, TypeVar
+from collections.abc import Callable
 from collections import OrderedDict
 from threading import Lock
 
@@ -53,7 +54,7 @@ class TTLCache:
         self.maxsize = maxsize
         self.ttl = ttl
         self._cache: OrderedDict = OrderedDict()
-        self._timestamps: Dict[str, float] = {}
+        self._timestamps: dict[str, float] = {}
         self._lock = Lock()
         self._hits = 0
         self._misses = 0
@@ -167,7 +168,7 @@ class TTLCache:
             self._hits = 0
             self._misses = 0
 
-    def stats(self) -> Dict[str, Any]:
+    def stats(self) -> dict[str, Any]:
         """
         Get cache statistics.
 
@@ -370,7 +371,7 @@ def cache_conversion(func: Callable) -> Callable:
 # Utility Functions
 # ==============================================================================
 
-def get_all_cache_stats() -> Dict[str, Dict[str, Any]]:
+def get_all_cache_stats() -> dict[str, dict[str, Any]]:
     """
     Get statistics for all pre-configured caches.
 

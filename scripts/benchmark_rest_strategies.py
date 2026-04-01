@@ -13,10 +13,8 @@ Usage:
 
 import requests
 import time
-import statistics
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Optional, Tuple
-from urllib.parse import quote as url_quote
+from typing import Optional
 
 BASE_URL = "https://www.ebi.ac.uk/chembl/api/data"
 LIMIT = 1000
@@ -84,7 +82,7 @@ def rest_post(endpoint: str, data: dict, timeout: int = 60) -> Optional[dict]:
 # Q1: Sequential vs Parallel Pagination
 # ============================================================================
 
-def fetch_activities_sequential(chembl_ids: List[str]) -> Tuple[int, int]:
+def fetch_activities_sequential(chembl_ids: list[str]) -> tuple[int, int]:
     """Fetch all activities sequentially, page by page."""
     ids_param = ",".join(chembl_ids)
     all_activities = []
@@ -121,7 +119,7 @@ def fetch_activities_sequential(chembl_ids: List[str]) -> Tuple[int, int]:
     return len(all_activities), request_count, total_count or 0
 
 
-def fetch_activities_parallel(chembl_ids: List[str], max_workers: int = 4) -> Tuple[int, int]:
+def fetch_activities_parallel(chembl_ids: list[str], max_workers: int = 4) -> tuple[int, int]:
     """Fetch first page to get total_count, then parallelize remaining pages."""
     ids_param = ",".join(chembl_ids)
 
@@ -199,7 +197,7 @@ def test_post_support():
             get_count = len(get_result.get(key, [])) if key else "?"
             print(f"  GET:  {get_time:.3f}s — {get_count} results")
         else:
-            print(f"  GET:  FAILED")
+            print("  GET:  FAILED")
 
         # POST with same params
         start = time.monotonic()
@@ -242,7 +240,7 @@ def test_post_support():
 # Q4: "Fetch all + filter locally" vs "Split by type + parallel"
 # ============================================================================
 
-def fetch_all_filter_locally(chembl_ids: List[str], activity_types: List[str]) -> Tuple[int, int, int]:
+def fetch_all_filter_locally(chembl_ids: list[str], activity_types: list[str]) -> tuple[int, int, int]:
     """Strategy A: Fetch ALL activities, filter by type locally."""
     ids_param = ",".join(chembl_ids)
     all_activities = []
@@ -277,7 +275,7 @@ def fetch_all_filter_locally(chembl_ids: List[str], activity_types: List[str]) -
     return len(filtered), len(all_activities), request_count
 
 
-def fetch_by_type_parallel(chembl_ids: List[str], activity_types: List[str], max_workers: int = 4) -> Tuple[int, int, int]:
+def fetch_by_type_parallel(chembl_ids: list[str], activity_types: list[str], max_workers: int = 4) -> tuple[int, int, int]:
     """Strategy B: One query per activity type, run in parallel."""
     ids_param = ",".join(chembl_ids)
     all_filtered = []
@@ -326,7 +324,7 @@ def fetch_by_type_parallel(chembl_ids: List[str], activity_types: List[str], max
     return len(all_filtered), total_raw, total_requests
 
 
-def fetch_all_filter_locally_parallel_pages(chembl_ids: List[str], activity_types: List[str], max_workers: int = 4) -> Tuple[int, int, int]:
+def fetch_all_filter_locally_parallel_pages(chembl_ids: list[str], activity_types: list[str], max_workers: int = 4) -> tuple[int, int, int]:
     """Strategy C: Fetch ALL activities with parallel pagination, filter locally."""
     ids_param = ",".join(chembl_ids)
 
@@ -394,7 +392,7 @@ def main():
     # Use quercetin - known to have lots of activities
     test_ids = ["CHEMBL159"]
 
-    print(f"\nTest compound: Quercetin (CHEMBL159)")
+    print("\nTest compound: Quercetin (CHEMBL159)")
 
     # First, check how many activities exist
     probe = rest_get("activity", {
@@ -405,7 +403,7 @@ def main():
         total = probe.get("page_meta", {}).get("total_count", 0)
         print(f"Total activities: {total} (will need {(total + LIMIT - 1) // LIMIT} pages)")
 
-    print(f"\n--- Sequential pagination ---")
+    print("\n--- Sequential pagination ---")
     start = time.monotonic()
     seq_count, seq_reqs, seq_total = fetch_activities_sequential(test_ids)
     seq_time = time.monotonic() - start
@@ -413,7 +411,7 @@ def main():
 
     time.sleep(1)  # Avoid rate limiting
 
-    print(f"\n--- Parallel pagination (4 workers) ---")
+    print("\n--- Parallel pagination (4 workers) ---")
     start = time.monotonic()
     par_count, par_reqs, par_total = fetch_activities_parallel(test_ids, max_workers=4)
     par_time = time.monotonic() - start
@@ -436,7 +434,7 @@ def main():
 
     time.sleep(1)
 
-    print(f"\n--- Sequential ---")
+    print("\n--- Sequential ---")
     start = time.monotonic()
     seq_count, seq_reqs, seq_total = fetch_activities_sequential(BATCH_IDS)
     seq_time = time.monotonic() - start
@@ -444,7 +442,7 @@ def main():
 
     time.sleep(1)
 
-    print(f"\n--- Parallel (4 workers) ---")
+    print("\n--- Parallel (4 workers) ---")
     start = time.monotonic()
     par_count, par_reqs, par_total = fetch_activities_parallel(BATCH_IDS, max_workers=4)
     par_time = time.monotonic() - start
@@ -471,7 +469,7 @@ def main():
 
     time.sleep(1)
 
-    print(f"\n--- Strategy A: Fetch ALL + filter locally (sequential pages) ---")
+    print("\n--- Strategy A: Fetch ALL + filter locally (sequential pages) ---")
     start = time.monotonic()
     a_filtered, a_raw, a_reqs = fetch_all_filter_locally(test_batch, ACTIVITY_TYPES)
     a_time = time.monotonic() - start
@@ -479,7 +477,7 @@ def main():
 
     time.sleep(1)
 
-    print(f"\n--- Strategy B: Split by type + parallel (server-side filter) ---")
+    print("\n--- Strategy B: Split by type + parallel (server-side filter) ---")
     start = time.monotonic()
     b_filtered, b_raw, b_reqs = fetch_by_type_parallel(test_batch, ACTIVITY_TYPES, max_workers=4)
     b_time = time.monotonic() - start
@@ -487,13 +485,13 @@ def main():
 
     time.sleep(1)
 
-    print(f"\n--- Strategy C: Fetch ALL + parallel pages + filter locally ---")
+    print("\n--- Strategy C: Fetch ALL + parallel pages + filter locally ---")
     start = time.monotonic()
     c_filtered, c_raw, c_reqs = fetch_all_filter_locally_parallel_pages(test_batch, ACTIVITY_TYPES, max_workers=4)
     c_time = time.monotonic() - start
     print(f"  Time: {c_time:.3f}s | Filtered: {c_filtered}/{c_raw} | Requests: {c_reqs}")
 
-    print(f"\n--- Summary ---")
+    print("\n--- Summary ---")
     print(f"  Strategy A (all + local filter, sequential): {a_time:.3f}s, {a_reqs} requests, {a_filtered} results")
     print(f"  Strategy B (per-type parallel, server filter): {b_time:.3f}s, {b_reqs} requests, {b_filtered} results")
     print(f"  Strategy C (all + local filter, parallel pages): {c_time:.3f}s, {c_reqs} requests, {c_filtered} results")

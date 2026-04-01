@@ -19,7 +19,7 @@ import shutil
 import uuid
 import zipfile
 from datetime import datetime, timezone
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
@@ -75,7 +75,7 @@ def _is_connection_error(e: Exception) -> bool:
     return isinstance(e, DBAPIError) and e.connection_invalidated
 
 
-import structlog as _structlog
+import structlog as _structlog  # noqa: E402
 
 _retry_logger = _structlog.get_logger("compound_service.retry")
 

@@ -5,7 +5,7 @@ Provides the input form for submitting new compound analysis jobs.
 
 import html
 import logging
-from typing import Dict, List, Optional
+from typing import Optional
 
 import streamlit as st
 import streamlit.components.v1 as st_components
@@ -463,7 +463,7 @@ def render_job_form() -> Optional[str]:
     return None
 
 
-def render_activity_checkboxes(key_prefix: str = "single") -> List[str]:
+def render_activity_checkboxes(key_prefix: str = "single") -> list[str]:
     """Render activity type checkboxes and return selected types.
 
     Args:
@@ -505,7 +505,7 @@ def _submit_job(
     structure_input: str,
     input_type: str,
     similarity_threshold: int,
-    activity_types: List[str]
+    activity_types: list[str]
 ) -> Optional[str]:
     """Submit the job to the backend.
 
@@ -719,7 +719,7 @@ def _resolve_from_availability(
     new_compound_name: Optional[str],
     smiles: str,
     similarity_threshold: int,
-    activity_types: List[str],
+    activity_types: list[str],
     author_name: str,
 ) -> Optional[str]:
     """Resolve a duplicate directly from the availability dialog.
@@ -774,7 +774,7 @@ def _submit_with_availability(
     compound_name: str,
     smiles: str,
     similarity_threshold: int,
-    activity_types: List[str],
+    activity_types: list[str],
     author_name: str,
     duplicate_action: Optional[str] = None,
 ) -> Optional[str]:
@@ -833,7 +833,7 @@ def _submit_with_availability(
         SessionState.set('is_processing', False)
 
 
-def _detect_column_mappings(df) -> Dict[str, Optional[str]]:
+def _detect_column_mappings(df) -> dict[str, Optional[str]]:
     """
     Detect likely column mappings based on column names.
 
@@ -890,7 +890,7 @@ def _detect_column_mappings(df) -> Dict[str, Optional[str]]:
     return result
 
 
-def _render_column_mapping_ui(df) -> Optional[Dict[str, str]]:
+def _render_column_mapping_ui(df) -> Optional[dict[str, str]]:
     """
     Render dropdown selectors for column mapping.
 
@@ -995,7 +995,7 @@ def _render_column_mapping_ui(df) -> Optional[Dict[str, str]]:
     return mapping
 
 
-def _apply_column_mapping(df, mapping: Dict[str, str]):
+def _apply_column_mapping(df, mapping: dict[str, str]):
     """
     Apply user-selected column mapping to dataframe.
 
@@ -1067,7 +1067,7 @@ def _inchi_to_smiles(inchi: str) -> Optional[str]:
         return None
 
 
-def _generate_next_version_name(compound_name: str, existing_names: List[str]) -> str:
+def _generate_next_version_name(compound_name: str, existing_names: list[str]) -> str:
     """
     Generate next version name for a duplicate compound.
 
@@ -1213,8 +1213,8 @@ def render_csv_upload_form() -> Optional[str]:
 
     def _build_duplicate_check_signature(
         threshold: int,
-        activities: List[str],
-        mapping: Dict[str, str],
+        activities: list[str],
+        mapping: dict[str, str],
     ) -> tuple:
         """Create a stable signature for duplicate-check configuration."""
         normalized_activities = tuple(sorted({a.strip() for a in activities if a and a.strip()}))
@@ -1983,12 +1983,12 @@ def _submit_batch(
     df,
     has_smiles: bool,
     similarity_threshold: int,
-    activity_types: List[str],
-    duplicate_decisions: Dict[str, str] = None,
-    duplicate_new_names: Dict[str, str] = None,
+    activity_types: list[str],
+    duplicate_decisions: dict[str, str] = None,
+    duplicate_new_names: dict[str, str] = None,
     author_name: str = "",
-    availability_decisions: Dict = None,
-    auto_skipped_no_data: List[str] = None,
+    availability_decisions: dict = None,
+    auto_skipped_no_data: list[str] = None,
 ) -> Optional[str]:
     """Submit batch of compounds to backend.
 

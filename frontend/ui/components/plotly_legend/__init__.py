@@ -9,7 +9,7 @@ No Python round-trip needed — stats update instantly on legend toggle.
 import json
 import streamlit as st
 import streamlit.components.v1 as components
-from typing import Optional, Dict, Any
+from typing import Optional, Any
 
 
 # ── HTML + JS component ─────────────────────────────────────────────
@@ -222,7 +222,7 @@ _COMPONENT_HTML = r"""<!DOCTYPE html>
 def plotly_legend_monitor(
     chart_meta: str,
     key: str,
-    initial_stats: Optional[Dict[str, Any]] = None,
+    initial_stats: Optional[dict[str, Any]] = None,
     x_col: str = "x",
     y_col: str = "y",
 ) -> None:

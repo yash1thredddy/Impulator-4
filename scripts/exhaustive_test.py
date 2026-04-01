@@ -4,7 +4,6 @@ Tests ALL major features: health, pipeline, batch, concurrency, edge cases, data
 Uses httpx.AsyncClient against a running backend on port 8001.
 """
 import asyncio
-import json
 import sys
 import time
 import uuid

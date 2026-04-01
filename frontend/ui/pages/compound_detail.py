@@ -6,7 +6,7 @@ Displays full analysis results with improved UX and organization.
 import html
 import logging
 import re
-from typing import Dict, Any, Optional
+from typing import Any, Optional
 from urllib.parse import quote_plus
 
 import streamlit as st
@@ -196,7 +196,7 @@ def render_compound_detail_page() -> None:
             _render_versions_tab(versions, entry_id)
 
 
-def _render_quick_stats(data: Dict[str, Any]) -> None:
+def _render_quick_stats(data: dict[str, Any]) -> None:
     """Render compact stats bar."""
     df = data.get('results')
     summary = data.get('summary', {})
@@ -246,7 +246,7 @@ def _render_quick_stats(data: Dict[str, Any]) -> None:
 # OVERVIEW TAB - Using sub-tabs for organization
 # =============================================================================
 
-def _render_overview_tab(data: Dict[str, Any]) -> None:
+def _render_overview_tab(data: dict[str, Any]) -> None:
     """Overview with sub-tabs for different analysis sections."""
     df = data.get('results')
     summary = data.get('summary', {})
@@ -301,7 +301,7 @@ def _render_overview_tab(data: Dict[str, Any]) -> None:
         _render_drug_indications(data)
 
 
-def _render_compound_info(data: Dict[str, Any], df: pd.DataFrame, summary: Dict) -> None:
+def _render_compound_info(data: dict[str, Any], df: pd.DataFrame, summary: dict) -> None:
     """Compound information section."""
     # Get unique IDs early for use in both columns
     unique_ids = []
@@ -2623,7 +2623,7 @@ since NSEI and NBEI are derived from the same underlying activity data.
 # VISUALIZATIONS TAB
 # =============================================================================
 
-def _render_visualizations_tab(data: Dict[str, Any]) -> None:
+def _render_visualizations_tab(data: dict[str, Any]) -> None:
     """Interactive visualizations."""
     df = data.get('results')
 
@@ -3104,7 +3104,7 @@ def _plot_custom(df: pd.DataFrame) -> None:
 # STRUCTURES TAB - Molecule Viewer
 # =============================================================================
 
-def _render_structures_tab(data: Dict[str, Any]) -> None:
+def _render_structures_tab(data: dict[str, Any]) -> None:
     """Molecular structures viewer (2D/3D)."""
     df = data.get('results')
     _render_molecule_viewer(df)
@@ -3821,7 +3821,7 @@ def _render_pdb_evidence(
 # DATA TAB
 # =============================================================================
 
-def _render_data_tab(data: Dict[str, Any]) -> None:
+def _render_data_tab(data: dict[str, Any]) -> None:
     """Data tables with downloads."""
     df = data.get('results')
     compound_name = data.get('compound_name', 'compound')
@@ -3937,7 +3937,7 @@ def _render_data_tab(data: Dict[str, Any]) -> None:
 # DATA LOADING & DELETE
 # =============================================================================
 
-def _render_drug_indications(data: Dict[str, Any]) -> None:
+def _render_drug_indications(data: dict[str, Any]) -> None:
     """
     Render drug indications tab with clickable links to MESH, EFO, and Clinical Trials.
 
@@ -4231,7 +4231,7 @@ def _load_compound_data(
     compound_name: str = None,
     entry_id: str = None,
     storage_path: str = None
-) -> Optional[Dict[str, Any]]:
+) -> Optional[dict[str, Any]]:
     """Load compound data from storage.
 
     Uses smart loaders that prioritize storage_path (from database), then entry_id.
@@ -4452,7 +4452,7 @@ def _get_imp_interpretation(score: float) -> dict:
         }
 
 
-def _render_report_tab(data: Dict[str, Any]) -> None:
+def _render_report_tab(data: dict[str, Any]) -> None:
     """Render the Report tab with comprehensive analysis and export."""
     df = data.get('results')
     if df is None or df.empty:
@@ -4519,7 +4519,7 @@ def _render_report_tab(data: Dict[str, Any]) -> None:
     _render_report_recommendation(df, mean_score)
 
 
-def _render_report_header(data: Dict[str, Any], smiles: str) -> None:
+def _render_report_header(data: dict[str, Any], smiles: str) -> None:
     """Render report header with 2D structure, compound name, SMILES."""
     st.markdown("## 📋 IMPULATOR Compound Analysis Report")
 
@@ -5254,7 +5254,7 @@ def _render_report_efficiency_plane(df: pd.DataFrame) -> None:
     st.markdown("---")
 
 
-def _render_report_pdb_evidence(df: pd.DataFrame, data: Dict[str, Any]) -> None:
+def _render_report_pdb_evidence(df: pd.DataFrame, data: dict[str, Any]) -> None:
     """Render PDB structural evidence section."""
     st.markdown("### 🔬 PDB Structural Evidence")
 
@@ -5483,7 +5483,7 @@ def _render_report_classification(df: pd.DataFrame) -> None:
     st.markdown("---")
 
 
-def _render_report_indications(data: Dict[str, Any]) -> None:
+def _render_report_indications(data: dict[str, Any]) -> None:
     """Render drug indications section."""
     st.markdown("### 💊 Drug Indications")
 
@@ -5782,7 +5782,7 @@ def _create_html_efficiency_scatter(df: pd.DataFrame) -> str:
     return _export_plotly_to_base64(fig, 900, 600)
 
 
-def _create_html_pdb_quality_bar(df: pd.DataFrame, data: Dict[str, Any]) -> str:
+def _create_html_pdb_quality_bar(df: pd.DataFrame, data: dict[str, Any]) -> str:
     """Create PDB quality distribution bar chart for HTML export."""
     # Try to load pdb_summary for accurate counts
     pdb_summary_df = None
@@ -5829,7 +5829,7 @@ def _create_html_pdb_quality_bar(df: pd.DataFrame, data: Dict[str, Any]) -> str:
     return _export_plotly_to_base64(fig, 700, 250)
 
 
-def _generate_html_report(data: Dict[str, Any], df: pd.DataFrame) -> str:
+def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
     """Generate comprehensive HTML report with ALL sections matching Report tab."""
     import base64
     import io

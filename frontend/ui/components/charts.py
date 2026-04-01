@@ -9,7 +9,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from typing import Optional, List, Dict, Any
+from typing import Optional, Any
 
 from frontend.ui.components.molecule_viewer import (
     embed_structure_viewer,
@@ -370,7 +370,7 @@ def create_3d_scatter(
 
 def create_correlation_heatmap(
     df: pd.DataFrame,
-    columns: Optional[List[str]] = None,
+    columns: Optional[list[str]] = None,
     title: str = "Correlation Heatmap",
     subtitle: Optional[str] = None,
     color_scale: str = "RdBu_r"
@@ -415,7 +415,7 @@ def create_correlation_heatmap(
 
 def create_pair_plot(
     df: pd.DataFrame,
-    columns: List[str],
+    columns: list[str],
     color_col: Optional[str] = None,
     title: str = "Pair Plot",
     subtitle: Optional[str] = None
@@ -485,7 +485,7 @@ def render_chart_with_viewer(
     )
 
 
-def get_available_chart_types() -> Dict[str, str]:
+def get_available_chart_types() -> dict[str, str]:
     """Get dictionary of available chart types.
 
     Returns:
@@ -506,7 +506,7 @@ def get_available_chart_types() -> Dict[str, str]:
 def render_chart_controls(
     df: pd.DataFrame,
     key_prefix: str = "chart"
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Render chart configuration controls.
 
     Args:

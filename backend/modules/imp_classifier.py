@@ -14,7 +14,6 @@ Classification criteria:
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +128,7 @@ def _assign_confidence_simple(is_imp: bool, outlier_count: int) -> str:
         return 'Low'
 
 
-def get_imp_summary(df: pd.DataFrame) -> Dict:
+def get_imp_summary(df: pd.DataFrame) -> dict:
     """
     Generate summary statistics about IMP classification.
 

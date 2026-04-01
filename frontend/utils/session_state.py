@@ -13,7 +13,8 @@ import copy
 import hashlib
 import logging
 import uuid
-from typing import Any, Optional, Dict, List, Callable
+from typing import Any, Optional
+from collections.abc import Callable
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -61,7 +62,7 @@ class SessionState:
 
     # Default value factories for session state keys
     # Using factories prevents mutable defaults from being shared across sessions
-    _DEFAULT_FACTORIES: Dict[str, Callable[[], Any]] = {
+    _DEFAULT_FACTORIES: dict[str, Callable[[], Any]] = {
         # Session isolation - unique ID per browser session
         'session_id': lambda: str(uuid.uuid4()),
 
@@ -114,7 +115,7 @@ class SessionState:
     }
 
     # Legacy DEFAULTS for backwards compatibility (read-only reference)
-    DEFAULTS: Dict[str, Any] = {
+    DEFAULTS: dict[str, Any] = {
         'current_view': VIEW_HOME,
         'selected_compound': None,
         'compound_search_query': "",
@@ -125,7 +126,7 @@ class SessionState:
     }
 
     # Keys associated with each mode/view
-    MODE_KEYS: Dict[str, List[str]] = {
+    MODE_KEYS: dict[str, list[str]] = {
         'analyze': [
             'pending_compound_name',
             'pending_structure_input',
@@ -289,7 +290,7 @@ class SessionState:
             cls.set('active_jobs', jobs)
 
     @classmethod
-    def get_active_jobs(cls) -> Dict[str, ActiveJob]:
+    def get_active_jobs(cls) -> dict[str, ActiveJob]:
         """Get all active jobs."""
         return cls.get('active_jobs', {})
 

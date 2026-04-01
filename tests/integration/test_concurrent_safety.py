@@ -79,8 +79,7 @@ class TestConcurrentJobCreation:
                         results.append(f"error: {e}")
 
             # Submit jobs with limited parallelism (2 workers max)
-            # SQLite in-memory with StaticPool shares a single connection,
-            # so high concurrency causes cursor reset errors
+            # Limited concurrency to avoid overwhelming the test database
             with ThreadPoolExecutor(max_workers=2) as executor:
                 futures = [executor.submit(create_job, i) for i in range(3)]
                 for f in futures:

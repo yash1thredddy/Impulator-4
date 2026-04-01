@@ -21,7 +21,7 @@ import argparse
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -91,7 +91,7 @@ def _rate_limit():
 
 
 def pubchem_get(url: str, params: dict = None, timeout: int = GENERAL_TIMEOUT
-                ) -> Tuple[Optional[requests.Response], Dict[str, str]]:
+                ) -> tuple[Optional[requests.Response], dict[str, str]]:
     """Rate-limited GET. Returns (response, throttle_info)."""
     _rate_limit()
     throttle_info = {}
@@ -109,7 +109,7 @@ def pubchem_get(url: str, params: dict = None, timeout: int = GENERAL_TIMEOUT
 
 def pubchem_post(url: str, data: dict = None, params: dict = None,
                  timeout: int = GENERAL_TIMEOUT
-                 ) -> Tuple[Optional[requests.Response], Dict[str, str]]:
+                 ) -> tuple[Optional[requests.Response], dict[str, str]]:
     """Rate-limited POST. Returns (response, throttle_info)."""
     _rate_limit()
     throttle_info = {}
@@ -129,7 +129,7 @@ def pubchem_post(url: str, data: dict = None, params: dict = None,
 #  Helpers
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _parse_throttle_header(header: str) -> Dict[str, str]:
+def _parse_throttle_header(header: str) -> dict[str, str]:
     """Parse X-Throttling-Control header.
 
     Format: "Request Count status: Green (12%), Request Time status: Green (0%),
@@ -175,7 +175,7 @@ def print_header(text: str):
 
 @dataclass
 class SimilarityResult:
-    cids: List[int] = field(default_factory=list)
+    cids: list[int] = field(default_factory=list)
     time_ms: float = 0.0
     threshold: int = 90
     max_records: int = 100
@@ -184,7 +184,7 @@ class SimilarityResult:
 
 @dataclass
 class PropertyResult:
-    properties: List[Dict] = field(default_factory=list)
+    properties: list[dict] = field(default_factory=list)
     time_ms: float = 0.0
     batch_size: int = 0
     error: Optional[str] = None
@@ -198,15 +198,15 @@ class BioactivityResult:
     inactive_count: int = 0
     inconclusive_count: int = 0
     # All activity names with counts
-    by_activity_name: Dict[str, int] = field(default_factory=dict)
+    by_activity_name: dict[str, int] = field(default_factory=dict)
     # Filtered by app activity types (IC50, Ki, Kd, EC50, AC50, GI50, MIC)
     type_filtered_total: int = 0
     type_filtered_active: int = 0
-    by_type_filtered: Dict[str, int] = field(default_factory=dict)
-    by_type_filtered_active: Dict[str, int] = field(default_factory=dict)
+    by_type_filtered: dict[str, int] = field(default_factory=dict)
+    by_type_filtered_active: dict[str, int] = field(default_factory=dict)
     # Targets
     unique_targets: int = 0
-    target_names: List[str] = field(default_factory=list)
+    target_names: list[str] = field(default_factory=list)
     # Meta
     response_size_bytes: int = 0
     time_ms: float = 0.0
@@ -224,8 +224,8 @@ class ThrottleSnapshot:
 @dataclass
 class DrugIndicationResult:
     total: int = 0
-    by_phase: Dict[str, int] = field(default_factory=dict)
-    indications: List[Dict[str, str]] = field(default_factory=list)
+    by_phase: dict[str, int] = field(default_factory=dict)
+    indications: list[dict[str, str]] = field(default_factory=list)
     time_ms: float = 0.0
     error: Optional[str] = None
 
@@ -279,7 +279,7 @@ def pubchem_similarity_search(
 
 
 def pubchem_fetch_properties(
-    cids: List[int],
+    cids: list[int],
     properties: str = STANDARD_PROPERTIES,
     batch_size: int = 100,
 ) -> PropertyResult:
@@ -464,7 +464,7 @@ def pubchem_fetch_drug_indications(cid: int) -> DrugIndicationResult:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def benchmark_similarity_thresholds(smiles: str, name: str,
-                                     thresholds: List[int] = None):
+                                     thresholds: list[int] = None):
     """Test similarity at multiple thresholds."""
     if thresholds is None:
         thresholds = [70, 80, 90, 95]
@@ -483,8 +483,8 @@ def benchmark_similarity_thresholds(smiles: str, name: str,
     return results
 
 
-def benchmark_property_batch_sizes(cids: List[int], name: str,
-                                    sizes: List[int] = None):
+def benchmark_property_batch_sizes(cids: list[int], name: str,
+                                    sizes: list[int] = None):
     """Test property fetching at different batch sizes."""
     if sizes is None:
         sizes = [10, 50, 100, 200]

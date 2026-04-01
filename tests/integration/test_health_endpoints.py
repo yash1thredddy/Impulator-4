@@ -78,7 +78,7 @@ class TestBasicHealth:
         data = response.json()
         db_check = data["checks"]["database"]
         assert "backend" in db_check
-        assert db_check["backend"] in ("postgres", "sqlite")
+        assert db_check["backend"] in ("postgres", "sqlite")  # sqlite in tests, postgres in prod
         assert "latency_ms" in db_check
 
 

@@ -18,7 +18,7 @@ import time
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Any, Optional
 from datetime import datetime
 
 # Add parent directory to path
@@ -87,7 +87,7 @@ class ExternalAPITester:
 
     def __init__(self, verbose: bool = False):
         self.verbose = verbose
-        self.results: List[APITestResult] = []
+        self.results: list[APITestResult] = []
 
     def log(self, message: str, level: str = "INFO"):
         """Log message if verbose mode is enabled."""
@@ -122,7 +122,7 @@ class ExternalAPITester:
 
     # ==================== ChEMBL API Tests ====================
 
-    def test_chembl_similarity_search(self) -> Dict[str, Any]:
+    def test_chembl_similarity_search(self) -> dict[str, Any]:
         """Test ChEMBL similarity search endpoint."""
         if not CHEMBL_AVAILABLE:
             raise RuntimeError("ChEMBL client not available (API may be down)")
@@ -154,7 +154,7 @@ class ExternalAPITester:
             "sample_chembl_id": results_list[0]['molecule_chembl_id'] if results_list else None,
         }
 
-    def test_chembl_molecule_lookup(self) -> Dict[str, Any]:
+    def test_chembl_molecule_lookup(self) -> dict[str, Any]:
         """Test ChEMBL molecule lookup by ChEMBL ID."""
         if not CHEMBL_AVAILABLE:
             raise RuntimeError("ChEMBL client not available (API may be down)")
@@ -176,7 +176,7 @@ class ExternalAPITester:
             "has_structure": bool(molecule.get('molecule_structures')),
         }
 
-    def test_chembl_activities_fetch(self) -> Dict[str, Any]:
+    def test_chembl_activities_fetch(self) -> dict[str, Any]:
         """Test ChEMBL activities endpoint (bioactivity data)."""
         if not CHEMBL_AVAILABLE:
             raise RuntimeError("ChEMBL client not available (API may be down)")
@@ -208,7 +208,7 @@ class ExternalAPITester:
             "sample_activity": activities_list[0] if activities_list else None,
         }
 
-    def test_chembl_batch_fetch(self) -> Dict[str, Any]:
+    def test_chembl_batch_fetch(self) -> dict[str, Any]:
         """Test ChEMBL batch fetching (multiple compounds)."""
         if not CHEMBL_AVAILABLE:
             raise RuntimeError("ChEMBL client not available (API may be down)")
@@ -240,7 +240,7 @@ class ExternalAPITester:
             "activities_per_compound": compound_counts,
         }
 
-    def test_chembl_error_handling(self) -> Dict[str, Any]:
+    def test_chembl_error_handling(self) -> dict[str, Any]:
         """Test ChEMBL error handling with invalid inputs."""
         if not CHEMBL_AVAILABLE:
             raise RuntimeError("ChEMBL client not available (API may be down)")
@@ -279,7 +279,7 @@ class ExternalAPITester:
 
     # ==================== RCSB PDB API Tests ====================
 
-    def test_pdb_structure_search(self) -> Dict[str, Any]:
+    def test_pdb_structure_search(self) -> dict[str, Any]:
         """Test RCSB PDB structure search by ligand (production method)."""
         test_compound = TEST_COMPOUNDS["aspirin"]
         smiles = test_compound["smiles"]
@@ -355,7 +355,7 @@ class ExternalAPITester:
 
         raise RuntimeError("PDB search failed after all retries")
 
-    def test_pdb_entry_data(self) -> Dict[str, Any]:
+    def test_pdb_entry_data(self) -> dict[str, Any]:
         """Test RCSB PDB entry data retrieval."""
         # Use a well-known PDB entry
         pdb_id = "1ATP"  # ATP synthase
@@ -375,7 +375,7 @@ class ExternalAPITester:
             "experimental_method": data.get("exptl", [{}])[0].get("method"),
         }
 
-    def test_pdb_graphql_batch(self) -> Dict[str, Any]:
+    def test_pdb_graphql_batch(self) -> dict[str, Any]:
         """Test RCSB PDB GraphQL API for batch queries."""
         # GraphQL endpoint
         graphql_url = "https://data.rcsb.org/graphql"
@@ -415,7 +415,7 @@ class ExternalAPITester:
 
     # ==================== ClassyFire API Tests ====================
 
-    def test_classyfire_classify(self) -> Dict[str, Any]:
+    def test_classyfire_classify(self) -> dict[str, Any]:
         """Test ClassyFire chemical classification (production method)."""
         test_compound = TEST_COMPOUNDS["aspirin"]
 
@@ -469,7 +469,7 @@ class ExternalAPITester:
 
     # ==================== NPClassifier API Tests ====================
 
-    def test_npclassifier_classify(self) -> Dict[str, Any]:
+    def test_npclassifier_classify(self) -> dict[str, Any]:
         """Test NPClassifier natural product classification."""
         test_compound = TEST_COMPOUNDS["caffeine"]  # Known natural product
 
@@ -556,7 +556,7 @@ class ExternalAPITester:
         print(f"{'='*70}\n")
 
         # Group by API
-        api_groups: Dict[str, List[APITestResult]] = {}
+        api_groups: dict[str, list[APITestResult]] = {}
         for result in self.results:
             if result.api_name not in api_groups:
                 api_groups[result.api_name] = []

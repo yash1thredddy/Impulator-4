@@ -19,7 +19,6 @@ For each plane, we calculate:
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict
 
 logger = logging.getLogger(__name__)
 
@@ -367,7 +366,7 @@ def calculate_distance_between_points(
     return np.nan
 
 
-def find_best_in_class(df: pd.DataFrame, metric_column: str = 'Modulus_SEI_BEI') -> Dict:
+def find_best_in_class(df: pd.DataFrame, metric_column: str = 'Modulus_SEI_BEI') -> dict:
     """
     Find the best-in-class compound (highest modulus) in a cohort.
 

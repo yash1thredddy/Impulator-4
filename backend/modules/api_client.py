@@ -15,7 +15,8 @@ import asyncio
 import json as _json
 import time
 from functools import wraps
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 import httpx
 import structlog
