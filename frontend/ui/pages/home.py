@@ -12,7 +12,6 @@ import logging
 from typing import Optional, Any
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 from frontend.services import get_api_client, get_compounds_cached
 from frontend.utils import SessionState
@@ -38,8 +37,8 @@ def _render_logo():
     dark_b64 = _load_logo_b64("Imp_Logo_Dark.png")
 
     if light_b64 and dark_b64:
-        # Use components.html — renders in iframe with full JS support
-        components.html(
+        # Use st.html — renders in iframe with full JS support
+        st.html(
             f'<div style="text-align:center;margin:0;padding:0;">'
             f'<img id="logo-light" src="data:image/png;base64,{light_b64}" '
             f'style="height:96px;object-fit:contain;" alt="IMPULATOR">'

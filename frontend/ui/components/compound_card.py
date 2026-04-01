@@ -292,7 +292,7 @@ def render_structure_thumbnail(smiles: str, compound_name: str, key_prefix: str 
     </script>
     '''
 
-    st.components.v1.html(html_content, height=110)
+    st.html(html_content, height=110)
 
 
 def render_compound_grid(compounds: list, columns: int = 3, select_mode: bool = False) -> Optional[str]:

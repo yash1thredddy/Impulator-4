@@ -101,7 +101,7 @@ def _render_sidebar_logo() -> None:
         dark_b64 = base64.b64encode(dark_path.read_bytes()).decode()
 
     if light_b64 and dark_b64:
-        st.components.v1.html(
+        st.html(
             f"""
             <div id="sidebar-logo" style="text-align:center;padding:8px 0;">
                 <img id="logo-l" src="data:image/png;base64,{light_b64}"

@@ -7,7 +7,6 @@ wrapping the existing structure_viewer_component.
 import logging
 
 import streamlit as st
-import streamlit.components.v1 as components
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -130,7 +129,7 @@ def embed_structure_viewer(
         name_col=name_col
     )
 
-    components.html(viewer_html, height=height)
+    st.html(viewer_html, height=height)
 
 
 def render_smiles_input(

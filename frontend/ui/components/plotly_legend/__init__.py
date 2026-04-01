@@ -8,7 +8,6 @@ No Python round-trip needed — stats update instantly on legend toggle.
 
 import json
 import streamlit as st
-import streamlit.components.v1 as components
 from typing import Optional, Any
 
 
@@ -263,4 +262,4 @@ def plotly_legend_monitor(
         json.dumps(initial_stats) if initial_stats else "null",
     )
 
-    components.html(html, height=72)
+    st.html(html, height=72)

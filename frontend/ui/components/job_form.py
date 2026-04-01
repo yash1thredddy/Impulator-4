@@ -8,7 +8,6 @@ import logging
 from typing import Optional
 
 import streamlit as st
-import streamlit.components.v1 as st_components
 
 from frontend.services import get_api_client
 from frontend.config.settings import config
@@ -123,7 +122,7 @@ def _render_live_preview(input_type: str, resolved_smiles: str = "") -> None:
     For SMILES input: polls textarea and renders in real-time.
     For InChI input: uses pre-resolved SMILES from server-side RDKit.
     """
-    st_components.html(
+    st.html(
         f"""
         <style>
             * {{ margin: 0; padding: 0; box-sizing: border-box; }}

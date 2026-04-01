@@ -3347,7 +3347,7 @@ def _render_3d_viewer(smiles: str, entry_id: str) -> None:
     }})();
     </script>
     """
-    st.components.v1.html(viewer_html, height=460)
+    st.html(viewer_html, height=460)
 
 
 def _render_molecule_viewer(df: pd.DataFrame) -> None:
