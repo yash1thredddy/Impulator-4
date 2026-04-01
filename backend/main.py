@@ -25,7 +25,7 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 from backend.core.logging import configure_logging, CorrelationIdMiddleware  # noqa: E402 -- logging must init first
 configure_logging()
 
-from backend.core.database import get_db_session  # noqa: E402 -- after logging init
+from backend.core.database import get_db_session, get_engine  # noqa: E402 -- after logging init
 from backend.core import executor, upload_worker  # noqa: E402 -- after logging init
 from backend.core.azure_sync import (  # noqa: E402 -- after logging init
     sync_logs_to_azure,
