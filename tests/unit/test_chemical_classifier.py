@@ -17,7 +17,6 @@ import inspect
 import time
 
 import httpx
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from backend.modules.chemical_classifier import (
@@ -295,7 +294,7 @@ class TestGetCompleteClassification:
         """Verify ClassyFire and NPClassifier are called concurrently."""
         client = AsyncMock(spec=httpx.AsyncClient)
         client.get.return_value = _mock_response(200, {})
-        result = await get_complete_classification(
+        await get_complete_classification(
             client, "CCO", "LFQSCWFLJHTTHZ-UHFFFAOYSA-N",
         )
         # Both endpoints should be called

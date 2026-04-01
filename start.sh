@@ -65,6 +65,7 @@ fi
 
 # Start frontend
 echo "Starting frontend..."
+# HF Spaces runs Streamlit behind a reverse proxy; these flags are required there.
 python -m streamlit run frontend/app.py \
     --server.port $FRONTEND_PORT \
     --server.address 0.0.0.0 \

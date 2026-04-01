@@ -11,8 +11,9 @@ pytest-asyncio asyncio_mode=auto handles async test functions automatically.
 """
 
 import asyncio
-import time
 import pytest
+
+pytest.importorskip("rdkit")
 
 from backend.modules.api_client import cache_non_none
 

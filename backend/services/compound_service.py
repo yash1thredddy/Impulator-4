@@ -281,7 +281,6 @@ def _calculate_molecular_descriptors_sync(  # pragma: no cover -- RDKit heavy co
     """
     try:
         from rdkit import Chem
-        from rdkit.Chem import Descriptors, QED as QEDModule, rdMolDescriptors
         from rdkit.Chem.Descriptors import CalcMolDescriptors
     except ImportError:
         logger.warning("RDKit not available - skipping molecular descriptor calculation")
@@ -1252,9 +1251,7 @@ from backend.models.schemas import (  # noqa: E402 -- deferred to avoid circular
     CompoundDeleteResponse,
     BatchDeleteResponse,
 )
-from sqlalchemy import select  # noqa: E402 -- deferred to avoid circular imports
 from sqlalchemy.orm import Session  # noqa: E402
-from backend.models.compound import Compound  # noqa: E402
 
 
 def get_compound_versions(db: Session, entry_id: str) -> dict:

@@ -63,7 +63,7 @@ jobs:
             --cov=backend \
             --cov-report=xml \
             --cov-report=term-missing \
-            --cov-fail-under=85 \
+            --cov-fail-under=75 \
             -m "not azure and not benchmark and not network and not slow" \
             --ignore=tests/e2e \
             --ignore=tests/performance

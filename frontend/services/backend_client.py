@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import Optional, Dict, List, Any
 
 import requests
-import streamlit as st
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -717,10 +716,10 @@ class ImpulatorAPIClient:
             return {"success": False, "error": str(e)}
 
     def delete_compound(self, entry_id: str) -> JobResponse:
-        """Delete compound through backend API (primary) with Azure fallback.
+        """Delete compound through the backend API.
 
-        Primary path routes through backend for audit trail (ARCH-18).
-        Falls back to direct Azure delete only if backend is unreachable.
+        Deletion must remain backend-authoritative so database state, storage
+        cleanup, and audit logging stay consistent.
 
         Args:
             entry_id: UUID of the compound to delete
@@ -747,34 +746,20 @@ class ImpulatorAPIClient:
                 return JobResponse(success=False, error=f"HTTP {response.status_code}")
 
         except (requests.ConnectionError, requests.Timeout) as e:
-            logger.warning(
-                f"Backend unreachable for compound deletion, using direct Azure fallback "
-                f"(audit trail will be incomplete): {e}"
+            logger.warning(f"Backend unreachable for compound deletion: {e}")
+            return JobResponse(
+                success=False,
+                error="Backend unavailable. Compound was not deleted.",
             )
-            # Fallback: direct Azure delete -- no audit trail
-            from frontend.services.azure_storage import delete_compound as azure_delete_compound
-            try:
-                deleted = azure_delete_compound(entry_id)
-                if deleted:
-                    return JobResponse(
-                        success=True,
-                        message="Deleted via fallback (no audit trail)",
-                        data={"entry_id": entry_id, "fallback": True},
-                    )
-                else:
-                    return JobResponse(success=False, error="Fallback delete found nothing to remove")
-            except Exception as fallback_err:
-                logger.error(f"Fallback Azure delete also failed: {fallback_err}")
-                return JobResponse(success=False, error=f"Backend unreachable and fallback failed: {fallback_err}")
 
         except requests.exceptions.RequestException as e:
             return JobResponse(success=False, error=str(e))
 
     def delete_compounds_batch(self, entry_ids: List[str]) -> JobResponse:
-        """Delete multiple compounds through backend API (primary) with Azure fallback.
+        """Delete multiple compounds through the backend API.
 
-        Primary path routes through backend for audit trail (ARCH-18).
-        Falls back to direct Azure delete only if backend is unreachable.
+        Deletion must remain backend-authoritative so database state, storage
+        cleanup, and audit logging stay consistent.
 
         Args:
             entry_ids: List of compound entry UUIDs to delete
@@ -818,28 +803,10 @@ class ImpulatorAPIClient:
                 return JobResponse(success=False, error=error)
 
         except (requests.ConnectionError, requests.Timeout) as e:
-            logger.warning(
-                f"Backend unreachable for batch compound deletion, using direct Azure fallback "
-                f"(audit trail will be incomplete): {e}"
-            )
-            # Fallback: direct Azure delete per compound -- no audit trail
-            from frontend.services.azure_storage import delete_compound as azure_delete_compound
-            deleted_count = 0
-            failed_ids = []
-            for eid in entry_ids:
-                try:
-                    if azure_delete_compound(eid):
-                        deleted_count += 1
-                    else:
-                        failed_ids.append(eid)
-                except Exception as fallback_err:
-                    logger.error(f"Fallback Azure delete failed for {eid}: {fallback_err}")
-                    failed_ids.append(eid)
-
+            logger.warning(f"Backend unreachable for batch compound deletion: {e}")
             return JobResponse(
-                success=deleted_count > 0,
-                message=f"Deleted {deleted_count}/{len(entry_ids)} via fallback (no audit trail)",
-                data={"deleted": deleted_count, "failed": failed_ids, "fallback": True},
+                success=False,
+                error="Backend unavailable. Compounds were not deleted.",
             )
 
         except requests.exceptions.RequestException as e:
@@ -956,28 +923,3 @@ def set_session_id(session_id: str) -> None:
     """
     _session_id_var.set(session_id)
     logger.debug(f"API client session ID set: {session_id[:8]}...")
-
-
-@st.cache_data(ttl=60)
-def get_compounds_cached(
-    page: int = 1,
-    per_page: int = 50,
-    search: Optional[str] = None,
-    include_duplicates: bool = False,
-) -> CompoundListResponse:
-    """Cached wrapper around ImpulatorAPIClient.get_compounds_from_db.
-
-    Uses st.cache_data with a 60-second TTL to reduce redundant API calls
-    on the compound list page. Call ``get_compounds_cached.clear()`` to
-    invalidate (e.g. after a job completes).
-
-    Note: Job-related endpoints are NOT cached (per D-02). Version data
-    stays in session_state (per D-03).
-    """
-    client = get_api_client()
-    return client.get_compounds_from_db(
-        page=page,
-        per_page=per_page,
-        search=search,
-        include_duplicates=include_duplicates,
-    )

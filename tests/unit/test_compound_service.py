@@ -2,12 +2,9 @@
 Unit tests for compound_service module functions (async).
 """
 import asyncio
-import os
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import datetime, timezone
 import pandas as pd
-import numpy as np
 
 
 # ---------------------------------------------------------------------------

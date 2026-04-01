@@ -4,7 +4,6 @@ Integration tests for duplicate detection state transitions in job_service.
 Tests use real Postgres to verify submit/resolve/check-duplicates flows
 with actual database constraints and compound matching.
 """
-import json
 import uuid
 
 import pytest

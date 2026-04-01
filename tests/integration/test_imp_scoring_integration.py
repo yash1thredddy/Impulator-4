@@ -13,7 +13,7 @@ Tests the complete IMP Score pipeline with weights (sum to 100%):
 import pytest
 import httpx
 import pandas as pd
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 from backend.modules.imp_scoring import (
     calculate_imp_score,

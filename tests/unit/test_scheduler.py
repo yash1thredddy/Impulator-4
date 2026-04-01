@@ -4,7 +4,6 @@ Unit tests for the async job scheduler (module-level functions).
 asyncio_mode = auto in pytest.ini -- no @pytest.mark.asyncio needed.
 """
 import asyncio
-import uuid
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone, timedelta
 

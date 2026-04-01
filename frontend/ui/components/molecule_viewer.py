@@ -5,8 +5,6 @@ wrapping the existing structure_viewer_component.
 """
 
 import logging
-import base64
-from io import BytesIO
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -27,7 +25,6 @@ except ImportError:
 # Try to import RDKit for 2D structure rendering
 try:
     from rdkit import Chem
-    from rdkit.Chem import Draw
     from rdkit.Chem.Draw import rdMolDraw2D
     RDKIT_AVAILABLE = True
 except ImportError:

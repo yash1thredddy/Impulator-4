@@ -36,7 +36,7 @@ More flags = stronger evidence the compound is a genuine IMP (assay artifact).
 
 import asyncio
 import logging
-from typing import Callable
+from typing import Callable, Dict
 
 import httpx
 import numpy as np

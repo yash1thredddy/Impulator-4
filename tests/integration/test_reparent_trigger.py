@@ -6,10 +6,6 @@ assert children reparented to promoted child.
 import uuid
 from datetime import datetime, timezone
 
-import pytest
-from sqlalchemy import text
-from sqlalchemy.orm import sessionmaker
-
 from backend.models.compound import Compound
 
 

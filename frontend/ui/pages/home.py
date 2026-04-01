@@ -102,6 +102,47 @@ def render_home_page() -> None:
         transform: translateY(-1px);
         box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
     }
+
+    /* WARNING: Targets Streamlit internal selectors — may break on Streamlit upgrade */
+    div[data-testid="stVerticalBlock"]:has(#compound-grid-marker) div[data-testid="stVerticalBlockBorderWrapper"]:has(.imp-compound-card-marker) {
+        height: 100%;
+    }
+
+    /* WARNING: Targets Streamlit internal selectors — may break on Streamlit upgrade */
+    div[data-testid="stVerticalBlock"]:has(#compound-grid-marker) div[data-testid="stVerticalBlockBorderWrapper"]:has(.imp-compound-card-marker) > div {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+    }
+
+    /* WARNING: Targets Streamlit internal selectors — may break on Streamlit upgrade */
+    div[data-testid="stVerticalBlock"]:has(#compound-grid-marker) div[data-testid="stHorizontalBlock"] {
+        align-items: stretch;
+    }
+
+    /* WARNING: Targets Streamlit internal selectors — may break on Streamlit upgrade */
+    div[data-testid="stVerticalBlock"]:has(#compound-grid-marker) div[data-testid="stVerticalBlockBorderWrapper"]:has(.imp-compound-card-marker) div[data-testid="stButton"] {
+        margin-top: auto;
+    }
+
+    /* WARNING: Targets Streamlit internal selectors — may break on Streamlit upgrade */
+    @media (max-width: 1100px) {
+        div[data-testid="stVerticalBlock"]:has(#compound-grid-marker) div[data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap;
+        }
+        div[data-testid="stVerticalBlock"]:has(#compound-grid-marker) div[data-testid="column"] {
+            min-width: calc(50% - 1rem) !important;
+            flex: 1 1 calc(50% - 1rem) !important;
+        }
+    }
+
+    /* WARNING: Targets Streamlit internal selectors — may break on Streamlit upgrade */
+    @media (max-width: 700px) {
+        div[data-testid="stVerticalBlock"]:has(#compound-grid-marker) div[data-testid="column"] {
+            min-width: 100% !important;
+            flex: 1 1 100% !important;
+        }
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -118,13 +159,23 @@ def render_home_page() -> None:
 
     st.subheader("Available Analyses")
 
+    # Fetch compounds once for stats banner + browser
+    compounds = _fetch_compounds()
+
+    if compounds is None:
+        st.error("Could not load compounds. Check backend connection.")
+        return
+
+    if not compounds:
+        # Issue 1: Better empty state
+        _render_empty_state()
+        return
+
     # Search and filter section
     render_search_section()
 
-    st.divider()
-
-    # Compound grid
-    render_compound_browser()
+    # Compound grid (pass pre-fetched compounds)
+    render_compound_browser(compounds)
 
 
 def render_search_section() -> None:
@@ -135,13 +186,13 @@ def render_search_section() -> None:
         search_query = st.text_input(
             "Search compounds",
             value=SessionState.get('compound_search_query', ''),
-            placeholder="Search by name...",
+            placeholder="Search by name, ChEMBL ID, or SMILES substructure...",
             label_visibility="hidden"
         )
         SessionState.set('compound_search_query', search_query)
 
     with col2:
-        sort_options = ["Latest", "A-Z", "Z-A"]
+        sort_options = ["Latest", "A-Z", "Z-A", "IMP Score \u2193", "Activities \u2193", "QED \u2193"]
         current_sort = SessionState.get('compound_sort', 'Latest')
         sort_index = sort_options.index(current_sort) if current_sort in sort_options else 0
         sort_mode = st.selectbox(
@@ -162,43 +213,44 @@ def render_search_section() -> None:
         SessionState.set('compound_view_mode', view_mode)
 
 
-def render_compound_browser() -> None:
+def render_compound_browser(compounds: List[Dict[str, Any]]) -> None:
     """Render the compound browser grid or list."""
-    # Fetch compounds from backend
-    compounds = _fetch_compounds()
-
-    if compounds is None:
-        st.error("Could not load compounds. Check backend connection.")
-        return
-
-    # Apply search filter
-    search_query = SessionState.get('compound_search_query', '').strip().lower()
+    # Apply search filter: text match on name/chembl/smiles, or RDKit substructure match
+    search_query = SessionState.get('compound_search_query', '').strip()
     if search_query:
-        compounds = [
-            c for c in compounds
-            if search_query in c.get('compound_name', '').lower()
-        ]
+        compounds = _filter_compounds(compounds, search_query)
 
-    # Apply sorting
+    # Apply sorting (Issue 2: additional sort options)
     sort_mode = SessionState.get('compound_sort', 'Latest')
     if sort_mode == "A-Z":
         compounds = sorted(compounds, key=lambda x: x.get('compound_name', '').lower())
     elif sort_mode == "Z-A":
         compounds = sorted(compounds, key=lambda x: x.get('compound_name', '').lower(), reverse=True)
     elif sort_mode == "Latest":
-        # Sort by created_at descending (newest first)
         compounds = sorted(compounds, key=lambda x: x.get('created_at', ''), reverse=True)
+    elif sort_mode == "IMP Score \u2193":
+        # Sort by imp_score descending, None/0 values last
+        compounds = sorted(
+            compounds,
+            key=lambda x: (x.get('imp_score') is None or x.get('imp_score') == 0, -(x.get('imp_score') or 0)),
+        )
+    elif sort_mode == "Activities \u2193":
+        compounds = sorted(
+            compounds,
+            key=lambda x: (not x.get('total_activities'), -(x.get('total_activities') or 0)),
+        )
+    elif sort_mode == "QED \u2193":
+        compounds = sorted(
+            compounds,
+            key=lambda x: (x.get('qed') is None or x.get('qed') == 0, -(x.get('qed') or 0)),
+        )
 
     select_mode = SessionState.get('compound_select_mode', False)
 
-    # Show count
-    st.caption(f"Showing {len(compounds)} compound(s)")
-
     if not compounds:
         if search_query:
-            st.info(f"No compounds matching '{search_query}'")
-        else:
-            st.info("No compounds yet. Click '+ New Analysis' to get started.")
+            escaped_query = html.escape(search_query)
+            st.info(f"No compounds matching '{escaped_query}'")
         return
 
     # Selection action bar (when in select mode)
@@ -209,7 +261,9 @@ def render_compound_browser() -> None:
     view_mode = SessionState.get('compound_view_mode', 'Grid')
 
     if view_mode == "Grid":
-        clicked = render_compound_grid(compounds, columns=3, select_mode=select_mode)
+        with st.container():
+            st.markdown('<div id="compound-grid-marker"></div>', unsafe_allow_html=True)
+            clicked = render_compound_grid(compounds, columns=3, select_mode=select_mode)
     else:
         clicked = render_compound_list(compounds, select_mode=select_mode)
 
@@ -338,6 +392,34 @@ def _execute_batch_delete(entry_ids: List[str]) -> None:
         st.rerun()
 
 
+def _render_empty_state() -> None:
+    """Render an informative empty state for new users."""
+    st.markdown(
+        '<div style="text-align:center;padding:40px 20px;">'
+        '<h2 style="margin-bottom:8px;">Welcome to IMPULATOR</h2>'
+        '<p style="opacity:0.7;font-size:16px;margin-bottom:24px;">'
+        'Analyze chemical compounds for Invalid Metabolic Panaceas (IMPs)</p>'
+        '<div style="display:flex;justify-content:center;gap:32px;margin-bottom:32px;flex-wrap:wrap;">'
+        '<div style="text-align:center;max-width:160px;">'
+        '<div style="font-size:28px;margin-bottom:4px;">1</div>'
+        '<div style="font-size:14px;opacity:0.8;">Submit SMILES or CSV</div></div>'
+        '<div style="text-align:center;max-width:160px;">'
+        '<div style="font-size:28px;margin-bottom:4px;">2</div>'
+        '<div style="font-size:14px;opacity:0.8;">ChEMBL similarity + IMP scoring</div></div>'
+        '<div style="text-align:center;max-width:160px;">'
+        '<div style="font-size:28px;margin-bottom:4px;">3</div>'
+        '<div style="font-size:14px;opacity:0.8;">Browse results here</div></div>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+    _, center, _ = st.columns([2, 1, 2])
+    with center:
+        st.markdown('<span id="new-analysis-marker"></span>', unsafe_allow_html=True)
+        if st.button("+ New Analysis", type="primary", use_container_width=True):
+            SessionState.navigate_to_analyze()
+            st.rerun()
+
+
 def _exit_select_mode() -> None:
     """Exit selection mode and clear all selection state."""
     SessionState.set('compound_select_mode', False)
@@ -350,47 +432,125 @@ def _exit_select_mode() -> None:
         del st.session_state[k]
 
 
-def _fetch_compounds() -> Optional[List[Dict[str, Any]]]:
-    """Fetch completed compounds from database.
+def _filter_compounds(compounds: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+    """Filter compounds by text match or RDKit substructure search.
 
-    Uses database values only - no ZIP downloads on home page.
-    This makes the home page load instantly without network I/O.
+    If the query looks like a SMILES/SMARTS pattern (contains chemistry characters
+    like =, #, @, [, or ring digits after letters), attempt substructure matching
+    via RDKit. Falls back to text search if RDKit fails or isn't available.
+    """
+    query_lower = query.lower()
+
+    # Always do text matching first
+    text_matches = [
+        c for c in compounds
+        if query_lower in c.get('compound_name', '').lower()
+        or query_lower in c.get('chembl_id', '').lower()
+        or query_lower in c.get('smiles', '').lower()
+    ]
+
+    # Attempt substructure match if query looks like a structure pattern
+    # Heuristic: contains chemistry-specific characters unlikely in plain names
+    structure_chars = set('=#@[]/()')
+    looks_like_structure = bool(structure_chars & set(query))
+
+    if not looks_like_structure:
+        return text_matches
+
+    try:
+        from rdkit import Chem
+
+        # Try as SMARTS first (more expressive), then SMILES
+        pattern = Chem.MolFromSmarts(query)
+        if pattern is None:
+            pattern = Chem.MolFromSmiles(query)
+        if pattern is None:
+            return text_matches
+
+        substruct_matches = set()
+        for i, c in enumerate(compounds):
+            smiles = c.get('smiles', '')
+            if not smiles:
+                continue
+            mol = Chem.MolFromSmiles(str(smiles))
+            if mol is not None and mol.HasSubstructMatch(pattern):
+                substruct_matches.add(i)
+
+        # Merge: text matches + substructure matches (deduplicated, preserve order)
+        text_ids = {id(c) for c in text_matches}
+        result = list(text_matches)
+        for i, c in enumerate(compounds):
+            if i in substruct_matches and id(c) not in text_ids:
+                result.append(c)
+        return result
+
+    except ImportError:
+        return text_matches
+    except Exception as e:
+        logger.debug(f"Substructure search failed: {e}")
+        return text_matches
+
+
+def _compound_from_api(compound: dict) -> dict:
+    """Convert a backend API compound dict to the home page format."""
+    return {
+        "compound_name": compound.get("compound_name", "Unknown"),
+        "entry_id": compound.get("entry_id"),
+        "storage_path": compound.get("storage_path"),
+        "smiles": compound.get("smiles", ""),
+        "created_at": compound.get("processed_at"),
+        "similarity_threshold": compound.get("similarity_threshold", 90) or 90,
+        "has_imp_warning": (compound.get("imp_candidates") or 0) > 0,
+        "chembl_id": compound.get("chembl_id", ""),
+        "total_activities": compound.get("total_activities", 0) or 0,
+        "num_outliers": compound.get("num_outliers", 0) or 0,
+        "qed": compound.get("qed", 0.0) or 0.0,
+        "imp_score": compound.get("imp_score"),
+        "is_duplicate": compound.get("is_duplicate", False),
+        "parent_id": compound.get("parent_id"),
+        "parent_name": compound.get("parent_name"),
+        "version_count": compound.get("version_count", 1),
+    }
+
+
+def _fetch_compounds() -> Optional[List[Dict[str, Any]]]:
+    """Fetch ALL compounds from database, paginating through the API.
+
+    Backend caps at 100 per page, so we loop until all pages are fetched.
+    First page uses the cached wrapper (60s TTL), subsequent pages hit the API directly.
 
     Returns:
         List of compound dictionaries, or None on error
     """
     try:
-        # Fetch from database (authoritative source) with st.cache_data TTL=60s
-        # Include duplicates and tag them in the UI
-        response = get_compounds_cached(per_page=100, include_duplicates=True)
+        PAGE_SIZE = 100
 
-        if response.success and response.compounds:
-            compounds = []
-            for compound in response.compounds:
-                # Use database values only - no ZIP download needed
-                compounds.append({
-                    "compound_name": compound.get("compound_name", "Unknown"),
-                    "entry_id": compound.get("entry_id"),
-                    "storage_path": compound.get("storage_path"),
-                    "smiles": compound.get("smiles", ""),
-                    "created_at": compound.get("processed_at"),
-                    "similarity_threshold": compound.get("similarity_threshold", 90) or 90,
-                    "has_imp_warning": (compound.get("imp_candidates") or 0) > 0,
-                    "chembl_id": compound.get("chembl_id", ""),
-                    "total_activities": compound.get("total_activities", 0) or 0,
-                    "num_outliers": compound.get("num_outliers", 0) or 0,
-                    "qed": compound.get("qed", 0.0) or 0.0,
-                    "imp_score": compound.get("imp_score"),
-                    "is_duplicate": compound.get("is_duplicate", False),
-                    "parent_id": compound.get("parent_id"),
-                    "parent_name": compound.get("parent_name"),
-                    "version_count": compound.get("version_count", 1),
-                })
-            return compounds
+        # First page — cached
+        response = get_compounds_cached(page=1, per_page=PAGE_SIZE, include_duplicates=True)
+        if not response.success:
+            logger.error(f"Failed to fetch compounds: {response.error}")
+            return None
 
-        # Database is empty - show message
-        logger.info("Database returned no compounds")
-        return []
+        if not response.compounds:
+            return []
+
+        compounds = [_compound_from_api(c) for c in response.compounds]
+
+        # Fetch remaining pages if there are more
+        total = response.total
+        if total > PAGE_SIZE:
+            api = get_api_client()
+            pages_needed = (total + PAGE_SIZE - 1) // PAGE_SIZE
+            for page in range(2, pages_needed + 1):
+                resp = api.get_compounds_from_db(
+                    page=page, per_page=PAGE_SIZE, include_duplicates=True
+                )
+                if resp.success and resp.compounds:
+                    compounds.extend(_compound_from_api(c) for c in resp.compounds)
+                else:
+                    break
+
+        return compounds
 
     except Exception as e:
         logger.error(f"Error fetching compounds: {e}")

@@ -5,7 +5,6 @@ Tests cover:
 - 1.3: Transaction commit/rollback in get_db()
 """
 import uuid
-import pytest
 
 
 class TestGetDbTransactionHandling:
@@ -15,8 +14,6 @@ class TestGetDbTransactionHandling:
         """Test that successful operations are committed."""
         from backend.models.job import Job
         from backend.models.enums import JobType, JobStatus
-        from sqlalchemy.orm import sessionmaker
-
         job_id = uuid.uuid4()
         job = Job(
             id=job_id,

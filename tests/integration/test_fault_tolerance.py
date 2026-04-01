@@ -11,9 +11,6 @@ All tests run against real Postgres via pg_engine/client/db_session fixtures.
 
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import patch
-
-import pytest
 from sqlalchemy import text
 
 from backend.models.job import Job

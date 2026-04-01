@@ -125,6 +125,8 @@ def configure_logging() -> None:
         cache_logger_on_first_use=True,
     )
 
+    from backend.core.azure_sync import AzureSyncRotatingFileHandler
+
     # Configure stdlib logging via dictConfig
     logging.config.dictConfig(
         {
@@ -152,7 +154,7 @@ def configure_logging() -> None:
                     "stream": "ext://sys.stdout",
                 },
                 "file": {
-                    "()": "backend.core.azure_sync.AzureSyncRotatingFileHandler",
+                    "()": AzureSyncRotatingFileHandler,
                     "filename": "data/logs/backend.log",
                     "maxBytes": 10_000_000,
                     "backupCount": 2,

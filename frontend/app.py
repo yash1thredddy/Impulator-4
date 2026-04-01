@@ -17,7 +17,6 @@ import streamlit as st  # noqa: E402
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from frontend.config.settings import config  # noqa: E402
 from frontend.utils import SessionState, VIEW_HOME, VIEW_ANALYZE, VIEW_COMPOUND_DETAILS  # noqa: E402
 from frontend.ui.components import render_sidebar  # noqa: E402
 from frontend.ui.pages import (  # noqa: E402
@@ -25,7 +24,7 @@ from frontend.ui.pages import (  # noqa: E402
     render_analyze_page,
     render_compound_detail_page,
 )
-from frontend.services import set_session_id  # noqa: E402
+from frontend.services import get_api_client, set_session_id  # noqa: E402
 
 # Configure logging
 logging.basicConfig(
@@ -60,7 +59,6 @@ def main():
     params = st.query_params
     if "compound_id" in params and SessionState.get('_last_deep_link_id') != params["compound_id"]:
         compound_id = params["compound_id"]
-        tab = params.get("tab", "overview")
         # Look up actual compound name from the API
         try:
             api = get_api_client()

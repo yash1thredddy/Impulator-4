@@ -34,6 +34,15 @@ _VIEWED_JOBS_KEY = "viewed_job_ids"
 # Maximum number of viewed job IDs to track (prevents memory leak)
 _MAX_VIEWED_JOBS = 100
 
+_SIDEBAR_STATUS_PRIORITY = {
+    'processing': 0,
+    'pending_upload': 1,
+    'pending': 2,
+    'completed': 3,
+    'failed': 4,
+    'cancelled': 5,
+}
+
 
 def _get_viewed_jobs() -> set:
     """Get set of job IDs that have been viewed."""
@@ -55,6 +64,15 @@ def _mark_job_viewed(job_id: str) -> None:
         viewed = set(viewed_list[-_MAX_VIEWED_JOBS:])
 
     st.session_state[_VIEWED_JOBS_KEY] = viewed
+
+
+def _sort_jobs_for_sidebar(jobs: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    """Keep actively running jobs ahead of completed items in the sidebar."""
+    jobs = sorted(jobs, key=lambda job: job.get('created_at', ''), reverse=True)
+    return sorted(
+        jobs,
+        key=lambda job: _SIDEBAR_STATUS_PRIORITY.get(job.get('status', ''), 99),
+    )
 
 
 def _render_sidebar_logo() -> None:
@@ -250,6 +268,16 @@ def _fetch_and_check_jobs():
         # Filter out viewed jobs (only applies to completed, not failed)
         viewed_ids = _get_viewed_jobs()
         non_failed = [j for j in non_failed if j.get('id') not in viewed_ids]
+
+        # Home should only show currently active work, not stale "View Results" cards.
+        if SessionState.get_current_view() == "home":
+            non_failed = [
+                job for job in non_failed
+                if job.get('status') in ('pending', 'processing', 'pending_upload')
+            ]
+
+        non_failed = _sort_jobs_for_sidebar(non_failed)
+        failed_jobs = _sort_jobs_for_sidebar(failed_jobs)
 
         has_active = any(j.get('status') in ('pending', 'processing', 'pending_upload') for j in non_failed)
         return non_failed, has_active, failed_jobs

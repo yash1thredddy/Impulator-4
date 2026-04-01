@@ -1,5 +1,5 @@
 """
-Unit tests for JobService.
+Integration tests for JobService.
 """
 import pytest
 

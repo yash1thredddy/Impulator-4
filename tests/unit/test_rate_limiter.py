@@ -5,7 +5,6 @@ All tests are async since check_rate_limit is now async def.
 pytest-asyncio asyncio_mode=auto handles async test functions automatically.
 """
 import asyncio
-import time
 
 
 class TestRateLimiter:

@@ -19,6 +19,7 @@ For each plane, we calculate:
 import numpy as np
 import pandas as pd
 import logging
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 

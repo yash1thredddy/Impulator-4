@@ -21,6 +21,10 @@ References:
 - Brenk et al. (2008) ChemMedChem 3, 435-444 (BRENK)
 - Jadhav et al. (2009) J. Med. Chem. 53, 37-51 (NIH)
 """
+import pytest
+
+pytest.importorskip("rdkit")
+
 from rdkit import Chem
 
 from backend.modules.assay_interference_filter import (

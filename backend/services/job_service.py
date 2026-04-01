@@ -10,10 +10,10 @@ import re
 import uuid
 import logging
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Dict
 
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError, InvalidRequestError
+from sqlalchemy.exc import IntegrityError
 
 from backend.models.job import Job
 from backend.models.compound import Compound
@@ -2104,7 +2104,11 @@ class JobService:
         Probes ChEMBL for each compound at the requested threshold and all lower
         thresholds. Returns per-compound availability with existing compound matches.
         """
-        from backend.modules.api_client import probe_all_thresholds, quick_has_bioactivity
+        from backend.modules.api_client import (
+            create_chembl_client,
+            probe_all_thresholds,
+            quick_has_bioactivity,
+        )
 
         results: list[CompoundAvailability] = []
 
@@ -2134,12 +2138,12 @@ class JobService:
 
         submitted_at = _normalize_activity_types_list(request.activity_types)
 
-        async def _probe_compound(compound_input) -> CompoundAvailability:
+        async def _probe_compound(client, compound_input) -> CompoundAvailability:
             smiles = compound_input.smiles
             name = compound_input.compound_name
             compound_threshold = getattr(compound_input, 'threshold', None) or request.similarity_threshold
 
-            thresholds = await probe_all_thresholds(smiles, compound_threshold)
+            thresholds = await probe_all_thresholds(client, smiles, compound_threshold)
             threshold_items = [
                 ThresholdAvailability(threshold=t["threshold"], count=t["count"])
                 for t in thresholds
@@ -2154,7 +2158,7 @@ class JobService:
             # Verify bioactivity exists (not just similar compounds)
             if count_at_threshold > 0:
                 available = await quick_has_bioactivity(
-                    smiles, compound_threshold, request.activity_types
+                    client, smiles, compound_threshold, request.activity_types
                 )
             else:
                 available = False
@@ -2185,10 +2189,11 @@ class JobService:
 
         async def _bounded_probe(compound_input):
             async with sem:
-                return await _probe_compound(compound_input)
+                return await _probe_compound(client, compound_input)
 
-        tasks = [_bounded_probe(c) for c in request.compounds]
-        gather_results = await asyncio.gather(*tasks, return_exceptions=True)
+        async with create_chembl_client() as client:
+            tasks = [_bounded_probe(c) for c in request.compounds]
+            gather_results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for i, result in enumerate(gather_results):
             if isinstance(result, Exception):

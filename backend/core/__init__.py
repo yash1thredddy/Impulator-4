@@ -1,24 +1,7 @@
-"""
-Core backend modules.
-- database: Postgres with SQLAlchemy
-- executor: Async task executor for background jobs
-- azure_sync: Azure Blob storage sync utilities
-"""
+"""Core backend utilities."""
 import hashlib
 import logging
 import re
-
-from backend.core.database import get_db, get_db_session
-from backend.core.azure_sync import (
-    # UUID-based storage functions (only storage method supported)
-    upload_result_to_azure_by_entry_id,
-    download_result_from_azure_by_entry_id,
-    delete_result_from_azure_by_entry_id,
-    check_result_exists_in_azure_by_entry_id,
-    get_storage_path_from_entry_id,
-    list_results_in_azure,
-    is_azure_configured,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -85,18 +68,6 @@ def sanitize_compound_name(name: str, add_hash_suffix: bool = False) -> str:
 
 
 __all__ = [
-    # Database
-    "get_db",
-    "get_db_session",
-    # Azure (blob storage)
-    "is_azure_configured",
-    # Azure (UUID-based storage - only storage method supported)
-    "upload_result_to_azure_by_entry_id",
-    "download_result_from_azure_by_entry_id",
-    "delete_result_from_azure_by_entry_id",
-    "check_result_exists_in_azure_by_entry_id",
-    "get_storage_path_from_entry_id",
-    "list_results_in_azure",
     # Utilities
     "sanitize_compound_name",
 ]

@@ -89,9 +89,7 @@ def _render_match_details(
     config_diff: Optional[dict],
 ) -> None:
     """Render clear, visually distinct match details with side-by-side comparison."""
-    existing_name = existing.get("compound_name", "Unknown")
-    submitted_name = submitted.get("compound_name", "Unknown")
-    processed_at = _format_processed_datetime(existing.get("processed_at"))
+    processed_at = html.escape(_format_processed_datetime(existing.get("processed_at")))
     author_name = (existing.get("author_name") or "Unknown").strip()
     existing_threshold = existing.get("similarity_threshold", 90)
     submitted_threshold = submitted.get("similarity_threshold", 90)

@@ -3,10 +3,7 @@
 Success criteria #6: alembic upgrade head on empty Postgres creates all
 tables/indexes/triggers that the application expects.
 """
-import pytest
 from sqlalchemy import create_engine, inspect, text
-from alembic.config import Config
-from alembic import command
 
 
 class TestAlembicBaseline:

@@ -2,7 +2,6 @@
 from frontend.services.backend_client import (
     ImpulatorAPIClient,
     get_api_client,
-    get_compounds_cached,
     set_session_id,
     JobResponse,
     CompoundListResponse,
@@ -50,3 +49,19 @@ __all__ = [
     "smart_load_summary",
     "smart_load_dataframe",
 ]
+
+
+def get_compounds_cached(*args, **kwargs):
+    """Lazy Streamlit-backed cached compound listing wrapper."""
+    from frontend.services.streamlit_cache import get_compounds_cached as _cached
+
+    return _cached(*args, **kwargs)
+
+
+def _clear_compounds_cached():
+    from frontend.services.streamlit_cache import get_compounds_cached as _cached
+
+    return _cached.clear()
+
+
+get_compounds_cached.clear = _clear_compounds_cached

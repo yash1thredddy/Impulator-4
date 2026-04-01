@@ -22,6 +22,8 @@ import httpx
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+pytest.importorskip("rdkit")
+
 from backend.modules.pdb_client import (
     _circuits,
     _get_circuit,
@@ -546,5 +548,4 @@ class TestCreatePdbClient:
     def test_returns_async_client(self):
         client = create_pdb_client()
         assert isinstance(client, httpx.AsyncClient)
-
 

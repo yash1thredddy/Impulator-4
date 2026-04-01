@@ -56,11 +56,11 @@ async def _wait_for_database(max_retries: int = 10, base_delay: float = 1.0, max
     """
     import random
     from sqlalchemy import text as _text
-    from backend.core.database import engine
+    from backend.core.database import get_engine
 
     for attempt in range(1, max_retries + 1):
         try:
-            with engine.connect() as conn:
+            with get_engine().connect() as conn:
                 conn.execute(_text("SELECT 1"))
                 conn.commit()
             logger.info(f"Database connected (attempt {attempt})")

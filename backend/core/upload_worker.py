@@ -14,7 +14,6 @@ Exhaustion (per D-41, D-42):
 - requeue_count >= 3: mark FAILED permanently
 """
 import asyncio
-import logging
 import uuid
 from datetime import datetime, timezone
 

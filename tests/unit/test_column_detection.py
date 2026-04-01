@@ -1,5 +1,9 @@
 """Tests for CSV column detection logic."""
+import pytest
 import pandas as pd
+
+pytest.importorskip("streamlit")
+
 from frontend.ui.components.job_form import _detect_column_mappings
 
 

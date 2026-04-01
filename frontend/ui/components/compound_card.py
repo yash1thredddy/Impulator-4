@@ -83,15 +83,9 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "", select_
     # Escape for XSS prevention (CSS text-overflow handles truncation dynamically)
     safe_compound_name = html.escape(str(compound_name))
 
-    # IMP score color badge
-    badge_css = _imp_score_badge_css(imp_score)
-    if badge_css:
-        st.markdown(
-            f"<div style='{badge_css} padding-left: 4px;'>",
-            unsafe_allow_html=True,
-        )
-
     with st.container(border=True):
+        st.markdown('<div class="imp-compound-card-marker"></div>', unsafe_allow_html=True)
+
         # Selection checkbox in select mode
         if select_mode and entry_id:
             cb_key = f"select_{entry_id}"
@@ -103,9 +97,10 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "", select_
 
         # Compound name (clean, no badge — badge moves to ChEMBL line)
         st.markdown(
-            f"<div style='text-align: center; margin: 0 0 10px 0;' title='{safe_compound_name}'>"
-            f"<div style='font-size: clamp(0.9rem, 2.5vw, 1.4rem); font-weight: 600; "
-            f"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;'>"
+            f"<div style='text-align: center; margin: 0 0 10px 0; min-height: 3.6rem; display: flex; align-items: center; justify-content: center;' title='{safe_compound_name}'>"
+            f"<div style='font-size: clamp(0.9rem, 2.5vw, 1.4rem); font-weight: 600; line-height: 1.25; "
+            f"display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; "
+            f"overflow: hidden; text-overflow: ellipsis;'>"
             f"{safe_compound_name}</div></div>",
             unsafe_allow_html=True
         )
@@ -139,7 +134,7 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "", select_
             safe_chembl_id = html.escape(str(chembl_id))
             st.markdown(
                 f"<div style='display: flex; justify-content: space-between; align-items: center; "
-                f"margin: 8px 0;'>"
+                f"margin: 8px 0; min-height: 1.5rem;'>"
                 f"<span style='color: var(--text-color); opacity: 0.5; font-size: 14px;'>ChEMBL: {safe_chembl_id}</span>"
                 f"{dup_badge}</div>",
                 unsafe_allow_html=True
@@ -162,12 +157,12 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "", select_
 
         st.markdown(
             f"""<div style='display: flex; justify-content: space-between; font-size: clamp(12px, 1.4vw, 16px); margin: 8px 0;'>
-                <span><b>Activities:</b> {safe_total_activities}</span>
-                <span><b>IMP Score:</b> {safe_imp_score}</span>
+                <span style='min-height: 1.5rem; display: inline-flex; align-items: center; gap: 0.2rem;'><b>Activities:</b><span>{safe_total_activities}</span></span>
+                <span style='min-height: 1.5rem; display: inline-flex; align-items: center; gap: 0.2rem;'><b>IMP Score:</b><span>{safe_imp_score}</span></span>
             </div>
             <div style='display: flex; justify-content: space-between; font-size: clamp(12px, 1.4vw, 16px); margin: 8px 0;'>
-                <span><b>QED:</b> {safe_qed_display}</span>
-                <span><b>Similarity:</b> {safe_similarity}%</span>
+                <span style='min-height: 1.5rem; display: inline-flex; align-items: center; gap: 0.2rem;'><b>QED:</b><span>{safe_qed_display}</span></span>
+                <span style='min-height: 1.5rem; display: inline-flex; align-items: center; gap: 0.2rem;'><b>Similarity:</b><span>{safe_similarity}%</span></span>
             </div>""",
             unsafe_allow_html=True
         )
@@ -183,10 +178,6 @@ def render_compound_card(compound: Dict[str, Any], key_prefix: str = "", select_
                 button_key = f"{key_prefix}view"
             if st.button("View Details", key=button_key, type="primary", width='stretch'):
                 return True
-
-    # Close IMP score badge div if it was opened
-    if badge_css:
-        st.markdown("</div>", unsafe_allow_html=True)
 
     return False
 
@@ -321,15 +312,55 @@ def render_compound_grid(compounds: list, columns: int = 3, select_mode: bool = 
 
     clicked_compound = None
 
+    # Equal-height cards: force Streamlit column children to stretch
+    st.markdown(
+        """<style>
+        /* Make compound cards in each row equal height */
+        div[data-testid="stHorizontalBlock"]:has(.imp-compound-card-marker) {
+            align-items: stretch;
+        }
+        div[data-testid="stHorizontalBlock"]:has(.imp-compound-card-marker) > div[data-testid="stColumn"] {
+            display: flex;
+            flex-direction: column;
+        }
+        div[data-testid="stHorizontalBlock"]:has(.imp-compound-card-marker) > div[data-testid="stColumn"] > div {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        div[data-testid="stHorizontalBlock"]:has(.imp-compound-card-marker) > div[data-testid="stColumn"] > div > div[data-testid="stLayoutWrapper"] {
+            flex: 1;
+        }
+        </style>""",
+        unsafe_allow_html=True,
+    )
+
+    # ── Pagination (must be multiple of columns for full rows) ──
+    PAGE_SIZE = columns * 16  # 48 for 3-column grid
+    total = len(compounds)
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    page_key = "compound_grid_page"
+
+    if page_key not in st.session_state:
+        st.session_state[page_key] = 1
+    current_page = min(st.session_state[page_key], total_pages)
+
+    st.caption(f"{total} compounds")
+    if total_pages > 1:
+        _list_pagination(page_key, current_page, total_pages, "grid_top")
+
+    start = (current_page - 1) * PAGE_SIZE
+    page_compounds = compounds[start:start + PAGE_SIZE]
+
     # Create grid
-    for row_start in range(0, len(compounds), columns):
-        row_compounds = compounds[row_start:row_start + columns]
+    for row_start in range(0, len(page_compounds), columns):
+        row_compounds = page_compounds[row_start:row_start + columns]
         cols = st.columns(columns)
 
         for i, compound in enumerate(row_compounds):
             with cols[i]:
-                # Use row_start + i to create unique keys per grid position
-                if render_compound_card(compound, key_prefix=f"grid_{row_start + i}_", select_mode=select_mode):
+                global_idx = start + row_start + i
+                if render_compound_card(compound, key_prefix=f"grid_{global_idx}_", select_mode=select_mode):
                     clicked_compound = {
                         'compound_name': compound.get('compound_name'),
                         'entry_id': compound.get('entry_id'),
@@ -339,11 +370,60 @@ def render_compound_grid(compounds: list, columns: int = 3, select_mode: bool = 
                         'parent_name': compound.get('parent_name'),
                     }
 
+    if total_pages > 1:
+        _list_pagination(page_key, current_page, total_pages, "grid_bot")
+
     return clicked_compound
 
 
+def _get_structure_base64(smiles: str, size: tuple = (120, 90)) -> str:
+    """Generate a base64-encoded PNG of the 2D structure, or empty string on failure."""
+    if not smiles or smiles == 'nan' or not RDKIT_AVAILABLE:
+        return ""
+    try:
+        mol = Chem.MolFromSmiles(str(smiles))
+        if mol is None:
+            return ""
+        img = Draw.MolToImage(mol, size=size)
+        buffered = BytesIO()
+        img.save(buffered, format="PNG")
+        return base64.b64encode(buffered.getvalue()).decode()
+    except Exception:
+        return ""
+
+
+def _list_pagination(page_key: str, current_page: int, total_pages: int, pos: str) -> None:
+    """PDB-style pagination bar: First Prev | Page X of Y | Next Last."""
+    _, c_first, c_prev, c_label, c_next, c_last, _ = st.columns([2, 1, 1, 2, 1, 1, 2])
+    with c_first:
+        if st.button("⟪ First", key=f"list_first_{pos}_{page_key}", disabled=current_page <= 1,
+                      use_container_width=True):
+            st.session_state[page_key] = 1
+            st.rerun()
+    with c_prev:
+        if st.button("◁ Prev", key=f"list_prev_{pos}_{page_key}", disabled=current_page <= 1,
+                      use_container_width=True):
+            st.session_state[page_key] = current_page - 1
+            st.rerun()
+    c_label.markdown(
+        f"<div style='text-align:center;padding:8px 0;font-size:15px;font-weight:500;'>"
+        f"Page {current_page} of {total_pages}</div>",
+        unsafe_allow_html=True,
+    )
+    with c_next:
+        if st.button("Next ▷", key=f"list_next_{pos}_{page_key}", disabled=current_page >= total_pages,
+                      use_container_width=True):
+            st.session_state[page_key] = current_page + 1
+            st.rerun()
+    with c_last:
+        if st.button("Last ⟫", key=f"list_last_{pos}_{page_key}", disabled=current_page >= total_pages,
+                      use_container_width=True):
+            st.session_state[page_key] = total_pages
+            st.rerun()
+
+
 def render_compound_list(compounds: list, select_mode: bool = False) -> Optional[dict]:
-    """Render a list view of compounds (alternative to grid).
+    """Render a paginated list view of compounds as PDB-style card rows.
 
     Args:
         compounds: List of compound dictionaries
@@ -358,74 +438,147 @@ def render_compound_list(compounds: list, select_mode: bool = False) -> Optional
 
     clicked_compound = None
 
-    for i, compound in enumerate(compounds):
-        compound_name = compound.get('compound_name', 'Unknown')
-        entry_id = compound.get('entry_id')
-        smiles = compound.get('smiles', '')[:50]  # Truncate
-        similarity_threshold = compound.get('similarity_threshold', 90)
-        has_imp_warning = compound.get('has_imp_warning', False)
-        is_duplicate = compound.get('is_duplicate', False)
-        imp_score = compound.get('imp_score')
+    # ── Pagination setup ──
+    PAGE_SIZE = 50
+    total = len(compounds)
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    page_key = "compound_list_page"
 
-        # IMP score color indicator for list rows
-        badge_css = _imp_score_badge_css(imp_score)
+    if page_key not in st.session_state:
+        st.session_state[page_key] = 1
+    current_page = min(st.session_state[page_key], total_pages)
+
+    st.caption(f"{total} compounds")
+    if total_pages > 1:
+        _list_pagination(page_key, current_page, total_pages, "top")
+
+    start = (current_page - 1) * PAGE_SIZE
+    page_compounds = compounds[start:start + PAGE_SIZE]
+
+    for i, compound in enumerate(page_compounds):
+        global_idx = start + i
+        compound_name = compound.get('compound_name', 'Unknown')
+        entry_id = compound.get('entry_id', '')
+        smiles = compound.get('smiles', '')
+        similarity_threshold = compound.get('similarity_threshold', 90)
+        is_duplicate = compound.get('is_duplicate', False)
+        version_count = compound.get('version_count', 1)
+        imp_score = compound.get('imp_score')
+        qed = compound.get('qed', 0.0)
+        total_activities = compound.get('total_activities', 0)
+        chembl_id = compound.get('chembl_id', '')
+
+        safe_name = html.escape(str(compound_name))
+        safe_chembl = html.escape(str(chembl_id)) if chembl_id and str(chembl_id) != 'nan' else ''
+
+        # ── Badges ──
+        badges_html = ""
+        if is_duplicate:
+            badges_html += (
+                ' <span style="display:inline-block;padding:2px 10px;border-radius:12px;font-size:11px;'
+                'font-weight:700;background:#ff6b3522;color:#ff6b35;border:1px solid #ff6b3544;'
+                'vertical-align:middle;">DUPLICATE</span>'
+            )
+        elif version_count > 1:
+            badges_html += (
+                f' <span style="display:inline-block;padding:2px 10px;border-radius:12px;font-size:11px;'
+                f'font-weight:700;background:#667eea22;color:#667eea;border:1px solid #667eea44;'
+                f'vertical-align:middle;">{version_count} VERSIONS</span>'
+            )
+
+        # ── IMP score pill ──
+        imp_display = f"{imp_score:.2f}" if imp_score is not None else "N/A"
+        if imp_score is not None and imp_score >= 0.7:
+            imp_color = "#22c55e"
+        elif imp_score is not None and imp_score >= 0.5:
+            imp_color = "#FF9800"
+        elif imp_score is not None and imp_score >= 0.3:
+            imp_color = "#9E9E9E"
+        else:
+            imp_color = "#666"
+        imp_pill = (
+            f'<span style="display:inline-block;padding:3px 12px;border-radius:12px;font-size:12px;'
+            f'font-weight:700;background:{imp_color}22;color:{imp_color};'
+            f'border:1px solid {imp_color}44;">{html.escape(imp_display)}</span>'
+        )
+
+        # ── 2D structure thumbnail (links to compound detail page) ──
+        img_b64 = _get_structure_base64(smiles, size=(160, 120))
+        detail_url = f"?compound_id={entry_id}" if entry_id else ""
+        if img_b64:
+            img_tag = (
+                f'<img src="data:image/png;base64,{img_b64}" '
+                f'style="width:90px;height:90px;border-radius:6px;object-fit:contain;'
+                f'background:white;flex-shrink:0;" '
+                f'onerror="this.style.display=\'none\'" />'
+            )
+            if detail_url:
+                img_html = (
+                    f'<a href="{detail_url}" target="_self" '
+                    f'style="flex-shrink:0;" title="View {safe_name}">{img_tag}</a>'
+                )
+            else:
+                img_html = img_tag
+        else:
+            img_html = (
+                '<div style="width:90px;height:90px;border-radius:6px;background:#333;'
+                'display:flex;align-items:center;justify-content:center;flex-shrink:0;'
+                'font-size:10px;color:#888;">No structure</div>'
+            )
+
+        # ── Metadata lines ──
+        qed_display = f"{qed:.2f}" if qed and qed > 0 else "N/A"
+
+        line1_parts = []
+        if safe_chembl:
+            line1_parts.append(
+                f'<b>ChEMBL:</b> <span style="color:#3b82f6;font-weight:600;">{safe_chembl}</span>'
+            )
+        line1_parts.append(f'<b>Activities:</b> {html.escape(str(total_activities))}')
+        line1_parts.append(f'<b>IMP Score:</b> {imp_pill}')
+        line1 = ' &nbsp;&nbsp; '.join(line1_parts)
+
+        line2 = (
+            f'<b>Similarity:</b> {html.escape(str(similarity_threshold))}%'
+            f' &nbsp;&nbsp; <b>QED:</b> {html.escape(qed_display)}'
+        )
+
+        # ── Card HTML ──
+        card_html = (
+            f'<div style="display:flex;gap:16px;padding:14px 16px;'
+            f'border-bottom:1px solid rgba(128,128,128,0.2);align-items:flex-start;">'
+            f'{img_html}'
+            f'<div style="flex:1;min-width:0;">'
+            f'<div style="font-size:17px;font-weight:500;margin-bottom:6px;">'
+            f'{safe_name}{badges_html}</div>'
+            f'<div style="font-size:14px;opacity:0.85;line-height:1.8;">{line1}</div>'
+            f'<div style="font-size:14px;opacity:0.85;line-height:1.8;">{line2}</div>'
+            f'</div>'
+            f'</div>'
+        )
 
         if select_mode and entry_id:
-            # Selection mode: checkbox + name + smiles + similarity
-            col0, col1, col2, col3 = st.columns([0.5, 3, 4, 2])
-
-            with col0:
-                cb_key = f"select_{entry_id}"
-                st.checkbox("Select", key=cb_key, label_visibility="collapsed")
-
-            with col1:
-                safe_name = html.escape(compound_name)
-                name_style = f"style='{badge_css} padding-left: 6px;'" if badge_css else ""
-                if is_duplicate:
-                    st.markdown(f"<div {name_style}>**{safe_name}** <span style='color: #ff6b35; font-size: 12px;'>[DUP]</span></div>", unsafe_allow_html=True)
-                elif has_imp_warning:
-                    st.markdown(f"<div {name_style}>**{safe_name}** </div>" if badge_css else f"**{safe_name}** ", unsafe_allow_html=True)
-                else:
-                    st.markdown(f"<div {name_style}>**{safe_name}**</div>" if badge_css else f"**{safe_name}**", unsafe_allow_html=True)
-
-            with col2:
-                st.code(smiles + "..." if len(compound.get('smiles', '')) > 50 else smiles)
-
-            with col3:
-                st.caption(f"Sim: {similarity_threshold}%")
+            col_cb, col_card = st.columns([0.3, 9.7])
+            with col_cb:
+                st.checkbox("", key=f"select_{entry_id}", label_visibility="collapsed")
+            with col_card:
+                st.markdown(card_html, unsafe_allow_html=True)
         else:
-            # Normal mode: name + smiles + similarity + view button
-            col1, col2, col3, col4 = st.columns([3, 4, 2, 2])
+            st.markdown(card_html, unsafe_allow_html=True)
+            button_key = f"lv_{global_idx}_{entry_id}" if entry_id else f"lv_{global_idx}"
+            if st.button("View Details", key=button_key, type="primary", use_container_width=True):
+                clicked_compound = {
+                    'compound_name': compound_name,
+                    'entry_id': entry_id,
+                    'storage_path': compound.get('storage_path'),
+                    'is_duplicate': is_duplicate,
+                    'parent_id': compound.get('parent_id'),
+                    'parent_name': compound.get('parent_name'),
+                }
 
-            with col1:
-                safe_name = html.escape(compound_name)
-                name_style = f"style='{badge_css} padding-left: 6px;'" if badge_css else ""
-                if is_duplicate:
-                    st.markdown(f"<div {name_style}>**{safe_name}** <span style='color: #ff6b35; font-size: 12px;'>[DUP]</span></div>", unsafe_allow_html=True)
-                elif has_imp_warning:
-                    st.markdown(f"<div {name_style}>**{safe_name}** </div>" if badge_css else f"**{safe_name}** ", unsafe_allow_html=True)
-                else:
-                    st.markdown(f"<div {name_style}>**{safe_name}**</div>" if badge_css else f"**{safe_name}**", unsafe_allow_html=True)
-
-            with col2:
-                st.code(smiles + "..." if len(compound.get('smiles', '')) > 50 else smiles)
-
-            with col3:
-                st.caption(f"Sim: {similarity_threshold}%")
-
-            with col4:
-                button_key = f"list_view_{i}_{entry_id}" if entry_id else f"list_view_{i}"
-                if st.button("View", key=button_key):
-                    clicked_compound = {
-                        'compound_name': compound_name,
-                        'entry_id': entry_id,
-                        'storage_path': compound.get('storage_path'),
-                        'is_duplicate': is_duplicate,
-                        'parent_id': compound.get('parent_id'),
-                        'parent_name': compound.get('parent_name'),
-                    }
-
-        st.divider()
+    # Bottom pagination
+    if total_pages > 1:
+        _list_pagination(page_key, current_page, total_pages, "bot")
 
     return clicked_compound
 

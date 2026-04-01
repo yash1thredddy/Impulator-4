@@ -9,7 +9,7 @@ Tests:
 - GET /api/v1/health/detailed (comprehensive health check)
 - GET /api/v1/health/metrics (application metrics)
 """
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 
 def _broken_db():
@@ -201,4 +201,3 @@ class TestHealthDegradedPaths:
             assert data["database"] is False
         finally:
             pass
-

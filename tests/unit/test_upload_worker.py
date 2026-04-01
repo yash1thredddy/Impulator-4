@@ -4,7 +4,6 @@ Unit tests for upload_worker module.
 import asyncio
 import inspect
 import uuid
-from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch, AsyncMock
 
 import pytest
@@ -136,7 +135,7 @@ class TestHandlePermanentFailure:
         mock_job.requeue_count = 0
         mock_job.result_summary = {"entry_id": "abc-123"}
 
-        with patch(f"{_MOD}.compound_repo") as cr:
+        with patch(f"{_MOD}.compound_repo"):
             _handle_permanent_failure(mock_db, mock_job, "ZIP missing")
 
         assert mock_job.status == JobStatus.PENDING
@@ -154,7 +153,7 @@ class TestHandlePermanentFailure:
         mock_job.requeue_count = 3  # At max
         mock_job.result_summary = {"entry_id": "abc-123"}
 
-        with patch(f"{_MOD}.compound_repo") as cr:
+        with patch(f"{_MOD}.compound_repo"):
             _handle_permanent_failure(mock_db, mock_job, "ZIP missing")
 
         assert mock_job.status == JobStatus.FAILED
@@ -174,7 +173,7 @@ class TestHandleExhaustion:
         mock_job.requeue_count = 1
         mock_job.result_summary = {"entry_id": "abc-123"}
 
-        with patch(f"{_MOD}.compound_repo") as cr:
+        with patch(f"{_MOD}.compound_repo"):
             _handle_exhaustion(mock_db, mock_job)
 
         assert mock_job.status == JobStatus.PENDING
@@ -192,7 +191,7 @@ class TestHandleExhaustion:
         mock_job.requeue_count = 3  # At max
         mock_job.result_summary = {"entry_id": "abc-123"}
 
-        with patch(f"{_MOD}.compound_repo") as cr:
+        with patch(f"{_MOD}.compound_repo"):
             _handle_exhaustion(mock_db, mock_job)
 
         assert mock_job.status == JobStatus.FAILED

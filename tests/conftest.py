@@ -49,6 +49,10 @@ def postgres_url():
 def pg_engine(postgres_url):
     """Session-scoped engine with Alembic-provisioned schema."""
     from sqlalchemy import create_engine
+
+    os.environ["DATABASE_URL"] = postgres_url
+    get_settings.cache_clear()
+
     engine = create_engine(postgres_url)
 
     # Provision schema via Alembic (bypasses settings.DATABASE_URL)
@@ -68,15 +72,8 @@ def pg_engine(postgres_url):
 
     yield engine
     engine.dispose()
-
-
-@pytest.fixture(scope="session", autouse=True)
-def _set_test_db_url(postgres_url):
-    """Set DATABASE_URL for code that reads it from environment."""
-    os.environ["DATABASE_URL"] = postgres_url
-    get_settings.cache_clear()
-    yield
     os.environ.pop("DATABASE_URL", None)
+    get_settings.cache_clear()
 
 
 @pytest.fixture(scope="session")

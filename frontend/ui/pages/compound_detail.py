@@ -22,7 +22,7 @@ from frontend.services import (
     smart_load_dataframe,
 )
 from frontend.utils import SessionState, sanitize_compound_name
-from frontend.ui.components import render_2d_structure, embed_structure_viewer, render_structure_viewer_hint
+from frontend.ui.components import render_2d_structure, embed_structure_viewer
 from frontend.ui.components.charts import get_plotly_theme, apply_impulator_theme
 from frontend.ui.components.plotly_legend import plotly_legend_monitor
 
@@ -114,7 +114,7 @@ def render_compound_detail_page() -> None:
 
     # Show success toast after delete + navigate
     if st.session_state.pop('_delete_success', None):
-        st.toast(f"✓ Compound deleted successfully", icon="✅")
+        st.toast("✓ Compound deleted successfully", icon="✅")
 
     # Load data using storage_path (most reliable), fallback to entry_id, then compound_name
     data = _load_compound_data(
@@ -742,7 +742,6 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
                 lip_checks.append((logp_col_name, lambda v: v <= 5))
             lp = sum(1 for c, fn in lip_checks if c in unique_df.columns and fn(unique_df[c].dropna().mean()))
             lt = sum(1 for c, _ in lip_checks if c in unique_df.columns)
-            lc = '#22c55e' if lp == lt else '#f59e0b' if lp >= lt - 1 else '#ef4444'
             le = '🟢' if lp == lt else '🟡' if lp >= lt - 1 else '🔴'
             st.metric(f"{le} Lipinski RO5", f"{lp}/{lt} passed",
                       help="Lipinski Rule of 5 — oral bioavailability filter (MW≤500, LogP≤5, HBD≤5, HBA≤10)")
@@ -1094,7 +1093,6 @@ def _render_activity_analysis(df: pd.DataFrame) -> None:
     has_pact = 'pActivity' in df.columns
     has_targets = 'Target_Name' in df.columns or 'Target_ChEMBL_ID' in df.columns
     has_assay_type = 'Assay_Type' in df.columns
-    has_similarity = 'Similarity' in df.columns
     has_quality = 'Data_Quality' in df.columns
     target_col = 'Target_Name' if 'Target_Name' in df.columns else ('Target_ChEMBL_ID' if 'Target_ChEMBL_ID' in df.columns else None)
 
@@ -1427,13 +1425,10 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
             # Angle interpretation
             if 35 <= mean_angle <= 55:
                 angle_label = "Balanced"
-                angle_color = "#22c55e"
             elif mean_angle < 35:
                 angle_label = "Hydrophobic-biased"
-                angle_color = "#f59e0b"
             else:
                 angle_label = "Polar-biased"
-                angle_color = "#3b82f6"
 
             geo_cols = st.columns(2)
             with geo_cols[0]:
@@ -1580,7 +1575,7 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
                     ep_cd = [c for c in ['SMILES', 'Molecule_Name', 'ChEMBL_ID'] if c in ep_df.columns]
                     ep_chart_key = f"eff_potency_{metric.lower()}"
                     fig = px.scatter(
-                        ep_df, x='pActivity', y=metric,
+                        ep_df, x=metric, y='pActivity',
                         color='Activity_Type' if 'Activity_Type' in ep_df.columns else None,
                         hover_data=['ChEMBL_ID', 'Molecule_Name'] if all(c in ep_df.columns for c in ['ChEMBL_ID', 'Molecule_Name']) else None,
                         custom_data=ep_cd if ep_cd else None,
@@ -1592,8 +1587,8 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
                         template=theme["template"],
                         height=370,
                         margin=dict(t=30, b=40, l=10, r=10),
-                        xaxis_title="pActivity",
-                        yaxis_title=metric,
+                        xaxis_title=metric,
+                        yaxis_title="pActivity",
                         showlegend=True,
                         legend=dict(
                             orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
@@ -1603,7 +1598,7 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
                     )
                     apply_impulator_theme(fig)
                     st.plotly_chart(fig, width='stretch', key=ep_chart_key)
-                    _maybe_embed_structure_viewer(ep_chart_key, ep_df, x_col='pActivity', y_col=metric)
+                    _maybe_embed_structure_viewer(ep_chart_key, ep_df, x_col=metric, y_col='pActivity')
                 else:
                     st.info(f"Not enough data for {title}")
 
@@ -1826,7 +1821,6 @@ def _render_pains_analysis(df: pd.DataFrame) -> None:
 
     # Flagged compounds as cards
     flag_col_names = {name: info[0] for name, info in flags.items()}
-    flag_emojis = {name: info[1] for name, info in flags.items()}
     flag_colors = {
         'PAINS': '#ef4444', 'Aggregator': '#f97316', 'Redox': '#eab308',
         'Fluorescence': '#3b82f6', 'Thiol': '#a855f7', 'BRENK': '#d97706', 'NIH': '#0891b2',
@@ -2033,6 +2027,8 @@ def _render_imp_score_breakdown(df: pd.DataFrame) -> None:
         final_score = row.get('IMP_Final_Score', 0)
         classification = row.get('IMP_Classification', 'Unknown')
         priority = row.get('IMP_Priority', 'N/A')
+        safe_classification = html.escape(str(classification))
+        safe_priority = html.escape(str(priority))
 
         # Color based on score - Higher IMP = MORE DANGEROUS (red)
         if final_score >= 0.9:
@@ -2049,8 +2045,8 @@ def _render_imp_score_breakdown(df: pd.DataFrame) -> None:
         st.markdown(f"""
         <div style="text-align: center; padding: 15px; background: linear-gradient(135deg, {score_color}22, {score_color}11); border-radius: 10px; border: 2px solid {score_color}; margin-bottom: 15px;">
             <h2 style="color: {score_color}; margin: 0; font-size: 2.5em;">{final_score:.3f}</h2>
-            <p style="color: {score_color}; margin: 5px 0; font-size: 1.1em; font-weight: bold;">{classification}</p>
-            <p style="color: var(--text-color); opacity: 0.6; margin: 0; font-size: 0.9em;">Priority: {priority} | Best scoring compound shown</p>
+            <p style="color: {score_color}; margin: 5px 0; font-size: 1.1em; font-weight: bold;">{safe_classification}</p>
+            <p style="color: var(--text-color); opacity: 0.6; margin: 0; font-size: 0.9em;">Priority: {safe_priority} | Best scoring compound shown</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -5628,7 +5624,7 @@ def _export_plotly_to_base64(fig, width: int = 700, height: int = 400, scale: fl
         img_b64 = base64.b64encode(img_bytes).decode()
         return f'<img src="data:image/png;base64,{img_b64}" style="max-width: 100%; height: auto;">'
     except Exception as e:
-        return f"<p style='color: #999;'>Chart unavailable: {str(e)}</p>"
+        return f"<p style='color: #999;'>Chart unavailable: {html.escape(str(e))}</p>"
 
 
 def _create_html_bioactivity_donut(df: pd.DataFrame) -> str:
@@ -6121,7 +6117,11 @@ def _generate_html_report(data: Dict[str, Any], df: pd.DataFrame) -> str:
         else:
             hq_ids = []
         if hq_ids:
-            links = ", ".join(f'<a href="https://www.rcsb.org/structure/{pid}" target="_blank">{pid}</a>' for pid in sorted(hq_ids))
+            links = ", ".join(
+                f'<a href="https://www.rcsb.org/structure/{html.escape(str(pid))}" target="_blank">'
+                f'{html.escape(str(pid))}</a>'
+                for pid in sorted(hq_ids)
+            )
             high_q_pdb_links_html = f'<p><strong>High-Quality PDB Structures (&lt;2.0Å):</strong> {links}</p>'
 
     # Classification - ClassyFire and NPClassifier
@@ -6605,8 +6605,6 @@ def _render_versions_tab(versions: list, current_entry_id: str) -> None:
     # Summary table — compare each version's config against current
     current_threshold = current.get("similarity_threshold")
     current_act_set = set(current.get("activity_types") or [])
-    current_act_str = ", ".join(sorted(current_act_set)) if current_act_set else "all (default)"
-
     rows = []
     for v in versions:
         marker = ""

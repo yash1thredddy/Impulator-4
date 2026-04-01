@@ -18,6 +18,8 @@ import httpx
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+pytest.importorskip("rdkit")
+
 from backend.modules.api_client import (
     _canonicalize_smiles,
     _chembl_get,

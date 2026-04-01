@@ -1023,6 +1023,29 @@ def _apply_column_mapping(df, mapping: Dict[str, str]):
     return result
 
 
+def _build_compact_preview(df, max_chars: int = 48):
+    """Return a compact dataframe preview with truncated cell values.
+
+    Batch uploads often contain very long URLs, SMILES, and InChI strings that
+    make the mapped preview unreadable. This keeps the preview scannable while
+    preserving the original mapped dataframe for submission.
+    """
+    preview = df.copy()
+
+    def _truncate(value):
+        if value is None:
+            return value
+        text = str(value)
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 1] + "…"
+
+    for column in preview.columns:
+        preview[column] = preview[column].map(_truncate)
+
+    return preview
+
+
 def _sanitize_and_limit_name(name: str) -> str:
     """Sanitize compound name for filesystem safety with length limit."""
     # Use shared sanitization function for consistency
@@ -1154,7 +1177,18 @@ def render_csv_upload_form() -> Optional[str]:
 
     # Preview mapped data
     st.write("Preview (mapped):")
-    st.dataframe(df_mapped.head(5))
+    preview_height = min(max(220, 36 * min(len(df_mapped), 20) + 40), 760)
+    st.dataframe(
+        _build_compact_preview(df_mapped),
+        width='stretch',
+        hide_index=True,
+        height=preview_height,
+    )
+    if any(df_mapped.astype(str).map(len).max() > 48):
+        st.caption(
+            "Showing the full mapped table in a scrollable preview. "
+            "Long values are truncated for readability; full values are still used for submission."
+        )
     st.caption(f"{len(df_mapped)} compounds in file")
 
     # Configuration

@@ -20,6 +20,7 @@ Usage:
 
 import asyncio
 import time
+from typing import Dict
 
 import httpx
 import structlog

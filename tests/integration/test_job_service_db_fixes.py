@@ -13,8 +13,6 @@ import uuid
 import sys
 from unittest.mock import patch, MagicMock
 
-from sqlalchemy.orm import sessionmaker
-
 
 # Mock rdkit-dependent modules before importing job_service
 @pytest.fixture(scope="module", autouse=True)
