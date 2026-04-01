@@ -131,7 +131,13 @@ async def lifespan(app: FastAPI):  # pragma: no cover -- startup/shutdown lifecy
                 "script_location",
                 str(_Path(__file__).parent / "alembic"),
             )
-            alembic_command.upgrade(_alembic_cfg, "head")
+            # Reuse the already-verified engine connection for Alembic.
+            # Avoids a second DNS lookup that may resolve to an unreachable
+            # IPv6 address on dual-stack hosts (e.g. HF Spaces).
+            with get_engine().connect() as _migration_conn:
+                _alembic_cfg.attributes["connection"] = _migration_conn
+                alembic_command.upgrade(_alembic_cfg, "head")
+                _migration_conn.commit()
             logger.info("Alembic migrations applied (upgrade head)")
         except Exception as exc:
             logger.error("Alembic migration failed: %s", exc, exc_info=True)
