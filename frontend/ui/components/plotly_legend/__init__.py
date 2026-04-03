@@ -12,7 +12,7 @@ from typing import Optional, Any
 
 
 # ── HTML + JS component ─────────────────────────────────────────────
-# Renders a stats bar inside the iframe and attaches a plotly_restyle
+# Renders a stats bar and attaches a plotly_restyle
 # listener to the chart identified by fig.layout.meta in the parent.
 _COMPONENT_HTML = r"""<!DOCTYPE html>
 <html><head>
@@ -162,7 +162,7 @@ _COMPONENT_HTML = r"""<!DOCTYPE html>
     try{return el._fullLayout&&el._fullLayout.meta===META;}catch(e){return false;}
   }
   function findChart(){
-    var doc=window.parent.document,i,j,pd;
+    var doc=document,i,j,pd;
     /* Strategy 1: direct search in parent DOM */
     var divs=doc.querySelectorAll(".js-plotly-plot");
     for(i=0;i<divs.length;i++) if(_metaMatch(divs[i])) return divs[i];
@@ -262,4 +262,4 @@ def plotly_legend_monitor(
         json.dumps(initial_stats) if initial_stats else "null",
     )
 
-    st.html(html, height=72)
+    st.html(html, unsafe_allow_javascript=True)

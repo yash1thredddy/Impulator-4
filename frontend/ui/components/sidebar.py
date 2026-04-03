@@ -103,7 +103,7 @@ def _render_sidebar_logo() -> None:
     if light_b64 and dark_b64:
         st.html(
             f"""
-            <div id="sidebar-logo" style="text-align:center;padding:8px 0;">
+            <div id="sidebar-logo" style="text-align:center;padding:8px 0;max-height:90px;overflow:hidden;">
                 <img id="logo-l" src="data:image/png;base64,{light_b64}"
                      style="width:100%;max-width:260px;object-fit:contain;display:none;">
                 <img id="logo-d" src="data:image/png;base64,{dark_b64}"
@@ -112,7 +112,7 @@ def _render_sidebar_logo() -> None:
             <script>
             (function() {{
                 function update() {{
-                    var app = window.parent.document.querySelector('[data-testid="stSidebar"]');
+                    var app = document.querySelector('[data-testid="stSidebar"]');
                     if (!app) return;
                     var bg = getComputedStyle(app).backgroundColor;
                     var m = bg.match(/\\d+/g);
@@ -125,7 +125,7 @@ def _render_sidebar_logo() -> None:
             }})();
             </script>
             """,
-            height=90,
+            unsafe_allow_javascript=True,
         )
     else:
         st.markdown("## IMPULATOR")

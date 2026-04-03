@@ -3160,7 +3160,7 @@ def _show_expanded_structure(smiles: str, label: str = "") -> None:
 
 
 def _render_3d_viewer(smiles: str, entry_id: str) -> None:
-    """Interactive 3D molecule viewer using 3Dmol.js. All controls inside iframe."""
+    """Interactive 3D molecule viewer using 3Dmol.js."""
     try:
         from rdkit import Chem
         from rdkit.Chem import AllChem
@@ -3185,26 +3185,27 @@ def _render_3d_viewer(smiles: str, entry_id: str) -> None:
 
     viewer_html = f"""
     <style>
-        * {{ margin:0; padding:0; box-sizing:border-box; }}
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: transparent; }}
-        #viewer3d {{ width:100%; height:380px; background:#fff; border-radius:8px 8px 0 0; }}
-        #controls {{ display:flex; gap:6px; padding:8px 12px; align-items:center; flex-wrap:wrap;
+        .viewer3d-wrapper {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }}
+        .viewer3d-wrapper * {{ box-sizing:border-box; }}
+        #viewer3d {{ width:100%; height:380px; position:relative; background:#fff; border-radius:8px 8px 0 0; }}
+        .viewer3d-wrapper #controls {{ display:flex; gap:6px; padding:8px 12px; align-items:center; flex-wrap:wrap;
             background:#1a1a2e; border-radius:0 0 8px 8px; position:relative; z-index:10; }}
-        .btn {{ padding:6px 12px; border-radius:6px; border:1px solid rgba(255,255,255,0.2);
+        .viewer3d-wrapper .btn {{ padding:6px 12px; border-radius:6px; border:1px solid rgba(255,255,255,0.2);
             background:rgba(255,255,255,0.1); color:#eee; font-size:13px; cursor:pointer;
             outline:none; user-select:none; display:inline-block; }}
-        .btn:hover {{ background:rgba(255,255,255,0.18); }}
-        .btn.active {{ background:rgba(99,102,241,0.5); border-color:rgba(99,102,241,0.7); color:#fff; }}
-        .btn-group {{ position:relative; }}
-        .btn-group .menu {{ display:none; position:absolute; bottom:100%; left:0; margin-bottom:4px;
+        .viewer3d-wrapper .btn:hover {{ background:rgba(255,255,255,0.18); }}
+        .viewer3d-wrapper .btn.active {{ background:rgba(99,102,241,0.5); border-color:rgba(99,102,241,0.7); color:#fff; }}
+        .viewer3d-wrapper .btn-group {{ position:relative; }}
+        .viewer3d-wrapper .btn-group .menu {{ display:none; position:absolute; bottom:100%; left:0; margin-bottom:4px;
             background:#2a2a3e; border:1px solid rgba(255,255,255,0.15); border-radius:6px;
             overflow:hidden; min-width:130px; z-index:100; box-shadow:0 4px 12px rgba(0,0,0,0.4); }}
-        .btn-group.open .menu {{ display:block; }}
-        .menu-item {{ padding:8px 14px; color:#ddd; font-size:13px; cursor:pointer; }}
-        .menu-item:hover {{ background:rgba(255,255,255,0.1); }}
-        .menu-item.selected {{ background:rgba(99,102,241,0.3); }}
-        .lbl {{ font-size:11px; color:#999; text-transform:uppercase; letter-spacing:0.5px; }}
+        .viewer3d-wrapper .btn-group.open .menu {{ display:block; }}
+        .viewer3d-wrapper .menu-item {{ padding:8px 14px; color:#ddd; font-size:13px; cursor:pointer; }}
+        .viewer3d-wrapper .menu-item:hover {{ background:rgba(255,255,255,0.1); }}
+        .viewer3d-wrapper .menu-item.selected {{ background:rgba(99,102,241,0.3); }}
+        .viewer3d-wrapper .lbl {{ font-size:11px; color:#999; text-transform:uppercase; letter-spacing:0.5px; }}
     </style>
+    <div class="viewer3d-wrapper">
     <div id="viewer3d"></div>
     <div id="controls">
         <span class="lbl">Style</span>
@@ -3219,135 +3220,169 @@ def _render_3d_viewer(smiles: str, entry_id: str) -> None:
         </div>
         <span class="lbl">Color</span>
         <div class="btn-group" id="colorGroup">
-            <div class="btn" id="colorBtn">Element (CPK) ▾</div>
+            <div class="btn" id="colorBtn">Element (Jmol) ▾</div>
             <div class="menu">
-                <div class="menu-item selected" data-val="default">Element (CPK)</div>
-                <div class="menu-item" data-val="chain">Chain</div>
+                <div class="menu-item selected" data-val="default">Element (Jmol)</div>
+                <div class="menu-item" data-val="greenCarbon">Green Carbon</div>
+                <div class="menu-item" data-val="cyanCarbon">Cyan Carbon</div>
                 <div class="menu-item" data-val="spectrum">Spectrum</div>
             </div>
         </div>
         <div class="btn" id="spinBtn">Spin</div>
         <div class="btn" id="resetBtn">Reset</div>
     </div>
+    </div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.4.2/3Dmol-min.js"></script>
     <script>
     (function() {{
-        var viewer = $3Dmol.createViewer(document.getElementById("viewer3d"), {{
-            backgroundColor: "white", antialias: true
-        }});
-        var pdb = `{safe_pdb}`;
-        viewer.addModel(pdb, "pdb");
+        var wrapper = document.querySelector(".viewer3d-wrapper");
+        var container = wrapper.querySelector("#viewer3d");
 
-        var styles = {{
-            ballstick: {{stick: {{radius: 0.12}}, sphere: {{scale: 0.25}}}},
-            stick: {{stick: {{radius: 0.15}}}},
-            sphere: {{sphere: {{scale: 0.4}}}},
-            line: {{line: {{}}}}
-        }};
+        function initViewer() {{
+            var viewer = $3Dmol.createViewer(container, {{
+                backgroundColor: "white", antialias: true
+            }});
+            var pdb = `{safe_pdb}`;
+            viewer.addModel(pdb, "pdb");
 
-        var curStyle = "ballstick";
-        var curColor = "default";
+            var styles = {{
+                ballstick: {{stick: {{radius: 0.12}}, sphere: {{scale: 0.25}}}},
+                stick: {{stick: {{radius: 0.15}}}},
+                sphere: {{sphere: {{scale: 0.4}}}},
+                line: {{line: {{}}}}
+            }};
 
-        function applyStyle() {{
-            var styleObj = JSON.parse(JSON.stringify(styles[curStyle] || styles.ballstick));
-            if (curColor === "chain") {{
-                Object.keys(styleObj).forEach(function(k) {{ styleObj[k].colorscheme = "chain"; }});
-            }} else if (curColor === "spectrum") {{
-                Object.keys(styleObj).forEach(function(k) {{ styleObj[k].colorscheme = "roygb"; }});
+            var curStyle = "ballstick";
+            var curColor = "default";
+
+            // Spectrum coloring: rainbow by atom index (red → green → blue)
+            var totalAtoms = viewer.getModel().selectedAtoms({{}}).length || 1;
+            function spectrumColor(atom) {{
+                var frac = (atom.serial || 0) / totalAtoms;
+                var r, g, b;
+                if (frac < 0.25)      {{ r = 1; g = frac * 4; b = 0; }}
+                else if (frac < 0.5)  {{ r = 1 - (frac - 0.25) * 4; g = 1; b = 0; }}
+                else if (frac < 0.75) {{ r = 0; g = 1; b = (frac - 0.5) * 4; }}
+                else                  {{ r = 0; g = 1 - (frac - 0.75) * 4; b = 1; }}
+                return "rgb(" + Math.round(r * 255) + "," + Math.round(g * 255) + "," + Math.round(b * 255) + ")";
             }}
-            viewer.setStyle({{}}, styleObj);
-            viewer.render();
-        }}
 
-        applyStyle();
-        viewer.zoomTo();
-        viewer.render();
-
-        // Hover labels
-        viewer.setHoverable({{}}, true,
-            function(atom, viewer, event, container) {{
-                if (!atom.label) {{
-                    atom.label = viewer.addLabel(
-                        atom.elem + atom.serial,
-                        {{position: atom, backgroundColor: "rgba(0,0,0,0.75)",
-                         fontColor: "white", fontSize: 12, borderRadius: 4, padding: 4}});
+            function applyStyle() {{
+                var styleObj = JSON.parse(JSON.stringify(styles[curStyle] || styles.ballstick));
+                if (curColor === "spectrum") {{
+                    Object.keys(styleObj).forEach(function(k) {{ styleObj[k].colorfunc = spectrumColor; }});
+                }} else if (curColor !== "default") {{
+                    // Named 3Dmol schemes: greenCarbon, cyanCarbon, etc.
+                    Object.keys(styleObj).forEach(function(k) {{ styleObj[k].colorscheme = curColor; }});
                 }}
-            }},
-            function(atom, viewer) {{
-                if (atom.label) {{ viewer.removeLabel(atom.label); delete atom.label; }}
+                viewer.setStyle({{}}, styleObj);
+                viewer.render();
             }}
-        );
-        viewer.render();
 
-        // Custom dropdown logic
-        function setupDropdown(groupId, btnId, onSelect) {{
-            var group = document.getElementById(groupId);
-            var btn = document.getElementById(btnId);
-            btn.addEventListener("click", function(e) {{
-                e.stopPropagation();
-                // Close other open dropdowns
-                document.querySelectorAll(".btn-group.open").forEach(function(g) {{
-                    if (g !== group) g.classList.remove("open");
-                }});
-                group.classList.toggle("open");
-            }});
-            group.querySelectorAll(".menu-item").forEach(function(item) {{
-                item.addEventListener("click", function(e) {{
-                    e.stopPropagation();
-                    group.querySelectorAll(".menu-item").forEach(function(i) {{ i.classList.remove("selected"); }});
-                    item.classList.add("selected");
-                    btn.textContent = item.textContent + " \\u25BE";
-                    group.classList.remove("open");
-                    onSelect(item.getAttribute("data-val"));
-                }});
-            }});
-        }}
-
-        setupDropdown("styleGroup", "styleBtn", function(val) {{
-            curStyle = val;
-            applyStyle();
-        }});
-        setupDropdown("colorGroup", "colorBtn", function(val) {{
-            curColor = val;
-            applyStyle();
-        }});
-
-        // Close dropdowns on click outside
-        document.addEventListener("click", function() {{
-            document.querySelectorAll(".btn-group.open").forEach(function(g) {{
-                g.classList.remove("open");
-            }});
-        }});
-
-        // Spin
-        var spinning = false;
-        var spinBtn = document.getElementById("spinBtn");
-        spinBtn.addEventListener("click", function() {{
-            spinning = !spinning;
-            viewer.spin(spinning);
-            spinBtn.classList.toggle("active", spinning);
-        }});
-
-        // Reset
-        document.getElementById("resetBtn").addEventListener("click", function() {{
-            spinning = false;
-            viewer.spin(false);
-            spinBtn.classList.remove("active");
-            curStyle = "ballstick";
-            curColor = "default";
-            document.getElementById("styleBtn").textContent = "Ball & Stick \\u25BE";
-            document.getElementById("colorBtn").textContent = "Element (CPK) \\u25BE";
-            document.querySelectorAll(".menu-item").forEach(function(i) {{ i.classList.remove("selected"); }});
-            document.querySelector('[data-val="ballstick"]').classList.add("selected");
-            document.querySelector('[data-val="default"]').classList.add("selected");
             applyStyle();
             viewer.zoomTo();
             viewer.render();
-        }});
+
+            // Save initial view state (position + rotation) for reset
+            var initialView = viewer.getView();
+
+            // Hover labels
+            viewer.setHoverable({{}}, true,
+                function(atom, viewer, event, container) {{
+                    if (!atom.label) {{
+                        atom.label = viewer.addLabel(
+                            atom.elem + atom.serial,
+                            {{position: atom, backgroundColor: "rgba(0,0,0,0.75)",
+                             fontColor: "white", fontSize: 12, borderRadius: 4, padding: 4}});
+                    }}
+                }},
+                function(atom, viewer) {{
+                    if (atom.label) {{ viewer.removeLabel(atom.label); delete atom.label; }}
+                }}
+            );
+            viewer.render();
+
+            // Custom dropdown logic — all queries scoped to wrapper
+            function setupDropdown(groupId, btnId, onSelect) {{
+                var group = wrapper.querySelector("#" + groupId);
+                var btn = wrapper.querySelector("#" + btnId);
+                btn.addEventListener("click", function(e) {{
+                    e.stopPropagation();
+                    wrapper.querySelectorAll(".btn-group.open").forEach(function(g) {{
+                        if (g !== group) g.classList.remove("open");
+                    }});
+                    group.classList.toggle("open");
+                }});
+                group.querySelectorAll(".menu-item").forEach(function(item) {{
+                    item.addEventListener("click", function(e) {{
+                        e.stopPropagation();
+                        group.querySelectorAll(".menu-item").forEach(function(i) {{ i.classList.remove("selected"); }});
+                        item.classList.add("selected");
+                        btn.textContent = item.textContent + " \\u25BE";
+                        group.classList.remove("open");
+                        onSelect(item.getAttribute("data-val"));
+                    }});
+                }});
+            }}
+
+            setupDropdown("styleGroup", "styleBtn", function(val) {{
+                curStyle = val;
+                applyStyle();
+            }});
+            setupDropdown("colorGroup", "colorBtn", function(val) {{
+                curColor = val;
+                applyStyle();
+            }});
+
+            // Close dropdowns on click outside
+            document.addEventListener("click", function() {{
+                wrapper.querySelectorAll(".btn-group.open").forEach(function(g) {{
+                    g.classList.remove("open");
+                }});
+            }});
+
+            // Spin
+            var spinning = false;
+            var spinBtn = wrapper.querySelector("#spinBtn");
+            spinBtn.addEventListener("click", function() {{
+                spinning = !spinning;
+                viewer.spin(spinning);
+                spinBtn.classList.toggle("active", spinning);
+            }});
+
+            // Reset — restore full view state (position + rotation + zoom)
+            wrapper.querySelector("#resetBtn").addEventListener("click", function() {{
+                spinning = false;
+                viewer.spin(false);
+                spinBtn.classList.remove("active");
+                curStyle = "ballstick";
+                curColor = "default";
+                wrapper.querySelector("#styleBtn").textContent = "Ball & Stick \\u25BE";
+                wrapper.querySelector("#colorBtn").textContent = "Element (Jmol) \\u25BE";
+                wrapper.querySelectorAll(".menu-item").forEach(function(i) {{ i.classList.remove("selected"); }});
+                wrapper.querySelector('[data-val="ballstick"]').classList.add("selected");
+                wrapper.querySelector('[data-val="default"]').classList.add("selected");
+                applyStyle();
+                viewer.setView(initialView);
+                viewer.render();
+            }});
+        }}
+
+        // Ensure container is laid out before initializing 3Dmol
+        if (container.offsetHeight > 0) {{
+            initViewer();
+        }} else {{
+            var checkReady = setInterval(function() {{
+                if (container.offsetHeight > 0) {{
+                    clearInterval(checkReady);
+                    initViewer();
+                }}
+            }}, 50);
+        }}
     }})();
     </script>
     """
-    st.html(viewer_html, height=460)
+    st.html(viewer_html, unsafe_allow_javascript=True)
 
 
 def _render_molecule_viewer(df: pd.DataFrame) -> None:

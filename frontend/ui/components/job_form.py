@@ -125,9 +125,7 @@ def _render_live_preview(input_type: str, resolved_smiles: str = "") -> None:
     st.html(
         f"""
         <style>
-            * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-            body {{ background: transparent; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }}
-            #mol-container {{ background: #fff; border-radius: 8px; padding: 8px; }}
+            #mol-container {{ background: #fff; border-radius: 8px; padding: 8px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }}
             #mol-svg {{ display: flex; justify-content: center; align-items: center;
                 min-height: 200px; }}
             #mol-svg svg {{ display: block; max-width: 100%; }}
@@ -141,7 +139,7 @@ def _render_live_preview(input_type: str, resolved_smiles: str = "") -> None:
         <script src="https://unpkg.com/openchemlib@8.18.0/dist/openchemlib-full.js"></script>
         <script>
         (function() {{
-            var parentDoc = window.parent.document;
+            var parentDoc = document;
             var svgEl = document.getElementById('mol-svg');
             var statusEl = document.getElementById('status');
             var lastValue = '';
@@ -253,7 +251,7 @@ def _render_live_preview(input_type: str, resolved_smiles: str = "") -> None:
         }})();
         </script>
         """,
-        height=240,
+        unsafe_allow_javascript=True,
     )
 
 

@@ -37,17 +37,17 @@ def _render_logo():
     dark_b64 = _load_logo_b64("Imp_Logo_Dark.png")
 
     if light_b64 and dark_b64:
-        # Use st.html — renders in iframe with full JS support
+        # Use st.html with JS for theme-aware logo switching
         st.html(
             f'<div style="text-align:center;margin:0;padding:0;">'
             f'<img id="logo-light" src="data:image/png;base64,{light_b64}" '
-            f'style="height:96px;object-fit:contain;" alt="IMPULATOR">'
+            f'style="max-width:100%;max-height:96px;object-fit:contain;display:block;margin:0 auto;" alt="IMPULATOR">'
             f'<img id="logo-dark" src="data:image/png;base64,{dark_b64}" '
-            f'style="height:96px;object-fit:contain;display:none;" alt="IMPULATOR">'
+            f'style="max-width:100%;max-height:96px;object-fit:contain;display:none;margin:0 auto;" alt="IMPULATOR">'
             f'</div>'
             f'<script>'
             f'function update(){{'
-            f'  var p=window.parent.document.querySelector("[data-testid=\\"stApp\\"]");'
+            f'  var p=document.querySelector("[data-testid=\\"stApp\\"]");'
             f'  if(!p)return;'
             f'  var bg=getComputedStyle(p).backgroundColor;'
             f'  var m=bg.match(/\\d+/g);'
@@ -57,7 +57,7 @@ def _render_logo():
             f'}}'
             f'update();setInterval(update,500);'
             f'</script>',
-            height=110,
+            unsafe_allow_javascript=True,
         )
     elif light_b64:
         st.markdown(

@@ -102,7 +102,6 @@ def embed_structure_viewer(
     y_col: Optional[str] = None,
     z_col: Optional[str] = None,
     name_col: Optional[str] = None,
-    height: int = 0
 ) -> None:
     """Embed the structure viewer component.
 
@@ -115,7 +114,6 @@ def embed_structure_viewer(
         y_col: Name of Y-axis column
         z_col: Name of Z-axis column (for 3D charts)
         name_col: Name of the molecule name/ID column
-        height: Height of the component (0 for minimal)
     """
     if not STRUCTURE_VIEWER_AVAILABLE:
         st.warning("Structure viewer component not available")
@@ -129,7 +127,11 @@ def embed_structure_viewer(
         name_col=name_col
     )
 
-    st.html(viewer_html, height=height)
+    # Use iframe-based rendering: the structure viewer needs window.parent.document
+    # to access Plotly charts in the Streamlit DOM and inject floating panels.
+    # st.html() runs in the main DOM (no iframe) which breaks the parent access pattern.
+    # Access the internal _html directly to avoid the deprecation warning banner.
+    st._main._html(viewer_html, height=0)
 
 
 def render_smiles_input(
