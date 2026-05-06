@@ -16,8 +16,9 @@
 7. [Efficiency Metrics Reference](#efficiency-metrics-reference)
 8. [Assay Interference Flags Reference](#assay-interference-flags-reference)
 9. [Red Flags & Decision Guide](#red-flags--decision-guide)
-10. [Glossary](#glossary)
-11. [References](#references)
+10. [Implementation](#implementation)
+11. [Glossary](#glossary)
+12. [References](#references)
 
 ---
 
@@ -947,6 +948,14 @@ Before advancing any compound, verify:
 
 8. RCSB PDB Search API v2: https://search.rcsb.org/index.html
 9. RCSB PDB GraphQL API: https://data.rcsb.org/graphql
+
+---
+
+## Implementation
+
+- Backend: `backend/modules/imp_scoring.py`
+- Frontend: `frontend/ui/pages/compound_detail.py`
+- Documentation: `IMP_Score.md`
 
 ---
 

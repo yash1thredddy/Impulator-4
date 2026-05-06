@@ -13,6 +13,23 @@ license: other
 
 A powerful Streamlit application for analyzing chemical compounds, calculating efficiency indices (SEI, BEI, etc.), and integrating data from ChEMBL and PDB.
 
+## What is IMPULATOR?
+
+IMPULATOR (IMPs Navigator) is a scientific web application for analyzing chemical compounds to identify **Invalid Metabolic Panaceas (IMPs)** — compounds that appear to have exceptional bioactivity but are actually assay artifacts.
+
+### Core Features
+
+1. **Compound Analysis** — Process compounds via SMILES/InChI input
+2. **Similarity Search** — Find similar compounds in ChEMBL
+3. **Efficiency Metrics** — Calculate SEI, BEI, NSEI, NBEI
+4. **IMP Scoring** — Multi-criteria quality assessment
+5. **IMP Classification** — Identify potential false positives
+6. **Assay Interference** — Detect PAINS, aggregation, redox issues
+7. **Batch Processing** — Process CSV files with multiple compounds
+8. **Visualization** — Interactive Plotly charts, 3D molecule viewer
+9. **Report Generation** — Comprehensive HTML reports with charts, exportable for sharing
+10. **Versions Tab** — View all structural siblings (same InChIKey) with config diff highlighting and navigation
+
 **Requirements:** Python 3.11+, Supabase Postgres database
 
 ## 🚀 Quick Start
@@ -31,8 +48,7 @@ export DATABASE_URL=postgresql://user:pass@host:5432/dbname
 
 ### Documentation
 *   **[Architecture](.claude/docs/architecture.md)**: System design and architecture overview.
-*   **[Testing Strategy](.claude/docs/testing-strategy.md)**: Test approach and patterns.
-*   **[Issues & Fixes](.claude/docs/issues.md)**: Known issues and solutions.
+*   **[IMP Score Methodology](IMP_Score.md)**: Multi-criteria scoring system for compound prioritization.
 
 ## 🧪 Key Features
 *   **Compound Analysis**: Automated retrieval of bioactivity data.
