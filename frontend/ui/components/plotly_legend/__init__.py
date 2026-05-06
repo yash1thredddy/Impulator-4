@@ -12,20 +12,26 @@ from typing import Optional, Any
 
 
 # ── HTML + JS component ─────────────────────────────────────────────
-# Renders a stats bar and attaches a plotly_restyle
+# Renders a stats bar inside an iframe and attaches a plotly_restyle
 # listener to the chart identified by fig.layout.meta in the parent.
+# Iframe rendering is required because st.html() runs DOMPurify with
+# SAFE_FOR_XML=true, which strips any <script> whose textContent matches
+# /<[/\w!]/g — the regression math here contains many such patterns
+# (e.g. `i<n`, `j<6`), so the script would be silently removed.
 _COMPONENT_HTML = r"""<!DOCTYPE html>
 <html><head>
 <style>
+  /* App is locked to light mode (see .streamlit/config.toml), so colors
+     are fixed — no media query / theme sync needed. */
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:"Source Sans Pro",sans-serif;background:transparent}
   .row{display:flex;gap:0;padding:0 4px}
   .m{flex:1}
-  .lb{font-size:.92rem;color:__LABEL__;letter-spacing:.01em}
-  .vl{font-size:1.45rem;font-weight:700;color:__VALUE__;line-height:1.3}
-  .eq{font-size:.82rem;color:__LABEL__;padding:2px 4px 0}
-  .eq b{color:__VALUE__;font-weight:600}
-  .ht{font-size:.65rem;color:__LABEL__;padding:2px 4px 0}
+  .lb{font-size:.92rem;color:#808495;letter-spacing:.01em}
+  .vl{font-size:1.45rem;font-weight:700;color:#0e1117;line-height:1.3}
+  .eq{font-size:.82rem;color:#808495;padding:2px 4px 0}
+  .eq b{color:#0e1117;font-weight:600}
+  .ht{font-size:.65rem;color:#808495;padding:2px 4px 0}
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jstat/1.9.4/jstat.min.js"
         onerror="this.onerror=null;var s=document.createElement('script');
@@ -124,7 +130,9 @@ _COMPONENT_HTML = r"""<!DOCTYPE html>
     if(!chart._fullData) return {xs:xs,ys:ys};
     for(var i=0;i<chart._fullData.length;i++){
       var t=chart._fullData[i];
-      if(t.showlegend===false&&t.mode==="lines") continue;
+      /* Skip any line trace (OLS trendlines + y=x / balance reference
+         lines). Marker scatter traces are the data we regress on. */
+      if(t.mode==="lines") continue;
       if(t.visible==="legendonly"||t.visible===false) continue;
       if(!t.x||!t.y) continue;
       for(var j=0;j<t.x.length;j++){
@@ -162,7 +170,7 @@ _COMPONENT_HTML = r"""<!DOCTYPE html>
     try{return el._fullLayout&&el._fullLayout.meta===META;}catch(e){return false;}
   }
   function findChart(){
-    var doc=document,i,j,pd;
+    var doc=window.parent.document,i,j,pd;
     /* Strategy 1: direct search in parent DOM */
     var divs=doc.querySelectorAll(".js-plotly-plot");
     for(i=0;i<divs.length;i++) if(_metaMatch(divs[i])) return divs[i];
@@ -241,19 +249,7 @@ def plotly_legend_monitor(
         x_col: X-axis column name (for equation display).
         y_col: Y-axis column name (for equation display).
     """
-    try:
-        is_dark = st.context.theme.base == "dark"
-    except Exception:
-        is_dark = False
-
-    if is_dark:
-        subs = {"__LABEL__": "#999", "__VALUE__": "#fafafa"}
-    else:
-        subs = {"__LABEL__": "#808495", "__VALUE__": "#0e1117"}
-
     html = _COMPONENT_HTML
-    for placeholder, value in subs.items():
-        html = html.replace(placeholder, value)
     html = html.replace("__CHART_META__", chart_meta)
     html = html.replace("__X_COL__", x_col)
     html = html.replace("__Y_COL__", y_col)
@@ -262,4 +258,7 @@ def plotly_legend_monitor(
         json.dumps(initial_stats) if initial_stats else "null",
     )
 
-    st.html(html, unsafe_allow_javascript=True)
+    # Render in an iframe via the internal _html (avoids the deprecation
+    # banner from streamlit.components.v1.html). DOMPurify in st.html() would
+    # strip this <script> because its textContent contains <\w patterns.
+    st._main._html(html, height=72)
