@@ -397,12 +397,12 @@ def _list_pagination(page_key: str, current_page: int, total_pages: int, pos: st
     _, c_first, c_prev, c_label, c_next, c_last, _ = st.columns([2, 1, 1, 2, 1, 1, 2])
     with c_first:
         if st.button("⟪ First", key=f"list_first_{pos}_{page_key}", disabled=current_page <= 1,
-                      use_container_width=True):
+                      width="stretch"):
             st.session_state[page_key] = 1
             st.rerun()
     with c_prev:
         if st.button("◁ Prev", key=f"list_prev_{pos}_{page_key}", disabled=current_page <= 1,
-                      use_container_width=True):
+                      width="stretch"):
             st.session_state[page_key] = current_page - 1
             st.rerun()
     c_label.markdown(
@@ -412,12 +412,12 @@ def _list_pagination(page_key: str, current_page: int, total_pages: int, pos: st
     )
     with c_next:
         if st.button("Next ▷", key=f"list_next_{pos}_{page_key}", disabled=current_page >= total_pages,
-                      use_container_width=True):
+                      width="stretch"):
             st.session_state[page_key] = current_page + 1
             st.rerun()
     with c_last:
         if st.button("Last ⟫", key=f"list_last_{pos}_{page_key}", disabled=current_page >= total_pages,
-                      use_container_width=True):
+                      width="stretch"):
             st.session_state[page_key] = total_pages
             st.rerun()
 
@@ -566,7 +566,7 @@ def render_compound_list(compounds: list, select_mode: bool = False) -> Optional
         else:
             st.markdown(card_html, unsafe_allow_html=True)
             button_key = f"lv_{global_idx}_{entry_id}" if entry_id else f"lv_{global_idx}"
-            if st.button("View Details", key=button_key, type="primary", use_container_width=True):
+            if st.button("View Details", key=button_key, type="primary", width="stretch"):
                 clicked_compound = {
                     'compound_name': compound_name,
                     'entry_id': entry_id,

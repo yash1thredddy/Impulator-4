@@ -1,0 +1,15 @@
+[theme]
+# Locked to light mode. Rationale:
+# - Scientific app conventions (journals, papers, ChemDraw, etc.) use
+#   white canvases — charts and molecular structures are designed for it.
+# - Primary audience is 50+ users, where dark mode actually causes more
+#   eye strain (age-related pupillary changes + halation around bright
+#   text on dark backgrounds). Light is the accessibility-friendly default.
+# - Eliminates an entire class of bugs from Streamlit theme detection
+#   (st.context.theme.type vs effective render, OS pref vs config pref).
+base = "light"
+
+# Bumped from the 16px default for accessibility — primary audience is
+# 50+ users. Body text, controls, captions, table cells, sidebar all
+# scale from this. Headings scale proportionally too.
+baseFontSize = 18

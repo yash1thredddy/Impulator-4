@@ -19,18 +19,11 @@ from frontend.ui.components.molecule_viewer import (
 
 
 def get_plotly_theme() -> dict:
-    """Return Plotly layout kwargs matching the current Streamlit theme."""
-    try:
-        is_dark = st.context.theme.base == "dark"
-    except Exception:
-        is_dark = False
+    """Return Plotly layout kwargs for the IMPULATOR theme.
 
-    if is_dark:
-        return {
-            "template": "plotly_dark",
-            "legend_bgcolor": "rgba(30,30,30,0.8)",
-            "legend_bordercolor": "rgba(255,255,255,0.15)",
-        }
+    The app is locked to light mode (see ``.streamlit/config.toml``),
+    so this returns a single fixed palette — no detection branching.
+    """
     return {
         "template": "plotly_white",
         "legend_bgcolor": "rgba(255,255,255,0.8)",
@@ -43,9 +36,15 @@ def apply_impulator_theme(fig: go.Figure) -> go.Figure:
 
     Ensures consistent hover behavior and styling across all charts.
     Call this on every figure before rendering with st.plotly_chart.
+
+    Font sizes are bumped over Plotly's 12px default for accessibility
+    (primary audience is 50+ users). ``layout.font`` covers axis labels,
+    tick labels, legend entries, and annotations. Chart titles have
+    their own ``title.font`` and are intentionally left untouched.
     """
     fig.update_layout(
-        hoverlabel=dict(namelength=-1),
+        hoverlabel=dict(namelength=-1, font=dict(size=14)),
+        font=dict(size=14),
     )
     return fig
 

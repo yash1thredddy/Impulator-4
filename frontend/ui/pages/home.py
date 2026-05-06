@@ -95,7 +95,14 @@ def render_home_page() -> None:
         padding: 0.65rem 1.5rem !important;
         border-radius: 0.5rem !important;
         color: white !important;
+        white-space: nowrap !important;
         transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    /* Streamlit wraps the label in a <p> inside the button — that <p>
+       has its own white-space rule, so we override it too. */
+    .stElementContainer:has(#new-analysis-marker) + .stElementContainer button[kind="primary"] p {
+        white-space: nowrap !important;
+        margin: 0 !important;
     }
     .stElementContainer:has(#new-analysis-marker) + .stElementContainer button[kind="primary"]:hover {
         transform: translateY(-1px);
@@ -149,7 +156,9 @@ def render_home_page() -> None:
     with btn_col:
         # Hidden marker so CSS can target only this button
         st.markdown('<span id="new-analysis-marker"></span>', unsafe_allow_html=True)
-        if st.button("+ New Analysis", type="primary", width='stretch'):
+        # width="content" sizes the button to its label so it doesn't
+        # wrap inside the narrow header column (1/6 of page width).
+        if st.button("+ New Analysis", type="primary", width="content"):
             SessionState.navigate_to_analyze()
             st.rerun()
     with title_col:
@@ -414,7 +423,9 @@ def _render_empty_state() -> None:
     _, center, _ = st.columns([2, 1, 2])
     with center:
         st.markdown('<span id="new-analysis-marker"></span>', unsafe_allow_html=True)
-        if st.button("+ New Analysis", type="primary", use_container_width=True):
+        # width="content" lets the button size to its label so it doesn't
+        # wrap inside the narrow centre column (1/5 of page width).
+        if st.button("+ New Analysis", type="primary", width="content"):
             SessionState.navigate_to_analyze()
             st.rerun()
 
