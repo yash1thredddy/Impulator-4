@@ -1548,7 +1548,12 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
                 template=theme["template"],
                 height=460,
                 margin=dict(t=10, b=40, l=10, r=10),
-                xaxis=dict(title="SEI (Surface Efficiency)", range=[0, max_val], scaleanchor="y", scaleratio=1),
+                # 1:1 axis scaling intentionally dropped here — keeping it
+                # forced the chart into a small square. The diagonal is
+                # still y=x (balance line); the "angle" in the caption
+                # refers to the chemical angle atan2(BEI, SEI) in data
+                # space, not the visual pixel angle.
+                xaxis=dict(title="SEI (Surface Efficiency)", range=[0, max_val]),
                 yaxis=dict(title="BEI (Binding Efficiency)", range=[0, max_val]),
                 legend=dict(
                     orientation="v", yanchor="top", y=0.98, xanchor="left", x=1.02,
@@ -2631,15 +2636,15 @@ def _render_visualizations_tab(data: dict[str, Any]) -> None:
         st.warning("No data available for visualization")
         return
 
-    # Plot type selector — Activity Distribution moved to Activity tab
+    # Plot type selector — Activity Distribution moved to Activity tab.
+    # label_visibility="collapsed" removes the label slot entirely;
+    # "hidden" would leave it as invisible whitespace above the radio.
     plot_type = st.radio(
         "Select Plot",
         ["Efficiency Scatter", "Efficiency by Compound", "Custom Plot"],
         horizontal=True,
-        label_visibility="hidden"
+        label_visibility="collapsed",
     )
-
-    st.markdown("---")
 
     if plot_type == "Efficiency Scatter":
         _plot_efficiency_scatter(df)
@@ -2711,7 +2716,7 @@ def _plot_efficiency_scatter(df: pd.DataFrame) -> None:
     # All columns for color (categorical first, then numeric)
     all_color_cols = categorical_cols + numeric_cols
 
-    # Row 1: Plot choice and Color by
+    # Row 1: data selection (Plot / Color / Size) + colour-scale options.
     row1 = st.columns([1, 1, 1, 1])
 
     with row1[0]:
@@ -2723,30 +2728,41 @@ def _plot_efficiency_scatter(df: pd.DataFrame) -> None:
     with row1[2]:
         size_by = st.selectbox("Size by", ["None"] + numeric_cols, key="scatter_size")
 
-    with row1[3]:
-        show_trendline = st.checkbox("Trendline", value=False, key="scatter_trendline")
-
-    # Row 2: Additional options (show when relevant)
-    row2 = st.columns([1, 1, 1, 1])
-
-    # Check if color_by is numeric for gradient options
+    # Numeric colour → gradient controls live where they're contextually
+    # relevant (right of "Color by"). When colour isn't numeric, this slot
+    # stays empty rather than pushing other controls around.
     is_numeric_color = color_by != "None" and color_by in numeric_cols
 
-    with row2[0]:
+    with row1[3]:
         if is_numeric_color:
             color_scale = st.selectbox(
                 "Color Scale",
                 ["Viridis", "Plasma", "Inferno", "Turbo", "Blues", "Reds", "RdBu", "Spectral"],
-                key="scatter_colorscale"
+                key="scatter_colorscale",
             )
-        else:
-            color_scale = "Viridis"
-
-    with row2[1]:
-        if is_numeric_color:
             reverse_scale = st.checkbox("Reverse Scale", value=False, key="scatter_reverse")
         else:
+            color_scale = "Viridis"
             reverse_scale = False
+
+    # Row 2: analytical overlays + visual tweaks.
+    row2 = st.columns([1, 1, 1, 1])
+
+    with row2[0]:
+        show_trendline = st.checkbox("Trendline", value=False, key="scatter_trendline")
+
+    with row2[1]:
+        if plot_choice == "SEI vs BEI":
+            show_balance = st.checkbox(
+                "Balance line",
+                value=False,
+                key="scatter_balance",
+                help="Diagonal where BEI = SEI, i.e. 10·PSA/MW = 1. "
+                     "Above the line: polar-favored (10·PSA/MW > 1). "
+                     "Below: lipophilic-favored.",
+            )
+        else:
+            show_balance = False
 
     with row2[2]:
         opacity = st.slider("Opacity", 0.3, 1.0, 0.7, key="scatter_opacity")
@@ -2815,13 +2831,29 @@ def _plot_efficiency_scatter(df: pd.DataFrame) -> None:
     if size_by == "None":
         fig.update_traces(marker=dict(size=point_size))
 
+    # Balance reference line (BEI = SEI ⇔ 10·PSA/MW = 1).
+    # Spans the union of x/y ranges so the diagonal is visible even when
+    # all points sit on one side of the balance.
+    if show_balance:
+        lo = float(min(plot_df[x_col].min(), plot_df[y_col].min()))
+        hi = float(max(plot_df[x_col].max(), plot_df[y_col].max()))
+        pad = (hi - lo) * 0.05 if hi > lo else 1.0
+        fig.add_trace(go.Scatter(
+            x=[lo - pad, hi + pad], y=[lo - pad, hi + pad],
+            mode="lines",
+            line=dict(color="#8a8a8a", width=1.5, dash="dash"),
+            name="Balance: 10·PSA/MW = 1",
+            hoverinfo="skip",
+            showlegend=True,
+        ))
+
     # Layout with meta for legend monitor identification
     theme = get_plotly_theme()
     fig.update_layout(
         template=theme["template"],
         height=520,
         meta="eff_scatter",
-        showlegend=color_by != "None" and not is_numeric_color,
+        showlegend=(color_by != "None" and not is_numeric_color) or show_balance,
         legend=dict(
             orientation="v",
             yanchor="top",
@@ -2943,8 +2975,16 @@ def _plot_custom(df: pd.DataFrame) -> None:
     with ctrl_row2[0]:
         if plot_type == "Scatter":
             show_trendline = st.checkbox("Trendline", value=False, key="custom_trendline")
+            show_identity = st.checkbox(
+                "y = x reference",
+                value=False,
+                key="custom_identity",
+                help="Diagonal y = x reference line. "
+                     "Most useful when X and Y share the same units/scale.",
+            )
         else:
             show_trendline = False
+            show_identity = False
 
     with ctrl_row2[1]:
         if plot_type == "Scatter":
@@ -3011,6 +3051,21 @@ def _plot_custom(df: pd.DataFrame) -> None:
             if size_by == "None":
                 fig.update_traces(marker=dict(size=point_size))
 
+            # y = x reference line. Spans the union of x/y ranges so it
+            # remains visible even when X and Y are on different scales.
+            if show_identity and y_axis:
+                lo = float(min(plot_df[x_axis].min(), plot_df[y_axis].min()))
+                hi = float(max(plot_df[x_axis].max(), plot_df[y_axis].max()))
+                pad = (hi - lo) * 0.05 if hi > lo else 1.0
+                fig.add_trace(go.Scatter(
+                    x=[lo - pad, hi + pad], y=[lo - pad, hi + pad],
+                    mode="lines",
+                    line=dict(color="#8a8a8a", width=1.5, dash="dash"),
+                    name="y = x",
+                    hoverinfo="skip",
+                    showlegend=True,
+                ))
+
         elif plot_type == "Box":
             # Build customdata for box plots too
             box_customdata = None
@@ -3058,7 +3113,7 @@ def _plot_custom(df: pd.DataFrame) -> None:
             template=theme["template"],
             height=550,
             meta="custom_scatter",
-            showlegend=color_by != "None",
+            showlegend=(color_by != "None") or show_identity,
             legend=dict(
                 orientation="v",
                 yanchor="top",
@@ -5459,6 +5514,22 @@ def _render_report_pdb_evidence(df: pd.DataFrame, data: dict[str, Any]) -> None:
             )
             st.markdown(f"**High-Quality PDB Structures (<2.0Å):** {pdb_links}")
 
+        # List medium-quality PDB codes as clickable links
+        med_q_pdb_ids = []
+        if pdb_summary_df is not None and not pdb_summary_df.empty and 'PDB_ID' in pdb_summary_df.columns:
+            if 'Quality' in pdb_summary_df.columns:
+                med_q_pdb_ids = pdb_summary_df[pdb_summary_df['Quality'] == '**']['PDB_ID'].dropna().unique().tolist()
+            elif 'Resolution' in pdb_summary_df.columns:
+                res_col = pd.to_numeric(pdb_summary_df['Resolution'], errors='coerce')
+                med_q_pdb_ids = pdb_summary_df[(res_col >= 2.0) & (res_col <= 3.0)]['PDB_ID'].dropna().unique().tolist()
+
+        if med_q_pdb_ids:
+            med_pdb_links = ", ".join(
+                f"[{pid}](https://www.rcsb.org/structure/{pid})"
+                for pid in sorted(med_q_pdb_ids)
+            )
+            st.markdown(f"**Medium-Resolution PDB Structures (2-3Å):** {med_pdb_links}")
+
         # Resolution Quality info box below
         st.markdown("""
         <div style="background-color: #e3f2fd; padding: 15px; border-radius: 8px; border-left: 4px solid #1976d2; margin-top: 15px; color: #0d47a1;">
@@ -6159,6 +6230,24 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
             )
             high_q_pdb_links_html = f'<p><strong>High-Quality PDB Structures (&lt;2.0Å):</strong> {links}</p>'
 
+    # Extract medium-quality PDB codes for clickable links
+    med_q_pdb_links_html = ""
+    if pdb_summary_df_html is not None and not pdb_summary_df_html.empty and 'PDB_ID' in pdb_summary_df_html.columns:
+        if 'Quality' in pdb_summary_df_html.columns:
+            mq_ids = pdb_summary_df_html[pdb_summary_df_html['Quality'] == '**']['PDB_ID'].dropna().unique().tolist()
+        elif 'Resolution' in pdb_summary_df_html.columns:
+            res_col = pd.to_numeric(pdb_summary_df_html['Resolution'], errors='coerce')
+            mq_ids = pdb_summary_df_html[(res_col >= 2.0) & (res_col <= 3.0)]['PDB_ID'].dropna().unique().tolist()
+        else:
+            mq_ids = []
+        if mq_ids:
+            med_links = ", ".join(
+                f'<a href="https://www.rcsb.org/structure/{html.escape(str(pid))}" target="_blank">'
+                f'{html.escape(str(pid))}</a>'
+                for pid in sorted(mq_ids)
+            )
+            med_q_pdb_links_html = f'<p><strong>Medium-Resolution PDB Structures (2-3Å):</strong> {med_links}</p>'
+
     # Classification - ClassyFire and NPClassifier
     classyfire_html = ""
     class_cols = ['Kingdom', 'Superclass', 'Class', 'Subclass']
@@ -6503,6 +6592,7 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
     </div>
 
     {high_q_pdb_links_html}
+    {med_q_pdb_links_html}
 
     <!-- Resolution Quality Info -->
     <div class="info">
