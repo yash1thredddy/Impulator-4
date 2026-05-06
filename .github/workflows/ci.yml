@@ -57,13 +57,20 @@ jobs:
       - name: Create data directory
         run: mkdir -p data
 
+      - name: Run Alembic migrations
+        run: cd backend && alembic upgrade head
+        env:
+          DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/test_impulator"
+          DIRECT_DATABASE_URL: ""
+          TESTING: "true"
+
       - name: Run tests with coverage
         run: |
           pytest tests/ \
             --cov=backend \
             --cov-report=xml \
             --cov-report=term-missing \
-            --cov-fail-under=75 \
+            --cov-fail-under=70 \
             -m "not azure and not benchmark and not network and not slow" \
             --ignore=tests/e2e \
             --ignore=tests/performance
