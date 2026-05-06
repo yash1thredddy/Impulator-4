@@ -60,11 +60,19 @@ uploads/
 .superpowers/
 skills-lock.json
 
-# Documentation - exclude all markdown except specific docs
+# Code intelligence tool runtime state (large, local-only)
+# .serena/ — Serena LSP cache (~10MB per project)
+# graphify-out/ — graphify generated graph + HTML report + wiki
+# .graphifyignore — local graphify corpus filter (personal tool config)
+.serena/
+graphify-out/
+.graphifyignore
+
+# Documentation - exclude all markdown except user-facing / domain-specific docs
+# AI dev files (CLAUDE.md, CHANGELOG.md, project-setup.md, etc.) stay local-only.
 *.md
 !README.md
 !IMP_Score.md
-!IMP_SCORING_METHODOLOGY.md
 
 # Scratch/experimental files
 IMP_Top_50 - Copy.csv
