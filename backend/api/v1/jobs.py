@@ -18,7 +18,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, Header
-from fastapi.responses import JSONResponse
+from fastapi.responses import ORJSONResponse
 from sqlalchemy.orm import Session
 
 from backend.api.deps import DbDep, SessionDep, JobRateLimit, BatchRateLimit
@@ -172,7 +172,7 @@ async def create_job(
         )
 
     if isinstance(result, DuplicateFoundResponse):
-        return JSONResponse(content=result.model_dump(mode="json"), status_code=200)
+        return ORJSONResponse(content=result.model_dump(mode="json"), status_code=200)
 
     # Trigger scheduler to start processing
     scheduler.trigger()
@@ -204,7 +204,7 @@ async def resolve_duplicate(
         raise HTTPException(status_code=422, detail=str(e))
 
     if isinstance(result, SkipResponse):
-        return JSONResponse(content=result.model_dump(mode="json"), status_code=200)
+        return ORJSONResponse(content=result.model_dump(mode="json"), status_code=200)
     return result
 
 
