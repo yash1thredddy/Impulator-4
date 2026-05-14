@@ -6,6 +6,7 @@ import gzip
 import os
 import re
 import logging
+import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
@@ -498,12 +499,17 @@ def download_result_from_azure_by_entry_id(entry_id: str, local_path: str) -> bo
         return False
 
     try:
-        # Security: Validate path to prevent path traversal attacks
+        # Security: Validate path to prevent path traversal attacks.
+        # Note: tempfile.gettempdir() returns the platform's real temp dir
+        # (e.g. /var/folders/.../T on macOS, /tmp on Linux, C:\Users\...\Temp
+        # on Windows). Hardcoding "/tmp" wrongly rejected legitimate macOS
+        # temp paths created by tempfile.TemporaryDirectory() (see Phase 21
+        # backfill script which uses the OS temp dir for transient ZIPs).
         resolved_path = Path(local_path).resolve()
         allowed_dirs = [
             Path(settings.RESULTS_DIR).resolve(),
             Path(settings.DATA_DIR).resolve(),
-            Path("/tmp").resolve() if not os.name == 'nt' else Path(os.environ.get('TEMP', 'C:\\Temp')).resolve(),
+            Path(tempfile.gettempdir()).resolve(),
         ]
 
         # Use Path.is_relative_to() for proper containment check (not string startswith)
