@@ -162,11 +162,6 @@ COLOR_SCALES = [
     'Spectral',
 ]
 
-# IMP Score classifications
-IMP_SCORE_CLASSIFICATIONS = {
-    'Exceptional IMP': (0.9, 1.0),
-    'Strong IMP': (0.7, 0.9),
-    'Moderate IMP': (0.5, 0.7),
-    'Weak IMP': (0.3, 0.5),
-    'Not IMP': (0.0, 0.3),
-}
+# IMP Score classifications dict deleted per Phase 21 (banded qualitative
+# labels replaced by integer 0-100 score; no remaining consumers in the
+# frontend tree). See backend.modules.imp_presentation for the new contract.

@@ -16,8 +16,9 @@ import numpy as np
 class TestClassifyIMPCandidates:
     """Tests for classify_imp_candidates function."""
 
-    def test_classify_with_imp_score_high_confidence(self):
-        """Test classification with high IMP score gives High confidence."""
+    def test_classify_with_imp_score_marks_is_imp_candidate(self):
+        """Outlier_Count >= 2 marks Is_IMP_Candidate = True (Plan 21-04: qualitative
+        IMP_Confidence column no longer emitted)."""
         from backend.modules.imp_classifier import classify_imp_candidates
 
         df = pd.DataFrame({
@@ -29,40 +30,12 @@ class TestClassifyIMPCandidates:
         result = classify_imp_candidates(df)
 
         assert result.loc[0, 'Is_IMP_Candidate']
-        assert result.loc[0, 'IMP_Confidence'] == 'High'
         assert not result.loc[1, 'Is_IMP_Candidate']
-        assert result.loc[1, 'IMP_Confidence'] == 'Not IMP'
+        # IMP_Confidence column should NOT be produced (Plan 21-04)
+        assert 'IMP_Confidence' not in result.columns
 
-    def test_classify_with_imp_score_medium_confidence(self):
-        """Test classification with medium IMP score gives Medium confidence."""
-        from backend.modules.imp_classifier import classify_imp_candidates
-
-        df = pd.DataFrame({
-            'Outlier_Count': [2],
-            'IMP_Final_Score': [0.6]
-        })
-
-        result = classify_imp_candidates(df)
-
-        assert result.loc[0, 'Is_IMP_Candidate']
-        assert result.loc[0, 'IMP_Confidence'] == 'Medium'
-
-    def test_classify_with_imp_score_low_confidence(self):
-        """Test classification with low IMP score gives Low confidence."""
-        from backend.modules.imp_classifier import classify_imp_candidates
-
-        df = pd.DataFrame({
-            'Outlier_Count': [2],
-            'IMP_Final_Score': [0.4]
-        })
-
-        result = classify_imp_candidates(df)
-
-        assert result.loc[0, 'Is_IMP_Candidate']
-        assert result.loc[0, 'IMP_Confidence'] == 'Low'
-
-    def test_classify_without_imp_score_simple_confidence(self):
-        """Test simple confidence assignment when IMP score not available."""
+    def test_classify_without_imp_score_still_only_emits_is_imp_candidate(self):
+        """use_imp_score=False is API-stable but no longer affects output."""
         from backend.modules.imp_classifier import classify_imp_candidates
 
         df = pd.DataFrame({
@@ -71,10 +44,11 @@ class TestClassifyIMPCandidates:
 
         result = classify_imp_candidates(df, use_imp_score=False)
 
-        assert result.loc[0, 'IMP_Confidence'] == 'High'  # 4 outliers
-        assert result.loc[1, 'IMP_Confidence'] == 'Medium'  # 3 outliers
-        assert result.loc[2, 'IMP_Confidence'] == 'Low'  # 2 outliers
-        assert result.loc[3, 'IMP_Confidence'] == 'Not IMP'  # 1 outlier
+        assert result.loc[0, 'Is_IMP_Candidate']
+        assert result.loc[1, 'Is_IMP_Candidate']
+        assert result.loc[2, 'Is_IMP_Candidate']
+        assert not result.loc[3, 'Is_IMP_Candidate']
+        assert 'IMP_Confidence' not in result.columns
 
     def test_classify_custom_min_outlier_count(self):
         """Test classification with custom minimum outlier count."""
@@ -104,7 +78,8 @@ class TestClassifyIMPCandidates:
             classify_imp_candidates(df)
 
     def test_classify_with_nan_imp_score(self):
-        """Test classification handles NaN IMP score."""
+        """Test classification handles NaN IMP score gracefully (Plan 21-04:
+        IMP_Final_Score column is unused; only Outlier_Count drives output)."""
         from backend.modules.imp_classifier import classify_imp_candidates
 
         df = pd.DataFrame({
@@ -115,7 +90,6 @@ class TestClassifyIMPCandidates:
         result = classify_imp_candidates(df)
 
         assert result.loc[0, 'Is_IMP_Candidate']
-        assert result.loc[0, 'IMP_Confidence'] == 'Unknown'
 
     def test_classify_empty_dataframe(self):
         """Test classification with empty DataFrame."""
@@ -130,7 +104,6 @@ class TestClassifyIMPCandidates:
 
         assert len(result) == 0
         assert 'Is_IMP_Candidate' in result.columns
-        assert 'IMP_Confidence' in result.columns
 
 
 class TestGetIMPSummary:
@@ -404,23 +377,6 @@ class TestGenerateIMPReport:
         assert "IMP candidates identified: 0" in report
 
 
-class TestConfidenceAssignment:
-    """Tests for internal confidence assignment functions."""
-
-    def test_assign_confidence_imp_score_boundary_cases(self):
-        """Test IMP score confidence at exact boundaries."""
-        from backend.modules.imp_classifier import _assign_confidence_imp_score
-
-        # Test boundaries
-        assert _assign_confidence_imp_score(True, 0.7) == 'Medium'  # Exactly 0.7
-        assert _assign_confidence_imp_score(True, 0.71) == 'High'  # Just above
-        assert _assign_confidence_imp_score(True, 0.5) == 'Low'  # Exactly 0.5
-        assert _assign_confidence_imp_score(True, 0.51) == 'Medium'  # Just above
-
-    def test_assign_confidence_simple_boundary_cases(self):
-        """Test simple confidence at exact boundaries."""
-        from backend.modules.imp_classifier import _assign_confidence_simple
-
-        assert _assign_confidence_simple(True, 4) == 'High'
-        assert _assign_confidence_simple(True, 3) == 'Medium'
-        assert _assign_confidence_simple(True, 2) == 'Low'
+# Plan 21-04: TestConfidenceAssignment removed — _assign_confidence_imp_score and
+# _assign_confidence_simple helpers deleted; qualitative IMP_Confidence column
+# no longer emitted by classify_imp_candidates.

@@ -433,9 +433,14 @@ class TestGoldenFixturesAndIMPScoring:
         match = re.search(r"(\d+) test", result.stdout)
         assert match, f"Could not parse test count from: {result.stdout}"
         count = int(match.group(1))
-        assert count >= 80, (
+        # Plan 21-04 deleted ~20 qualitative-label producer tests
+        # (interpret_imp_score/_assign_confidence_* helpers were removed),
+        # bringing the baseline from 86 down to ~66. Threshold lowered to 60
+        # to keep the gate alive as a regression guard at the new realistic
+        # baseline; raise this if substantial new IMP-scoring tests are added.
+        assert count >= 60, (
             f"test_imp_scoring.py only collects {count} tests — "
-            "expected at least 80 (plan reports 86)"
+            "expected at least 60 (post-21-04 baseline ~66)"
         )
 
     def test_imp_scoring_module_importable(self):

@@ -22,10 +22,8 @@ from backend.modules.imp_scoring import (
     calculate_angle_score,
     calculate_distance_to_best_score,
     calculate_interference_score,
-    interpret_imp_score,
     calculate_imp_score,
     calculate_imp_score_phase1,
-    add_imp_score_interpretation,
     calculate_pdb_evidence_score,
     create_detailed_pdb_summary,
     get_imp_score_breakdown,
@@ -247,46 +245,6 @@ class TestDistanceScore:
             calculate_distance_to_best_score(df)
 
         assert "not found in DataFrame" in str(excinfo.value)
-
-
-class TestInterpretScore:
-    """Tests for interpret_imp_score function."""
-
-    def test_exceptional_imp(self):
-        """Test exceptional IMP classification (0.9-1.0)."""
-        result = interpret_imp_score(0.95)
-        assert result['classification'] == 'Exceptional IMP'
-        assert result['priority'] == 1
-
-    def test_strong_imp(self):
-        """Test strong IMP classification (0.7-0.9)."""
-        result = interpret_imp_score(0.8)
-        assert result['classification'] == 'Strong IMP'
-        assert result['priority'] == 2
-
-    def test_moderate_imp(self):
-        """Test moderate IMP classification (0.5-0.7)."""
-        result = interpret_imp_score(0.6)
-        assert result['classification'] == 'Moderate IMP'
-        assert result['priority'] == 3
-
-    def test_weak_imp(self):
-        """Test weak IMP classification (0.3-0.5)."""
-        result = interpret_imp_score(0.4)
-        assert result['classification'] == 'Weak IMP'
-        assert result['priority'] == 4
-
-    def test_not_imp(self):
-        """Test not IMP classification (<0.3)."""
-        result = interpret_imp_score(0.2)
-        assert result['classification'] == 'Not IMP'
-        assert result['priority'] is None
-
-    def test_nan_score(self):
-        """Test handling of NaN score."""
-        result = interpret_imp_score(np.nan)
-        assert result['classification'] == 'Invalid'
-        assert result['priority'] is None
 
 
 class TestIMPScoreNewWeights:
@@ -720,77 +678,6 @@ class TestCalculateImpScoreMissingColumns:
             calculate_imp_score_phase1(df)
 
 
-class TestAddImpScoreInterpretation:
-    """Tests for add_imp_score_interpretation."""
-
-    def test_adds_classification_column(self):
-        from backend.modules.imp_scoring import add_imp_score_interpretation
-        df = pd.DataFrame({'IMP_Final_Score': [0.95, 0.75, 0.55, 0.35, 0.15]})
-        result = add_imp_score_interpretation(df)
-        assert 'IMP_Classification' in result.columns
-        assert 'IMP_Priority' in result.columns
-        assert result['IMP_Classification'].iloc[0] == 'Exceptional IMP'
-        assert result['IMP_Classification'].iloc[4] == 'Not IMP'
-
-    def test_missing_score_raises(self):
-        from backend.modules.imp_scoring import add_imp_score_interpretation
-        df = pd.DataFrame({'x': [1]})
-        with pytest.raises(ValueError, match="IMP_Final_Score column not found"):
-            add_imp_score_interpretation(df)
-
-    def test_nan_scores_classified_invalid(self):
-        from backend.modules.imp_scoring import add_imp_score_interpretation
-        df = pd.DataFrame({'IMP_Final_Score': [np.nan]})
-        result = add_imp_score_interpretation(df)
-        assert result['IMP_Classification'].iloc[0] == 'Invalid'
-
-
-class TestGetImpScoreSummary:
-    """Tests for get_imp_score_summary."""
-
-    def test_no_scores_returns_error(self):
-        from backend.modules.imp_scoring import get_imp_score_summary
-        df = pd.DataFrame({'x': [1]})
-        summary = get_imp_score_summary(df)
-        assert 'error' in summary
-
-    def test_basic_summary(self):
-        from backend.modules.imp_scoring import get_imp_score_summary
-        df = pd.DataFrame({'IMP_Final_Score': [0.9, 0.7, 0.5, 0.3, 0.1]})
-        summary = get_imp_score_summary(df)
-        assert summary['total_compounds'] == 5
-        assert summary['scored_compounds'] == 5
-        assert summary['mean_score'] == pytest.approx(0.5)
-        assert summary['min_score'] == pytest.approx(0.1)
-        assert summary['max_score'] == pytest.approx(0.9)
-
-    def test_with_classifications(self):
-        from backend.modules.imp_scoring import get_imp_score_summary
-        df = pd.DataFrame({
-            'IMP_Final_Score': [0.95, 0.75, 0.55],
-            'IMP_Classification': ['Exceptional IMP', 'Strong IMP', 'Moderate IMP'],
-        })
-        summary = get_imp_score_summary(df)
-        assert summary['exceptional_imps'] == 1
-        assert summary['strong_imps'] == 1
-        assert summary['moderate_imps'] == 1
-
-    def test_with_priorities(self):
-        from backend.modules.imp_scoring import get_imp_score_summary
-        df = pd.DataFrame({
-            'IMP_Final_Score': [0.95, 0.75],
-            'IMP_Priority': [1, 2],
-        })
-        summary = get_imp_score_summary(df)
-        assert 'priority_counts' in summary
-
-    def test_empty_scores(self):
-        from backend.modules.imp_scoring import get_imp_score_summary
-        df = pd.DataFrame({'IMP_Final_Score': pd.Series([], dtype=float)})
-        summary = get_imp_score_summary(df)
-        assert summary['scored_compounds'] == 0
-
-
 class TestCreatePdbSummary:
     """Tests for create_pdb_summary (pure DataFrame operation)."""
 
@@ -849,7 +736,6 @@ class TestGoldenFixtures:
         """All 10 golden compounds produce expected scores to 4dp when run as full cohort."""
         df = self._build_golden_df(golden_compounds)
         result = await calculate_imp_score(mock_client, df, use_pdb=False)
-        result = add_imp_score_interpretation(result)
 
         numeric_keys = [
             "Efficiency_Score", "Angle_Score", "Distance_Score",
@@ -866,20 +752,8 @@ class TestGoldenFixtures:
                     f"Compound {i} ({compound['name']}): {key} expected {exp_val}, got {act_val}"
                 )
 
-    async def test_golden_classifications_match(self, golden_compounds, mock_client):
-        """IMP_Classification strings match expected for all 10 compounds."""
-        df = self._build_golden_df(golden_compounds)
-        result = await calculate_imp_score(mock_client, df, use_pdb=False)
-        result = add_imp_score_interpretation(result)
-
-        valid_tiers = {"Exceptional IMP", "Strong IMP", "Moderate IMP", "Weak IMP", "Not IMP"}
-        for i, compound in enumerate(golden_compounds):
-            actual = result["IMP_Classification"].iloc[i]
-            expected = compound["expected"]["IMP_Classification"]
-            assert actual == expected, (
-                f"Compound {i} ({compound['name']}): classification expected '{expected}', got '{actual}'"
-            )
-            assert actual in valid_tiers
+    # Plan 21-04: test_golden_classifications_match removed — qualitative
+    # IMP_Classification column no longer emitted by the scoring pipeline.
 
     async def test_qed_zero_multiplier_floor(self, golden_compounds, mock_client):
         """Compound with QED=0 has QED_Multiplier == 0.75."""
@@ -1089,7 +963,6 @@ class TestGetImpScoreBreakdown:
             "PDB_Contribution": 0.025,
             "IMP_Base_Score": 0.71, "QED": 0.8, "QED_Multiplier": 0.95,
             "QED_Impact": -0.0355, "IMP_Final_Score": 0.6745,
-            "IMP_Classification": "Moderate IMP", "IMP_Priority": 3,
             "PDB_Num_Structures": 3, "PDB_High_Quality": 2,
             "PDB_Medium_Quality": 1, "PDB_Poor_Quality": 0,
             "PDB_IDs": "1ABC,2DEF,3GHI", "PDB_Best_Resolution": 1.5,
@@ -1169,30 +1042,8 @@ class TestEdgeCases:
         result = await calculate_imp_score(mock_client, df, use_pdb=False)
         assert len(result) == 5
 
-    def test_boundary_score_0_3(self):
-        """Score 0.3 -> Weak IMP, 0.2999 -> Not IMP."""
-        assert interpret_imp_score(0.3)["classification"] == "Weak IMP"
-        assert interpret_imp_score(0.2999)["classification"] == "Not IMP"
-
-    def test_boundary_score_0_5(self):
-        """Score 0.5 -> Moderate IMP, 0.4999 -> Weak IMP."""
-        assert interpret_imp_score(0.5)["classification"] == "Moderate IMP"
-        assert interpret_imp_score(0.4999)["classification"] == "Weak IMP"
-
-    def test_boundary_score_0_7(self):
-        """Score 0.7 -> Strong IMP, 0.6999 -> Moderate IMP."""
-        assert interpret_imp_score(0.7)["classification"] == "Strong IMP"
-        assert interpret_imp_score(0.6999)["classification"] == "Moderate IMP"
-
-    def test_boundary_score_0_9(self):
-        """Score 0.9 -> Exceptional IMP, 0.8999 -> Strong IMP."""
-        assert interpret_imp_score(0.9)["classification"] == "Exceptional IMP"
-        assert interpret_imp_score(0.8999)["classification"] == "Strong IMP"
-
-    def test_nan_score_interpretation(self):
-        """NaN score -> Invalid classification."""
-        result = interpret_imp_score(float("nan"))
-        assert result["classification"] == "Invalid"
+    # Plan 21-04: boundary-score interpretation tests removed —
+    # interpret_imp_score function deleted; qualitative labels no longer produced.
 
     async def test_negative_modulus(self, mock_client):
         """Negative Modulus_SEI_BEI does not crash."""

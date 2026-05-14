@@ -319,7 +319,6 @@ class TestPendingUploadFlow:
             f"{_MOD}._add_assay_interference_flags_sync": lambda df: df,
             f"{_MOD}._calculate_advanced_metrics_sync": lambda df: df,
             f"{_MOD}.calculate_imp_score": AsyncMock(side_effect=lambda c, df, **kw: df),
-            f"{_MOD}.add_imp_score_interpretation": lambda df: df,
             f"{_MOD}.classify_imp_candidates": lambda df, *a, **kw: df,
             f"{_MOD}._add_chemical_classification_async": AsyncMock(side_effect=lambda c, df: df),
             f"{_MOD}._build_all_similar_df_async": AsyncMock(return_value=pd.DataFrame()),

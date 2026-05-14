@@ -12,6 +12,8 @@ from typing import Any, Optional
 
 import streamlit as st
 
+from backend.modules.imp_presentation import format_imp_score
+
 
 logger = logging.getLogger(__name__)
 
@@ -19,35 +21,16 @@ logger = logging.getLogger(__name__)
 try:
     from rdkit import Chem
     from rdkit.Chem import Draw
+
     RDKIT_AVAILABLE = True
 except ImportError:
     RDKIT_AVAILABLE = False
     logger.warning("RDKit not available - 2D structure rendering disabled")
 
 
-def _imp_score_badge_css(score: float | None) -> str:
-    """Return a CSS border-left style string for IMP score color coding.
-
-    Args:
-        score: IMP score (0.0-1.0) or None.
-
-    Returns:
-        CSS style string for border-left, or empty string if no score.
-    """
-    if score is None:
-        return ""
-    if score >= 0.9:
-        return "border-left: 4px solid #4CAF50;"   # Green - Exceptional
-    elif score >= 0.7:
-        return "border-left: 4px solid #2196F3;"   # Blue - Strong
-    elif score >= 0.5:
-        return "border-left: 4px solid #FF9800;"   # Orange - Moderate
-    elif score >= 0.3:
-        return "border-left: 4px solid #9E9E9E;"   # Gray - Weak
-    return ""
-
-
-def render_compound_card(compound: dict[str, Any], key_prefix: str = "", select_mode: bool = False) -> bool:
+def render_compound_card(
+    compound: dict[str, Any], key_prefix: str = "", select_mode: bool = False
+) -> bool:
     """Render a compound card in the grid view (matching old UI style).
 
     Args:
@@ -67,24 +50,26 @@ def render_compound_card(compound: dict[str, Any], key_prefix: str = "", select_
     Returns:
         bool: True if the "View" button was clicked (always False in select mode)
     """
-    compound_name = compound.get('compound_name', 'Unknown')
-    entry_id = compound.get('entry_id', '')  # Unique identifier for key generation
-    smiles = compound.get('smiles', '')
-    is_duplicate = compound.get('is_duplicate', False)
-    version_count = compound.get('version_count', 1)
+    compound_name = compound.get("compound_name", "Unknown")
+    entry_id = compound.get("entry_id", "")  # Unique identifier for key generation
+    smiles = compound.get("smiles", "")
+    is_duplicate = compound.get("is_duplicate", False)
+    version_count = compound.get("version_count", 1)
 
     # Optional fields from metadata
-    chembl_id = compound.get('chembl_id', '')
-    total_activities = compound.get('total_activities', 0)
-    imp_score = compound.get('imp_score')
-    qed = compound.get('qed', 0.0)
-    similarity_threshold = compound.get('similarity_threshold', 90)
+    chembl_id = compound.get("chembl_id", "")
+    total_activities = compound.get("total_activities", 0)
+    imp_score = compound.get("imp_score")
+    qed = compound.get("qed", 0.0)
+    similarity_threshold = compound.get("similarity_threshold", 90)
 
     # Escape for XSS prevention (CSS text-overflow handles truncation dynamically)
     safe_compound_name = html.escape(str(compound_name))
 
     with st.container(border=True):
-        st.markdown('<div class="imp-compound-card-marker"></div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="imp-compound-card-marker"></div>', unsafe_allow_html=True
+        )
 
         # Selection checkbox in select mode
         if select_mode and entry_id:
@@ -102,7 +87,7 @@ def render_compound_card(compound: dict[str, Any], key_prefix: str = "", select_
             f"display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; "
             f"overflow: hidden; text-overflow: ellipsis;'>"
             f"{safe_compound_name}</div></div>",
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
 
         # 2D Structure preview using RDKit
@@ -113,7 +98,7 @@ def render_compound_card(compound: dict[str, Any], key_prefix: str = "", select_
             st.markdown(
                 "<div style='height: 200px; display: flex; align-items: center; justify-content: center; "
                 "color: #888; font-size: 16px;'>Structure not available</div>",
-                unsafe_allow_html=True
+                unsafe_allow_html=True,
             )
 
         # ChEMBL ID + optional DUPLICATE badge (right corner)
@@ -130,26 +115,27 @@ def render_compound_card(compound: dict[str, Any], key_prefix: str = "", select_
                 f"padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 600; "
                 f"letter-spacing: 0.5px;'>{version_count} VERSIONS</span>"
             )
-        if chembl_id and str(chembl_id) != 'nan':
+        if chembl_id and str(chembl_id) != "nan":
             safe_chembl_id = html.escape(str(chembl_id))
             st.markdown(
                 f"<div style='display: flex; justify-content: space-between; align-items: center; "
                 f"margin: 8px 0; min-height: 1.5rem;'>"
                 f"<span style='color: var(--text-color); opacity: 0.5; font-size: 14px;'>ChEMBL: {safe_chembl_id}</span>"
                 f"{dup_badge}</div>",
-                unsafe_allow_html=True
+                unsafe_allow_html=True,
             )
         else:
             st.markdown(
                 f"<div style='display: flex; justify-content: flex-end; margin: 8px 0; min-height: 1.2rem;'>"
                 f"{dup_badge}</div>",
-                unsafe_allow_html=True
+                unsafe_allow_html=True,
             )
 
         # Stats using HTML flexbox for consistent layout
         # Escape all values for XSS prevention
         qed_display = f"{qed:.2f}" if qed and qed > 0 else "N/A"
-        imp_score_display = f"{imp_score:.2f}" if imp_score is not None else "N/A"
+        imp_score_int = format_imp_score(imp_score)
+        imp_score_display = str(imp_score_int) if imp_score_int is not None else "N/A"
         safe_total_activities = html.escape(str(total_activities))
         safe_imp_score = html.escape(imp_score_display)
         safe_qed_display = html.escape(str(qed_display))
@@ -164,7 +150,7 @@ def render_compound_card(compound: dict[str, Any], key_prefix: str = "", select_
                 <span style='min-height: 1.5rem; display: inline-flex; align-items: center; gap: 0.2rem;'><b>QED:</b><span>{safe_qed_display}</span></span>
                 <span style='min-height: 1.5rem; display: inline-flex; align-items: center; gap: 0.2rem;'><b>Similarity:</b><span>{safe_similarity}%</span></span>
             </div>""",
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
 
         # View button (hidden in select mode)
@@ -176,13 +162,17 @@ def render_compound_card(compound: dict[str, Any], key_prefix: str = "", select_
             else:
                 # For legacy compounds without entry_id, key_prefix alone is unique per grid position
                 button_key = f"{key_prefix}view"
-            if st.button("View Details", key=button_key, type="primary", width='stretch'):
+            if st.button(
+                "View Details", key=button_key, type="primary", width="stretch"
+            ):
                 return True
 
     return False
 
 
-def _render_rdkit_structure(smiles: str, compound_name: str, size: tuple = (300, 200)) -> None:
+def _render_rdkit_structure(
+    smiles: str, compound_name: str, size: tuple = (300, 200)
+) -> None:
     """Render 2D structure using RDKit.
 
     Args:
@@ -190,12 +180,12 @@ def _render_rdkit_structure(smiles: str, compound_name: str, size: tuple = (300,
         compound_name: Compound name for logging
         size: Image size (width, height)
     """
-    if not smiles or smiles == 'nan' or not str(smiles).strip():
+    if not smiles or smiles == "nan" or not str(smiles).strip():
         # Fixed height placeholder
         st.markdown(
             "<div style='height: 200px; display: flex; align-items: center; justify-content: center; "
             "color: #888; font-size: 16px;'>Structure not available</div>",
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
         return
 
@@ -210,7 +200,7 @@ def _render_rdkit_structure(smiles: str, compound_name: str, size: tuple = (300,
             st.markdown(
                 "<div style='height: 200px; display: flex; align-items: center; justify-content: center; "
                 "color: #888; font-size: 16px;'>Invalid structure</div>",
-                unsafe_allow_html=True
+                unsafe_allow_html=True,
             )
             return
 
@@ -229,8 +219,8 @@ def _render_rdkit_structure(smiles: str, compound_name: str, size: tuple = (300,
             f'height: 200px; padding: 8px; background: white; border-radius: 6px;">'
             f'<img src="data:image/png;base64,{img_str}" alt="{safe_name}" '
             f'style="max-height: 190px; max-width: 100%; object-fit: contain;" />'
-            f'</div>',
-            unsafe_allow_html=True
+            f"</div>",
+            unsafe_allow_html=True,
         )
 
     except Exception as e:
@@ -238,11 +228,13 @@ def _render_rdkit_structure(smiles: str, compound_name: str, size: tuple = (300,
         st.markdown(
             "<div style='height: 200px; display: flex; align-items: center; justify-content: center; "
             "color: #888; font-size: 16px;'>Structure not available</div>",
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
 
 
-def render_structure_thumbnail(smiles: str, compound_name: str, key_prefix: str = "") -> None:
+def render_structure_thumbnail(
+    smiles: str, compound_name: str, key_prefix: str = ""
+) -> None:
     """Render a small 2D structure thumbnail using SmilesDrawer.
 
     This uses JavaScript to render without triggering a Streamlit rerun.
@@ -254,9 +246,10 @@ def render_structure_thumbnail(smiles: str, compound_name: str, key_prefix: str 
     """
     import html
     import re as _re
+
     safe_smiles = html.escape(smiles)
     # Sanitize canvas_id to prevent HTML/JS injection via compound_name
-    canvas_id = _re.sub(r'[^a-zA-Z0-9_]', '', f"{key_prefix}struct_{compound_name}")
+    canvas_id = _re.sub(r"[^a-zA-Z0-9_]", "", f"{key_prefix}struct_{compound_name}")
 
     # SmilesDrawer rendering via JS (doesn't trigger rerun)
     html_content = f'''
@@ -295,7 +288,9 @@ def render_structure_thumbnail(smiles: str, compound_name: str, key_prefix: str 
     st.html(html_content, unsafe_allow_javascript=True)
 
 
-def render_compound_grid(compounds: list, columns: int = 3, select_mode: bool = False) -> Optional[str]:
+def render_compound_grid(
+    compounds: list, columns: int = 3, select_mode: bool = False
+) -> Optional[str]:
     """Render a grid of compound cards (3 columns for better sizing).
 
     Args:
@@ -350,24 +345,26 @@ def render_compound_grid(compounds: list, columns: int = 3, select_mode: bool = 
         _list_pagination(page_key, current_page, total_pages, "grid_top")
 
     start = (current_page - 1) * PAGE_SIZE
-    page_compounds = compounds[start:start + PAGE_SIZE]
+    page_compounds = compounds[start : start + PAGE_SIZE]
 
     # Create grid
     for row_start in range(0, len(page_compounds), columns):
-        row_compounds = page_compounds[row_start:row_start + columns]
+        row_compounds = page_compounds[row_start : row_start + columns]
         cols = st.columns(columns)
 
         for i, compound in enumerate(row_compounds):
             with cols[i]:
                 global_idx = start + row_start + i
-                if render_compound_card(compound, key_prefix=f"grid_{global_idx}_", select_mode=select_mode):
+                if render_compound_card(
+                    compound, key_prefix=f"grid_{global_idx}_", select_mode=select_mode
+                ):
                     clicked_compound = {
-                        'compound_name': compound.get('compound_name'),
-                        'entry_id': compound.get('entry_id'),
-                        'storage_path': compound.get('storage_path'),
-                        'is_duplicate': compound.get('is_duplicate', False),
-                        'parent_id': compound.get('parent_id'),
-                        'parent_name': compound.get('parent_name'),
+                        "compound_name": compound.get("compound_name"),
+                        "entry_id": compound.get("entry_id"),
+                        "storage_path": compound.get("storage_path"),
+                        "is_duplicate": compound.get("is_duplicate", False),
+                        "parent_id": compound.get("parent_id"),
+                        "parent_name": compound.get("parent_name"),
                     }
 
     if total_pages > 1:
@@ -378,7 +375,7 @@ def render_compound_grid(compounds: list, columns: int = 3, select_mode: bool = 
 
 def _get_structure_base64(smiles: str, size: tuple = (120, 90)) -> str:
     """Generate a base64-encoded PNG of the 2D structure, or empty string on failure."""
-    if not smiles or smiles == 'nan' or not RDKIT_AVAILABLE:
+    if not smiles or smiles == "nan" or not RDKIT_AVAILABLE:
         return ""
     try:
         mol = Chem.MolFromSmiles(str(smiles))
@@ -392,17 +389,27 @@ def _get_structure_base64(smiles: str, size: tuple = (120, 90)) -> str:
         return ""
 
 
-def _list_pagination(page_key: str, current_page: int, total_pages: int, pos: str) -> None:
+def _list_pagination(
+    page_key: str, current_page: int, total_pages: int, pos: str
+) -> None:
     """PDB-style pagination bar: First Prev | Page X of Y | Next Last."""
     _, c_first, c_prev, c_label, c_next, c_last, _ = st.columns([2, 1, 1, 2, 1, 1, 2])
     with c_first:
-        if st.button("⟪ First", key=f"list_first_{pos}_{page_key}", disabled=current_page <= 1,
-                      width="stretch"):
+        if st.button(
+            "⟪ First",
+            key=f"list_first_{pos}_{page_key}",
+            disabled=current_page <= 1,
+            width="stretch",
+        ):
             st.session_state[page_key] = 1
             st.rerun()
     with c_prev:
-        if st.button("◁ Prev", key=f"list_prev_{pos}_{page_key}", disabled=current_page <= 1,
-                      width="stretch"):
+        if st.button(
+            "◁ Prev",
+            key=f"list_prev_{pos}_{page_key}",
+            disabled=current_page <= 1,
+            width="stretch",
+        ):
             st.session_state[page_key] = current_page - 1
             st.rerun()
     c_label.markdown(
@@ -411,13 +418,21 @@ def _list_pagination(page_key: str, current_page: int, total_pages: int, pos: st
         unsafe_allow_html=True,
     )
     with c_next:
-        if st.button("Next ▷", key=f"list_next_{pos}_{page_key}", disabled=current_page >= total_pages,
-                      width="stretch"):
+        if st.button(
+            "Next ▷",
+            key=f"list_next_{pos}_{page_key}",
+            disabled=current_page >= total_pages,
+            width="stretch",
+        ):
             st.session_state[page_key] = current_page + 1
             st.rerun()
     with c_last:
-        if st.button("Last ⟫", key=f"list_last_{pos}_{page_key}", disabled=current_page >= total_pages,
-                      width="stretch"):
+        if st.button(
+            "Last ⟫",
+            key=f"list_last_{pos}_{page_key}",
+            disabled=current_page >= total_pages,
+            width="stretch",
+        ):
             st.session_state[page_key] = total_pages
             st.rerun()
 
@@ -453,52 +468,48 @@ def render_compound_list(compounds: list, select_mode: bool = False) -> Optional
         _list_pagination(page_key, current_page, total_pages, "top")
 
     start = (current_page - 1) * PAGE_SIZE
-    page_compounds = compounds[start:start + PAGE_SIZE]
+    page_compounds = compounds[start : start + PAGE_SIZE]
 
     for i, compound in enumerate(page_compounds):
         global_idx = start + i
-        compound_name = compound.get('compound_name', 'Unknown')
-        entry_id = compound.get('entry_id', '')
-        smiles = compound.get('smiles', '')
-        similarity_threshold = compound.get('similarity_threshold', 90)
-        is_duplicate = compound.get('is_duplicate', False)
-        version_count = compound.get('version_count', 1)
-        imp_score = compound.get('imp_score')
-        qed = compound.get('qed', 0.0)
-        total_activities = compound.get('total_activities', 0)
-        chembl_id = compound.get('chembl_id', '')
+        compound_name = compound.get("compound_name", "Unknown")
+        entry_id = compound.get("entry_id", "")
+        smiles = compound.get("smiles", "")
+        similarity_threshold = compound.get("similarity_threshold", 90)
+        is_duplicate = compound.get("is_duplicate", False)
+        version_count = compound.get("version_count", 1)
+        imp_score = compound.get("imp_score")
+        qed = compound.get("qed", 0.0)
+        total_activities = compound.get("total_activities", 0)
+        chembl_id = compound.get("chembl_id", "")
 
         safe_name = html.escape(str(compound_name))
-        safe_chembl = html.escape(str(chembl_id)) if chembl_id and str(chembl_id) != 'nan' else ''
+        safe_chembl = (
+            html.escape(str(chembl_id)) if chembl_id and str(chembl_id) != "nan" else ""
+        )
 
         # ── Badges ──
         badges_html = ""
         if is_duplicate:
             badges_html += (
                 ' <span style="display:inline-block;padding:2px 10px;border-radius:12px;font-size:11px;'
-                'font-weight:700;background:#ff6b3522;color:#ff6b35;border:1px solid #ff6b3544;'
+                "font-weight:700;background:#ff6b3522;color:#ff6b35;border:1px solid #ff6b3544;"
                 'vertical-align:middle;">DUPLICATE</span>'
             )
         elif version_count > 1:
             badges_html += (
                 f' <span style="display:inline-block;padding:2px 10px;border-radius:12px;font-size:11px;'
-                f'font-weight:700;background:#667eea22;color:#667eea;border:1px solid #667eea44;'
+                f"font-weight:700;background:#667eea22;color:#667eea;border:1px solid #667eea44;"
                 f'vertical-align:middle;">{version_count} VERSIONS</span>'
             )
 
-        # ── IMP score pill ──
-        imp_display = f"{imp_score:.2f}" if imp_score is not None else "N/A"
-        if imp_score is not None and imp_score >= 0.7:
-            imp_color = "#22c55e"
-        elif imp_score is not None and imp_score >= 0.5:
-            imp_color = "#FF9800"
-        elif imp_score is not None and imp_score >= 0.3:
-            imp_color = "#9E9E9E"
-        else:
-            imp_color = "#666"
+        # ── IMP score pill (neutral color; banded thresholds removed per Phase 21) ──
+        imp_score_int = format_imp_score(imp_score)
+        imp_display = str(imp_score_int) if imp_score_int is not None else "N/A"
+        imp_color = "#111827"
         imp_pill = (
             f'<span style="display:inline-block;padding:3px 12px;border-radius:12px;font-size:12px;'
-            f'font-weight:700;background:{imp_color}22;color:{imp_color};'
+            f"font-weight:700;background:{imp_color}22;color:{imp_color};"
             f'border:1px solid {imp_color}44;">{html.escape(imp_display)}</span>'
         )
 
@@ -510,7 +521,7 @@ def render_compound_list(compounds: list, select_mode: bool = False) -> Optional
                 f'<img src="data:image/png;base64,{img_b64}" '
                 f'style="width:90px;height:90px;border-radius:6px;object-fit:contain;'
                 f'background:white;flex-shrink:0;" '
-                f'onerror="this.style.display=\'none\'" />'
+                f"onerror=\"this.style.display='none'\" />"
             )
             if detail_url:
                 img_html = (
@@ -522,7 +533,7 @@ def render_compound_list(compounds: list, select_mode: bool = False) -> Optional
         else:
             img_html = (
                 '<div style="width:90px;height:90px;border-radius:6px;background:#333;'
-                'display:flex;align-items:center;justify-content:center;flex-shrink:0;'
+                "display:flex;align-items:center;justify-content:center;flex-shrink:0;"
                 'font-size:10px;color:#888;">No structure</div>'
             )
 
@@ -534,27 +545,27 @@ def render_compound_list(compounds: list, select_mode: bool = False) -> Optional
             line1_parts.append(
                 f'<b>ChEMBL:</b> <span style="color:#3b82f6;font-weight:600;">{safe_chembl}</span>'
             )
-        line1_parts.append(f'<b>Activities:</b> {html.escape(str(total_activities))}')
-        line1_parts.append(f'<b>IMP Score:</b> {imp_pill}')
-        line1 = ' &nbsp;&nbsp; '.join(line1_parts)
+        line1_parts.append(f"<b>Activities:</b> {html.escape(str(total_activities))}")
+        line1_parts.append(f"<b>IMP Score:</b> {imp_pill}")
+        line1 = " &nbsp;&nbsp; ".join(line1_parts)
 
         line2 = (
-            f'<b>Similarity:</b> {html.escape(str(similarity_threshold))}%'
-            f' &nbsp;&nbsp; <b>QED:</b> {html.escape(qed_display)}'
+            f"<b>Similarity:</b> {html.escape(str(similarity_threshold))}%"
+            f" &nbsp;&nbsp; <b>QED:</b> {html.escape(qed_display)}"
         )
 
         # ── Card HTML ──
         card_html = (
             f'<div style="display:flex;gap:16px;padding:14px 16px;'
             f'border-bottom:1px solid rgba(128,128,128,0.2);align-items:flex-start;">'
-            f'{img_html}'
+            f"{img_html}"
             f'<div style="flex:1;min-width:0;">'
             f'<div style="font-size:17px;font-weight:500;margin-bottom:6px;">'
-            f'{safe_name}{badges_html}</div>'
+            f"{safe_name}{badges_html}</div>"
             f'<div style="font-size:14px;opacity:0.85;line-height:1.8;">{line1}</div>'
             f'<div style="font-size:14px;opacity:0.85;line-height:1.8;">{line2}</div>'
-            f'</div>'
-            f'</div>'
+            f"</div>"
+            f"</div>"
         )
 
         if select_mode and entry_id:
@@ -565,15 +576,19 @@ def render_compound_list(compounds: list, select_mode: bool = False) -> Optional
                 st.markdown(card_html, unsafe_allow_html=True)
         else:
             st.markdown(card_html, unsafe_allow_html=True)
-            button_key = f"lv_{global_idx}_{entry_id}" if entry_id else f"lv_{global_idx}"
-            if st.button("View Details", key=button_key, type="primary", width="stretch"):
+            button_key = (
+                f"lv_{global_idx}_{entry_id}" if entry_id else f"lv_{global_idx}"
+            )
+            if st.button(
+                "View Details", key=button_key, type="primary", width="stretch"
+            ):
                 clicked_compound = {
-                    'compound_name': compound_name,
-                    'entry_id': entry_id,
-                    'storage_path': compound.get('storage_path'),
-                    'is_duplicate': is_duplicate,
-                    'parent_id': compound.get('parent_id'),
-                    'parent_name': compound.get('parent_name'),
+                    "compound_name": compound_name,
+                    "entry_id": entry_id,
+                    "storage_path": compound.get("storage_path"),
+                    "is_duplicate": is_duplicate,
+                    "parent_id": compound.get("parent_id"),
+                    "parent_name": compound.get("parent_name"),
                 }
 
     # Bottom pagination
@@ -605,8 +620,8 @@ def _format_date(date_input) -> str:
 
         # Handle string input
         date_str = str(date_input)
-        if 'T' in date_str:
-            dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+        if "T" in date_str:
+            dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
         else:
             dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
         return dt.strftime("%b %d")

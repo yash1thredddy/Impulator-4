@@ -19,7 +19,6 @@ from backend.modules.imp_scoring import (
     calculate_imp_score,
     calculate_imp_score_phase1,
     get_imp_score_breakdown,
-    interpret_imp_score,
     WEIGHT_EFFICIENCY,
     WEIGHT_DISTANCE,
     WEIGHT_ANGLE,
@@ -28,6 +27,7 @@ from backend.modules.imp_scoring import (
     QED_MULTIPLIER_FLOOR,
     QED_MULTIPLIER_SCALE,
 )
+from backend.modules.imp_classifier import classify_imp_candidates
 
 
 class TestIMPScoreWeightConstants:
@@ -208,38 +208,94 @@ class TestQEDMultiplierRange:
         assert abs(result['QED_Multiplier'].iloc[0] - 1.0) < 0.001
 
 
-class TestScoreInterpretation:
-    """Test score interpretation thresholds."""
+class TestEndToEndColumnShape:
+    """Plan 21-04: end-to-end pipeline produces the expected post-refactor column
+    shape.
 
-    def test_exceptional_imp_threshold(self):
-        """Test exceptional IMP classification (0.9-1.0)."""
-        result = interpret_imp_score(0.95)
-        assert result['classification'] == 'Exceptional IMP'
-        assert result['priority'] == 1
+    Verifies:
+    - Quantitative score columns are present (IMP_Final_Score, Efficiency_Score, ...)
+    - Qualitative label columns are ABSENT (IMP_Classification, IMP_Priority,
+      IMP_Confidence)
+    - classify_imp_candidates still produces Is_IMP_Candidate (T-21-06 dependency
+      for the donut chart in compound_detail.py)
+    """
 
-    def test_strong_imp_threshold(self):
-        """Test strong IMP classification (0.7-0.9)."""
-        result = interpret_imp_score(0.8)
-        assert result['classification'] == 'Strong IMP'
-        assert result['priority'] == 2
+    @pytest.fixture
+    def multi_row_dataframe(self):
+        """5-row DataFrame mimicking a small cohort post-efficiency-metrics."""
+        return pd.DataFrame({
+            'ChEMBL_ID': ['C1', 'C2', 'C3', 'C4', 'C5'],
+            'Molecule_Name': ['A', 'B', 'C', 'D', 'E'],
+            'SMILES': ['CCO', 'CCCO', 'c1ccccc1', 'CC=O', 'CCN'],
+            'pActivity': [7.0, 6.5, 8.0, 5.0, 7.5],
+            'SEI': [15.0, 20.0, 10.0, 25.0, 18.0],
+            'BEI': [20.0, 25.0, 15.0, 30.0, 22.0],
+            'NSEI': [1.5, 2.0, 1.0, 2.5, 1.8],
+            'NBEI': [0.35, 0.40, 0.30, 0.45, 0.38],
+            'Angle_SEI_BEI': [45.0, 50.0, 35.0, 55.0, 42.0],
+            'Modulus_SEI_BEI': [25.0, 32.0, 18.0, 39.0, 28.0],
+            'QED': [0.75, 0.60, 0.85, 0.40, 0.70],
+            'Outlier_Count': [3, 1, 4, 0, 2],
+            'PSA': [46.5, 50.0, 30.0, 60.0, 48.0],
+            'MW': [350.0, 400.0, 300.0, 450.0, 370.0],
+        })
 
-    def test_moderate_imp_threshold(self):
-        """Test moderate IMP classification (0.5-0.7)."""
-        result = interpret_imp_score(0.6)
-        assert result['classification'] == 'Moderate IMP'
-        assert result['priority'] == 3
+    async def test_pipeline_produces_quantitative_columns_only(self, multi_row_dataframe):
+        """After calculate_imp_score + classify_imp_candidates, only quantitative
+        columns flow downstream; qualitative labels are absent."""
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        scored = await calculate_imp_score(mock_client, multi_row_dataframe, use_pdb=False)
+        classified = classify_imp_candidates(scored)
 
-    def test_weak_imp_threshold(self):
-        """Test weak IMP classification (0.3-0.5)."""
-        result = interpret_imp_score(0.4)
-        assert result['classification'] == 'Weak IMP'
-        assert result['priority'] == 4
+        # Quantitative score columns MUST be present
+        for col in (
+            'IMP_Final_Score', 'IMP_Base_Score',
+            'Efficiency_Score', 'Angle_Score', 'Distance_Score',
+            'Interference_Score', 'PDB_Score',
+            'QED_Multiplier', 'QED_Impact',
+            'Efficiency_Contribution', 'Angle_Contribution',
+            'Distance_Contribution', 'Interference_Contribution', 'PDB_Contribution',
+        ):
+            assert col in classified.columns, f"Quantitative column missing: {col}"
 
-    def test_not_imp_threshold(self):
-        """Test not IMP classification (<0.3)."""
-        result = interpret_imp_score(0.2)
-        assert result['classification'] == 'Not IMP'
-        assert result['priority'] is None
+        # Qualitative label columns MUST be absent (Plan 21-04 deletions)
+        for col in ('IMP_Classification', 'IMP_Priority', 'IMP_Confidence'):
+            assert col not in classified.columns, (
+                f"Qualitative column {col!r} should have been dropped in Plan 21-04"
+            )
+
+        # T-21-06: Is_IMP_Candidate must still be produced by classify_imp_candidates
+        assert 'Is_IMP_Candidate' in classified.columns, (
+            "Is_IMP_Candidate missing — donut chart in compound_detail.py depends on it"
+        )
+        # And it must be a boolean column
+        assert classified['Is_IMP_Candidate'].dtype == bool
+
+    async def test_is_imp_candidate_threshold_behavior(self, multi_row_dataframe):
+        """Is_IMP_Candidate is True iff Outlier_Count >= 2 (default threshold)."""
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        scored = await calculate_imp_score(mock_client, multi_row_dataframe, use_pdb=False)
+        classified = classify_imp_candidates(scored)
+
+        expected = [True, False, True, False, True]  # Outlier_Count [3, 1, 4, 0, 2]
+        assert list(classified['Is_IMP_Candidate']) == expected
+
+    async def test_deleted_symbols_no_longer_importable(self):
+        """The deleted producers must NOT be importable from backend.modules.imp_scoring
+        nor from the backend.modules package surface (T-21-07 half-removal guard)."""
+        import backend.modules as m
+        import backend.modules.imp_scoring as scoring
+        import backend.modules.imp_classifier as classifier
+
+        # imp_scoring deletions
+        for name in ('interpret_imp_score', 'add_imp_score_interpretation', 'get_imp_score_summary'):
+            assert not hasattr(scoring, name), f"{name!r} still in imp_scoring"
+            with pytest.raises(AttributeError):
+                getattr(m, name)
+
+        # imp_classifier deletions
+        for name in ('_assign_confidence_imp_score', '_assign_confidence_simple'):
+            assert not hasattr(classifier, name), f"{name!r} still in imp_classifier"
 
 
 if __name__ == "__main__":

@@ -5,10 +5,10 @@ This module implements the logic for classifying compounds as IMP vs Non-IMP can
 
 Classification criteria:
 - IMP Candidate: Outlier_Count >= 2 (at least 2 efficiency metrics are outliers)
-- Confidence Level: Based on IMP Score
-  - High: IMP_Score > 0.7
-  - Medium: IMP_Score > 0.5
-  - Low: IMP_Score <= 0.5
+
+Note: The qualitative IMP_Confidence column was removed in Plan 21-04. The
+frontend no longer reads it (Plan 21-02, PRES-09 in compound_detail.py).
+The donut chart still depends on Is_IMP_Candidate (T-21-06).
 """
 
 import numpy as np
@@ -27,25 +27,20 @@ def classify_imp_candidates(
     Classify compounds as IMP vs Non-IMP candidates.
 
     Classification logic:
-    1. Check outlier count (Outlier_Count >= min_outlier_count)
-    2. If IMP candidate, assign confidence level based on IMP score
+        Outlier_Count >= min_outlier_count -> Is_IMP_Candidate = True
 
     Args:
-        df: DataFrame with outlier flags and IMP scores
+        df: DataFrame with outlier flags (and optionally IMP scores; unused now)
         min_outlier_count: Minimum outliers required for IMP candidate (default: 2)
-        use_imp_score: Use IMP score for confidence levels (default: True)
+        use_imp_score: Retained for API stability; no longer affects output
+            (qualitative IMP_Confidence column was removed in Plan 21-04)
 
     Returns:
-        pd.DataFrame: Input DataFrame with added columns:
-            - Is_IMP_Candidate: Boolean (True if IMP candidate)
-            - IMP_Confidence: "High", "Medium", "Low", or "Not IMP"
+        pd.DataFrame: Input DataFrame with added Is_IMP_Candidate column (bool).
 
     Example:
         >>> df_classified = classify_imp_candidates(df)
-        >>> high_confidence_imps = df_classified[
-        ...     (df_classified['Is_IMP_Candidate']) &
-        ...     (df_classified['IMP_Confidence'] == 'High')
-        ... ]
+        >>> imp_candidates = df_classified[df_classified['Is_IMP_Candidate']]
     """
     df = df.copy()
 
@@ -56,76 +51,7 @@ def classify_imp_candidates(
     # Classify as IMP candidate based on outlier count
     df['Is_IMP_Candidate'] = df['Outlier_Count'] >= min_outlier_count
 
-    # Assign confidence levels
-    if use_imp_score and 'IMP_Final_Score' in df.columns:
-        # Use IMP score for confidence
-        df['IMP_Confidence'] = df.apply(
-            lambda row: _assign_confidence_imp_score(
-                row['Is_IMP_Candidate'],
-                row['IMP_Final_Score']
-            ),
-            axis=1
-        )
-    else:
-        # Simple confidence based on outlier count only
-        df['IMP_Confidence'] = df.apply(
-            lambda row: _assign_confidence_simple(
-                row['Is_IMP_Candidate'],
-                row['Outlier_Count']
-            ),
-            axis=1
-        )
-
     return df
-
-
-def _assign_confidence_imp_score(is_imp: bool, imp_final_score: float) -> str:
-    """
-    Assign confidence level based on IMP score.
-
-    Args:
-        is_imp: Whether compound is IMP candidate
-        imp_final_score: IMP final score
-
-    Returns:
-        str: Confidence level
-    """
-    if not is_imp:
-        return 'Not IMP'
-
-    if np.isnan(imp_final_score):
-        return 'Unknown'
-
-    if imp_final_score > 0.7:
-        return 'High'
-    elif imp_final_score > 0.5:
-        return 'Medium'
-    else:
-        return 'Low'
-
-
-def _assign_confidence_simple(is_imp: bool, outlier_count: int) -> str:
-    """
-    Assign confidence level based on outlier count only.
-
-    Simple fallback if IMP scores not available.
-
-    Args:
-        is_imp: Whether compound is IMP candidate
-        outlier_count: Number of outlier flags
-
-    Returns:
-        str: Confidence level
-    """
-    if not is_imp:
-        return 'Not IMP'
-
-    if outlier_count >= 4:
-        return 'High'
-    elif outlier_count >= 3:
-        return 'Medium'
-    else:
-        return 'Low'
 
 
 def get_imp_summary(df: pd.DataFrame) -> dict:

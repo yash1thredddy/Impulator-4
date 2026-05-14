@@ -746,120 +746,6 @@ def calculate_imp_score_phase2(  # pragma: no cover
     )
 
 
-def interpret_imp_score(score: float) -> dict[str, str]:
-    """
-    Interpret IMP score and provide classification + recommendation.
-
-    CRITICAL: IMP = Invalid Metabolic Panacea = FALSE POSITIVE indicator
-
-    Higher IMP scores indicate HIGHER probability of being an assay artifact.
-    Lower IMP scores indicate compounds more likely to be genuine leads.
-
-    Score Interpretation (INVERSE relationship):
-    - High Score (0.9+) = High false positive risk -> EXCLUDE/DEPRIORITIZE
-    - Low Score (<0.3) = Low false positive risk -> PROCEED with confidence
-
-    Example:
-        >>> interpret_imp_score(0.85)
-        {"classification": "Strong IMP", "priority": 2, ...}
-        >>> interpret_imp_score(0.25)
-        {"classification": "Not IMP", "priority": None, ...}
-    """
-    if np.isnan(score):
-        return {
-            'classification': 'Invalid',
-            'interpretation': 'No score calculated',
-            'action': 'Check data quality',
-            'priority': None
-        }
-
-    # CORRECTED INTERPRETATION: Higher score = Higher false positive risk
-    if 0.9 <= score <= 1.0:
-        return {
-            'classification': 'Exceptional IMP',
-            'interpretation': 'VERY HIGH false positive risk - likely assay artifact',
-            'action': 'DEPRIORITIZE - Do not pursue unless validated with orthogonal assays',
-            'priority': 1  # Priority 1 = Highest concern (to exclude)
-        }
-    elif 0.7 <= score < 0.9:
-        return {
-            'classification': 'Strong IMP',
-            'interpretation': 'HIGH false positive risk - requires validation',
-            'action': 'VALIDATE with orthogonal assays (SPR, ITC) before advancing',
-            'priority': 2  # Priority 2 = High concern (validate before proceeding)
-        }
-    elif 0.5 <= score < 0.7:
-        return {
-            'classification': 'Moderate IMP',
-            'interpretation': 'MODERATE false positive risk',
-            'action': 'Monitor carefully - gather additional evidence before investing resources',
-            'priority': 3  # Priority 3 = Moderate concern
-        }
-    elif 0.3 <= score < 0.5:
-        return {
-            'classification': 'Weak IMP',
-            'interpretation': 'LOW false positive risk - more likely genuine',
-            'action': 'PROCEED with standard due diligence',
-            'priority': 4  # Priority 4 = Low concern (proceed normally)
-        }
-    else:
-        return {
-            'classification': 'Not IMP',
-            'interpretation': 'LOWEST false positive risk - likely genuine activity',
-            'action': 'PROCEED with confidence - prioritize for development',
-            'priority': None  # No concern - best candidates
-        }
-
-
-def add_imp_score_interpretation(df: pd.DataFrame) -> pd.DataFrame:
-    """Add human-readable IMP score interpretation columns to DataFrame."""
-    df = df.copy()
-
-    if 'IMP_Final_Score' not in df.columns:
-        raise ValueError("IMP_Final_Score column not found. Run calculate_imp_score() first.")
-
-    interpretations = df['IMP_Final_Score'].apply(interpret_imp_score)
-
-    df['IMP_Classification'] = interpretations.apply(lambda x: x['classification'])
-    df['IMP_Priority'] = interpretations.apply(lambda x: x['priority'])
-
-    return df
-
-
-def get_imp_score_summary(df: pd.DataFrame) -> dict:
-    """Generate summary statistics about IMP scores in the dataset."""
-    if 'IMP_Final_Score' not in df.columns:
-        return {'error': 'No IMP scores found'}
-
-    scores = df['IMP_Final_Score'].dropna()
-
-    summary = {
-        'total_compounds': len(df),
-        'scored_compounds': len(scores),
-        'mean_score': float(scores.mean()) if len(scores) > 0 else np.nan,
-        'median_score': float(scores.median()) if len(scores) > 0 else np.nan,
-        'std_score': float(scores.std()) if len(scores) > 0 else np.nan,
-        'min_score': float(scores.min()) if len(scores) > 0 else np.nan,
-        'max_score': float(scores.max()) if len(scores) > 0 else np.nan
-    }
-
-    if 'IMP_Classification' in df.columns:
-        classification_counts = df['IMP_Classification'].value_counts().to_dict()
-        summary['classification_counts'] = classification_counts
-
-        summary['exceptional_imps'] = classification_counts.get('Exceptional IMP', 0)
-        summary['strong_imps'] = classification_counts.get('Strong IMP', 0)
-        summary['moderate_imps'] = classification_counts.get('Moderate IMP', 0)
-        summary['weak_imps'] = classification_counts.get('Weak IMP', 0)
-        summary['not_imps'] = classification_counts.get('Not IMP', 0)
-
-    if 'IMP_Priority' in df.columns:
-        priority_counts = df['IMP_Priority'].value_counts().sort_index().to_dict()
-        summary['priority_counts'] = priority_counts
-
-    return summary
-
-
 def create_pdb_summary(df: pd.DataFrame) -> pd.DataFrame:
     """Create compound-level PDB summary from bioactivity dataframe."""
     compound_cols = ['ChEMBL_ID', 'Molecule_Name', 'SMILES']
@@ -915,7 +801,7 @@ IMP_SCORE_OUTPUT_COLUMNS = [
 
     # Final calculations
     'IMP_Base_Score', 'QED', 'QED_Multiplier', 'QED_Impact',
-    'IMP_Final_Score', 'IMP_Classification', 'IMP_Priority',
+    'IMP_Final_Score',
 
     # PDB details (if available)
     'PDB_Num_Structures', 'PDB_High_Quality', 'PDB_Medium_Quality', 'PDB_Poor_Quality'
@@ -1021,8 +907,6 @@ def get_imp_score_breakdown(row: pd.Series) -> dict:
             'qed_formula': '0.75 + 0.25 * QED',
             'qed_impact': row.get('QED_Impact'),
             'final_score': row.get('IMP_Final_Score'),
-            'classification': row.get('IMP_Classification'),
-            'priority': row.get('IMP_Priority'),
         },
         'pdb_details': {
             'num_structures': row.get('PDB_Num_Structures', 0),

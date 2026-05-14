@@ -40,9 +40,6 @@ __all__ = [
     # IMP Scoring
     "calculate_imp_score_phase1",
     "calculate_imp_score_phase2",
-    "interpret_imp_score",
-    "add_imp_score_interpretation",
-    "get_imp_score_summary",
     "create_pdb_summary",
     "create_detailed_pdb_summary",
     # Configuration
@@ -109,9 +106,7 @@ def __getattr__(name):  # pragma: no cover -- lazy import dispatcher, tested ind
 
     # IMP Scoring
     if name in ("calculate_imp_score_phase1", "calculate_imp_score_phase2",
-                "interpret_imp_score", "add_imp_score_interpretation",
-                "get_imp_score_summary", "create_pdb_summary",
-                "create_detailed_pdb_summary"):
+                "create_pdb_summary", "create_detailed_pdb_summary"):
         from backend.modules import imp_scoring
         return getattr(imp_scoring, name)
 

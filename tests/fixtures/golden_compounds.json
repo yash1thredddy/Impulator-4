@@ -32,7 +32,7 @@
         "IMP_Base_Score": 0.8437,
         "QED_Multiplier": 0.98,
         "IMP_Final_Score": 0.8268,
-        "IMP_Classification": "Strong IMP"
+        "IMP_Score_Integer": 83
       }
     },
     {
@@ -61,7 +61,7 @@
         "IMP_Base_Score": 0.5528,
         "QED_Multiplier": 0.945,
         "IMP_Final_Score": 0.5224,
-        "IMP_Classification": "Moderate IMP"
+        "IMP_Score_Integer": 52
       }
     },
     {
@@ -90,7 +90,7 @@
         "IMP_Base_Score": 0.2949,
         "QED_Multiplier": 0.9125,
         "IMP_Final_Score": 0.2691,
-        "IMP_Classification": "Not IMP"
+        "IMP_Score_Integer": 27
       }
     },
     {
@@ -119,7 +119,7 @@
         "IMP_Base_Score": 0.1977,
         "QED_Multiplier": 0.8625,
         "IMP_Final_Score": 0.1705,
-        "IMP_Classification": "Not IMP"
+        "IMP_Score_Integer": 17
       }
     },
     {
@@ -148,7 +148,7 @@
         "IMP_Base_Score": 0.0931,
         "QED_Multiplier": 0.825,
         "IMP_Final_Score": 0.0768,
-        "IMP_Classification": "Not IMP"
+        "IMP_Score_Integer": 8
       }
     },
     {
@@ -177,7 +177,7 @@
         "IMP_Base_Score": 0.3716,
         "QED_Multiplier": 0.75,
         "IMP_Final_Score": 0.2787,
-        "IMP_Classification": "Not IMP"
+        "IMP_Score_Integer": 28
       }
     },
     {
@@ -206,7 +206,7 @@
         "IMP_Base_Score": 0.3716,
         "QED_Multiplier": 1.0,
         "IMP_Final_Score": 0.3716,
-        "IMP_Classification": "Weak IMP"
+        "IMP_Score_Integer": 37
       }
     },
     {
@@ -235,7 +235,7 @@
         "IMP_Base_Score": 0.1197,
         "QED_Multiplier": 0.8875,
         "IMP_Final_Score": 0.1063,
-        "IMP_Classification": "Not IMP"
+        "IMP_Score_Integer": 11
       }
     },
     {
@@ -264,7 +264,7 @@
         "IMP_Base_Score": 0.15,
         "QED_Multiplier": 0.875,
         "IMP_Final_Score": 0.1313,
-        "IMP_Classification": "Not IMP"
+        "IMP_Score_Integer": 13
       }
     },
     {
@@ -293,7 +293,7 @@
         "IMP_Base_Score": 0.5134,
         "QED_Multiplier": 0.925,
         "IMP_Final_Score": 0.4749,
-        "IMP_Classification": "Weak IMP"
+        "IMP_Score_Integer": 47
       }
     }
   ]

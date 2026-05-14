@@ -49,7 +49,6 @@ from backend.modules.efficiency_planes import calculate_plane_metrics_dataframe
 from backend.modules.outlier_detection import detect_efficiency_outliers
 from backend.modules.imp_scoring import (
     calculate_imp_score,
-    add_imp_score_interpretation,
     create_detailed_pdb_summary,
 )
 from backend.modules.imp_classifier import classify_imp_candidates
@@ -850,7 +849,9 @@ async def process_compound_job(  # pragma: no cover -- orchestration of 10+ exte
             pdb_unavailable = False
             try:
                 df_results = await calculate_imp_score(pdb_client, df_results, use_pdb=True)
-                df_results = add_imp_score_interpretation(df_results)
+                # Plan 21-04: qualitative IMP_Classification/IMP_Priority columns
+                # no longer emitted (frontend dropped them in Plan 21-02 PRES-09);
+                # add_imp_score_interpretation call removed.
             except Exception as e:
                 logger.warning(f"IMP scoring failed: {e}")
                 pdb_unavailable = True
