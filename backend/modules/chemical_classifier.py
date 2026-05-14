@@ -24,15 +24,25 @@ import time
 import httpx
 import structlog
 from tenacity import (
+    RetryError,
     retry,
     retry_if_exception_type,
+    retry_if_result,
     stop_after_attempt,
-    wait_exponential,
+    wait_random_exponential,
 )
 
 from backend.core.metrics import metrics
 
 logger = structlog.get_logger()
+
+# ClassyFire triple-endpoint rotation (revised 2026-05-14, ported from Nobs_Classification).
+# WishartLab (the original sole endpoint) suffers frequent outages; Fiehn lab and GNPS
+# are academic mirrors. Rotation order: Fiehn → GNPS → WishartLab. Each mirror has its
+# own circuit breaker so a flapping endpoint cannot poison the others.
+_CLASSYFIRE_FIEHN = "https://cfb.fiehnlab.ucdavis.edu/entities/{key}.json"
+_CLASSYFIRE_GNPS = "https://gnps-classyfire.ucsd.edu/entities/{key}.json"
+_CLASSYFIRE_WISHART = "http://classyfire.wishartlab.com/entities/{key}.json"
 
 # --------------------------------------------------------------------------- #
 # Client factory
@@ -88,8 +98,11 @@ def _record_failure(circuit: dict) -> None:
         circuit["open_until"] = time.monotonic() + circuit["cooldown"]
 
 
-# Pre-create circuits with higher threshold for non-critical classifiers (D-34)
-_circuits["classyfire"] = _make_circuit(threshold=5, cooldown=300)
+# Pre-create circuits with higher threshold for non-critical classifiers (D-34).
+# Each ClassyFire mirror has its own breaker so a flapping endpoint can't poison the others.
+_circuits["classyfire_fiehn"] = _make_circuit(threshold=5, cooldown=300)
+_circuits["classyfire_gnps"] = _make_circuit(threshold=5, cooldown=300)
+_circuits["classyfire_wishart"] = _make_circuit(threshold=5, cooldown=300)
 _circuits["npclassifier"] = _make_circuit(threshold=5, cooldown=300)
 
 
@@ -97,15 +110,25 @@ _circuits["npclassifier"] = _make_circuit(threshold=5, cooldown=300)
 # Retry decorator
 # --------------------------------------------------------------------------- #
 
-_RETRYABLE = (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)
+# Sentinel returned by request handlers on 429/503 so tenacity retries the whole call
+# without raising (HTTPStatusError on rate-limit responses isn't ideal because we want
+# to honour upstream backpressure rather than treat it as a hard failure).
+_RATE_LIMITED = object()
 
 
 def _classifier_retry(max_attempts: int = 5):
-    """Tenacity retry: 5x exponential backoff (D-29)."""
+    """Tenacity wrapper with full-jitter backoff for shared-infra friendliness.
+
+    Retries on httpx network errors, HTTPStatusError (5xx via raise_for_status), and
+    when the wrapped function returns the _RATE_LIMITED sentinel (429/503 responses).
+    """
     return retry(
         stop=stop_after_attempt(max_attempts),
-        wait=wait_exponential(multiplier=0.5, min=0.5, max=8),
-        retry=retry_if_exception_type(_RETRYABLE),
+        wait=wait_random_exponential(multiplier=1, max=30),
+        retry=(
+            retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError))
+            | retry_if_result(lambda r: r is _RATE_LIMITED)
+        ),
         reraise=True,
     )
 
@@ -115,67 +138,103 @@ def _classifier_retry(max_attempts: int = 5):
 # --------------------------------------------------------------------------- #
 
 
+@_classifier_retry()
+async def _classyfire_request(
+    client: httpx.AsyncClient, url: str
+) -> dict | object | None:
+    """Single-endpoint ClassyFire request.
+
+    Returns dict on 200, _RATE_LIMITED sentinel on 429/503 (tenacity retries),
+    None on 404, raises on other 5xx (handled by tenacity).
+    """
+    _start = time.perf_counter()
+    response = await client.get(url)
+    latency_ms = (time.perf_counter() - _start) * 1000
+    metrics.increment("api_calls_total")
+    metrics.record_latency("classyfire", latency_ms)
+
+    if response.status_code in (429, 503):
+        return _RATE_LIMITED
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    return response.json()
+
+
 async def get_classyfire_classification(
     client: httpx.AsyncClient,
     inchikey: str,
-    max_retries: int = 5,
 ) -> dict | None:
     """
-    Get comprehensive ClassyFire classification with retry logic.
+    Get ClassyFire classification with triple-endpoint rotation.
 
-    ClassyFire provides chemical taxonomy based on structural features.
-    API: http://classyfire.wishartlab.com/
+    Rotates through Fiehn lab → GNPS → WishartLab, each guarded by its own circuit
+    breaker. WishartLab (the historic single endpoint) is unreliable; the other two
+    are academic mirrors that serve the same dataset.
 
     Args:
-        client: httpx.AsyncClient instance
+        client: httpx.AsyncClient instance (used for Fiehn + WishartLab; GNPS gets a
+                separate inline client because it presents a self-signed certificate
+                and requires verify=False).
         inchikey: Standard InChIKey identifier
-        max_retries: Maximum retry attempts (via tenacity)
 
     Returns:
-        Dict with complete ClassyFire response, or None if failed
+        Dict with complete ClassyFire response, or None if all mirrors are unavailable.
 
     Example:
         >>> data = await get_classyfire_classification(client, "REFJWTPEDVJJIY-UHFFFAOYSA-N")
         >>> print(data['kingdom']['name'])  # "Organic compounds"
     """
-    circuit = _get_circuit("classyfire")
-    if _is_circuit_open(circuit):
-        logger.info("classyfire_circuit_open", inchikey=inchikey)
-        return None
+    endpoints = (
+        (_CLASSYFIRE_FIEHN, "classyfire_fiehn", False),
+        (_CLASSYFIRE_GNPS, "classyfire_gnps", True),  # self-signed TLS
+        (_CLASSYFIRE_WISHART, "classyfire_wishart", False),
+    )
 
-    url = f"http://classyfire.wishartlab.com/entities/{inchikey}.json"
+    for url_template, label, needs_insecure in endpoints:
+        circuit = _get_circuit(label)
+        if _is_circuit_open(circuit):
+            logger.info("classyfire_circuit_open", endpoint=label, inchikey=inchikey)
+            continue
 
-    @_classifier_retry(max_attempts=max_retries)
-    async def _do_fetch() -> dict | None:
-        _start = time.time()
-        response = await client.get(url, timeout=30)
-        latency_ms = (time.time() - _start) * 1000
-
-        metrics.increment("api_calls_total")
-        metrics.record_latency("classyfire", latency_ms)
-
-        if response.status_code == 200:
-            return response.json()
-
-        if response.status_code >= 500:
+        url = url_template.format(key=inchikey)
+        try:
+            if needs_insecure:
+                async with httpx.AsyncClient(
+                    verify=False,
+                    timeout=client.timeout,
+                    limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
+                ) as insecure_client:
+                    data = await _classyfire_request(insecure_client, url)
+            else:
+                data = await _classyfire_request(client, url)
+        except (httpx.HTTPError, RetryError) as exc:
+            _record_failure(circuit)
             metrics.increment("api_calls_failed")
-            # 5xx trips circuit breaker via exception -> retry
-            raise httpx.ReadTimeout(f"ClassyFire {response.status_code}")
+            logger.warning(
+                "classyfire_endpoint_failed",
+                endpoint=label,
+                inchikey=inchikey,
+                error=str(exc),
+            )
+            continue
 
-        # 4xx: don't retry, don't trip circuit breaker
-        logger.warning("classyfire_client_error", status=response.status_code, inchikey=inchikey)
+        if data is _RATE_LIMITED:
+            _record_failure(circuit)
+            logger.warning("classyfire_rate_limited", endpoint=label, inchikey=inchikey)
+            continue
+
+        # Success path: 200 with payload, or 404 (compound not in ClassyFire).
+        # 404 is not a circuit failure — it's a definitive "no data for this key".
+        _record_success(circuit)
+        if isinstance(data, dict):
+            logger.info("classyfire_obtained", endpoint=label, inchikey=inchikey)
+            return data
+        # data is None (404) — definitive negative answer, don't try other mirrors.
         return None
 
-    try:
-        result = await _do_fetch()
-        if result is not None:
-            _record_success(circuit)
-        return result
-    except Exception as exc:
-        _record_failure(circuit)
-        metrics.increment("api_calls_failed")
-        logger.warning("classyfire_failed", inchikey=inchikey, error=str(exc))
-        return None
+    logger.warning("classyfire_all_endpoints_unavailable", inchikey=inchikey)
+    return None
 
 
 async def get_npclassifier_classification(

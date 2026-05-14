@@ -81,15 +81,41 @@ class TestCircuitBreakerImportability:
         assert circuit["failures"] == 0
         _circuits.pop("test_classifier_helpers", None)
 
-    def test_classyfire_circuit_pre_created(self):
-        """ClassyFire circuit is pre-created with threshold=5 (D-34)."""
-        circuit = _get_circuit("classyfire")
-        assert circuit["threshold"] == 5
+    def test_classyfire_circuits_pre_created(self):
+        """All three ClassyFire mirror circuits are pre-created with threshold=5."""
+        for label in ("classyfire_fiehn", "classyfire_gnps", "classyfire_wishart"):
+            circuit = _get_circuit(label)
+            assert circuit["threshold"] == 5, f"{label} threshold mismatch"
 
     def test_npclassifier_circuit_pre_created(self):
         """NPClassifier circuit is pre-created with threshold=5 (D-34)."""
         circuit = _get_circuit("npclassifier")
         assert circuit["threshold"] == 5
+
+
+# ---------------------------------------------------------------------------
+# Helper: force-open all ClassyFire mirrors so rotation skips network entirely
+# ---------------------------------------------------------------------------
+
+_CF_LABELS = ("classyfire_fiehn", "classyfire_gnps", "classyfire_wishart")
+
+
+def _open_all_classyfire_circuits():
+    """Open all 3 mirrors and return a snapshot for restoration."""
+    saved = {}
+    for label in _CF_LABELS:
+        circuit = _get_circuit(label)
+        saved[label] = (circuit["failures"], circuit["open_until"])
+        circuit["failures"] = 10
+        circuit["open_until"] = time.monotonic() + 300
+    return saved
+
+
+def _restore_classyfire_circuits(saved):
+    for label, (failures, open_until) in saved.items():
+        circuit = _circuits[label]
+        circuit["failures"] = failures
+        circuit["open_until"] = open_until
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +143,8 @@ class TestGetClassyfireClassification:
         assert result["class"]["name"] == "Flavonoids"
 
     async def test_404_returns_none(self):
+        """A 404 from the first mirror is a definitive 'no data' — return None
+        without trying the others (they share the same dataset)."""
         client = AsyncMock(spec=httpx.AsyncClient)
         resp = _mock_response(404)
         resp.raise_for_status = MagicMock()  # 4xx doesn't trip retry
@@ -124,25 +152,16 @@ class TestGetClassyfireClassification:
         result = await get_classyfire_classification(client, "UNKNOWN-INCHIKEY")
         assert result is None
 
-    async def test_timeout_returns_none(self):
-        client = AsyncMock(spec=httpx.AsyncClient)
-        client.get.side_effect = httpx.ReadTimeout("timeout")
-        result = await get_classyfire_classification(client, "REFJWTPEDVJJIY-UHFFFAOYSA-N")
-        assert result is None
-
-    async def test_circuit_open_returns_none(self):
-        circuit = _get_circuit("classyfire")
-        old_failures = circuit["failures"]
-        old_open = circuit["open_until"]
-        circuit["failures"] = 10
-        circuit["open_until"] = time.monotonic() + 300
+    async def test_all_circuits_open_returns_none(self):
+        """When all 3 mirror circuits are open, rotation skips network entirely."""
+        saved = _open_all_classyfire_circuits()
         try:
             client = AsyncMock(spec=httpx.AsyncClient)
             result = await get_classyfire_classification(client, "REFJWTPEDVJJIY-UHFFFAOYSA-N")
             assert result is None
+            client.get.assert_not_called()
         finally:
-            circuit["failures"] = old_failures
-            circuit["open_until"] = old_open
+            _restore_classyfire_circuits(saved)
 
 
 # ---------------------------------------------------------------------------
@@ -245,21 +264,29 @@ class TestGetCompleteClassification:
         assert result["classification_available"] is True
 
     async def test_classyfire_fails_gracefully(self):
-        """If ClassyFire fails, NPClassifier result still returned (D-34)."""
-        client = AsyncMock(spec=httpx.AsyncClient)
-        np_resp = _mock_response(200, {
-            "pathway_results": ["Shikimates"],
-            "superclass_results": ["Flavonoids"],
-            "class_results": ["Flavones"],
-            "isglycoside": False,
-        })
-        # ClassyFire times out, NPClassifier succeeds
-        client.get.side_effect = [httpx.ReadTimeout("timeout"), np_resp]
-        result = await get_complete_classification(
-            client, "CCO", "LFQSCWFLJHTTHZ-UHFFFAOYSA-N",
-        )
-        assert result["NP_Pathway"] == "Shikimates"
-        assert result["classification_available"] is True
+        """If ClassyFire fails, NPClassifier result still returned (D-34).
+
+        Open all 3 ClassyFire mirror circuits so the rotation skips network and
+        returns None immediately — that keeps the test fast and avoids the GNPS
+        inline-client branch hitting real DNS.
+        """
+        saved = _open_all_classyfire_circuits()
+        try:
+            client = AsyncMock(spec=httpx.AsyncClient)
+            np_resp = _mock_response(200, {
+                "pathway_results": ["Shikimates"],
+                "superclass_results": ["Flavonoids"],
+                "class_results": ["Flavones"],
+                "isglycoside": False,
+            })
+            client.get.return_value = np_resp
+            result = await get_complete_classification(
+                client, "CCO", "LFQSCWFLJHTTHZ-UHFFFAOYSA-N",
+            )
+            assert result["NP_Pathway"] == "Shikimates"
+            assert result["classification_available"] is True
+        finally:
+            _restore_classyfire_circuits(saved)
 
     async def test_npclassifier_fails_gracefully(self):
         """If NPClassifier fails, ClassyFire result still returned (D-34)."""
@@ -279,16 +306,24 @@ class TestGetCompleteClassification:
         assert result["classification_available"] is True
 
     async def test_both_fail_gracefully(self):
-        """If both fail, returns dict with empty strings (D-34)."""
-        client = AsyncMock(spec=httpx.AsyncClient)
-        client.get.side_effect = httpx.ReadTimeout("timeout")
-        result = await get_complete_classification(
-            client, "CCCC", "UNKNOWN",
-        )
-        assert result["Kingdom"] == ""
-        assert result["Class"] == ""
-        assert result["NP_Pathway"] == ""
-        assert result["classification_available"] is False
+        """If both fail, returns dict with empty strings (D-34).
+
+        Open all 3 ClassyFire mirror circuits so CF fails fast without exercising
+        retries or the GNPS inline-client branch.
+        """
+        saved = _open_all_classyfire_circuits()
+        try:
+            client = AsyncMock(spec=httpx.AsyncClient)
+            client.get.side_effect = httpx.ReadTimeout("timeout")
+            result = await get_complete_classification(
+                client, "CCCC", "UNKNOWN",
+            )
+            assert result["Kingdom"] == ""
+            assert result["Class"] == ""
+            assert result["NP_Pathway"] == ""
+            assert result["classification_available"] is False
+        finally:
+            _restore_classyfire_circuits(saved)
 
     async def test_parallel_gather_both_endpoints_called(self):
         """Verify ClassyFire and NPClassifier are called concurrently."""
