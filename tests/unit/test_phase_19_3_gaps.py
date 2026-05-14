@@ -24,16 +24,11 @@ Manual-only (frontend/observability -- require live Streamlit app):
   OPT-12  VALID_TRANSITIONS PROCESSING->PENDING -- already in 19.2
   OPT-16  uvloop -- installed implicitly via uvicorn[standard]
 """
-import importlib
 import inspect
-import json
-import logging
-import io
 import re
 import uuid
 
 import pytest
-import structlog
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -233,7 +228,7 @@ class TestOPT07CalcMolDescriptors:
         # A bare MolWt used as a descriptor key would look like: ['MolWt'] or ["MolWt"]
         bare_molwt_key = re.findall(r"""['"](MolWt)['"]""", sanitized)
         assert not bare_molwt_key, (
-            f"Found bare 'MolWt' as a dict key in compound_service.py code lines. "
+            "Found bare 'MolWt' as a dict key in compound_service.py code lines. "
             "D-18 requires ExactMolWt exclusively (monoisotopic, not average)."
         )
 
@@ -490,8 +485,7 @@ class TestOPT13PydanticAnnotatedValidators:
     def test_compound_name_type_alias_exists(self):
         """CompoundName Annotated alias must be exported from schemas."""
         from backend.models.schemas import CompoundName
-        from typing import get_type_hints, get_args, get_origin
-        from typing import Annotated
+        from typing import get_origin
 
         # Should be an Annotated type
         assert get_origin(CompoundName) is not None or "CompoundName" in str(CompoundName), (

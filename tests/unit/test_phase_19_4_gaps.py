@@ -47,12 +47,9 @@ Manual-only (require live Streamlit runtime):
   FE-M8  Dark mode: no illegible hardcoded colors in app.py/sidebar.py
   FE-M9  st.form wraps compound name + author name + submit button only
 """
-import ast
-import importlib
 import inspect
 import re
-import textwrap
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 import pytest
 
 
@@ -65,9 +62,7 @@ class TestFE01PendingUploadInActiveJobsFilter:
 
     def test_job_repository_get_active_jobs_includes_pending_upload(self):
         """PENDING_UPLOAD must appear in the get_active_jobs status filter."""
-        import inspect
         from backend.repositories.job_repository import JobRepository
-        from backend.models.enums import JobStatus
 
         src = inspect.getsource(JobRepository.get_active_jobs)
         assert "PENDING_UPLOAD" in src, (
@@ -85,7 +80,6 @@ class TestFE02BatchSummaryCountsPendingUploadAsCompleted:
 
     def test_batch_summary_includes_pending_upload_in_completed_count(self):
         """get_batch_summary SQL CASE must include PENDING_UPLOAD alongside COMPLETED."""
-        import inspect
         from backend.repositories.job_repository import JobRepository
 
         src = inspect.getsource(JobRepository.get_batch_summary)
@@ -104,7 +98,6 @@ class TestFE03MarkPendingUploadStepText:
 
     def test_mark_pending_upload_uses_processing_complete_step_text(self):
         """mark_pending_upload must NOT use 'Uploading results...' step text (D-07)."""
-        import inspect
         from backend.services.job_service import JobService
 
         src = inspect.getsource(JobService.mark_pending_upload)
@@ -127,7 +120,6 @@ class TestFE04CancelJobPendingUploadCleanup:
 
     def test_cancel_job_has_pending_upload_cleanup_guard(self):
         """cancel_job() must contain a PENDING_UPLOAD branch for compound cleanup."""
-        import inspect
         from backend.services.job_service import JobService
 
         src = inspect.getsource(JobService.cancel_job)
@@ -353,7 +345,6 @@ class TestFE12CorsNoHfSpaceLiteral:
 
     def test_cors_origins_default_excludes_hf_space_literal(self):
         """CORS_ORIGINS default must not contain '*.hf.space' — FE-12/D-72."""
-        import inspect
         from backend import config as config_module
         src = inspect.getsource(config_module)
         assert "*.hf.space" not in src, (
@@ -371,7 +362,6 @@ class TestFE13RecoverOnStartupPerJobCommit:
 
     def test_recover_on_startup_has_per_job_try_except_with_rollback(self):
         """recover_on_startup must have db.rollback() for error isolation — FE-13/D-68."""
-        import inspect
         from backend.services.job_service import JobService
 
         src = inspect.getsource(JobService.recover_on_startup)
@@ -393,7 +383,6 @@ class TestFE14UploadWorkerPerJobSession:
 
     def test_upload_worker_has_two_get_db_session_calls(self):
         """_process_pending_uploads must call get_db_session() twice: once for IDs, once per job."""
-        import inspect
         from backend.core import upload_worker
 
         src = inspect.getsource(upload_worker._process_pending_uploads)
@@ -413,7 +402,6 @@ class TestFE15CompoundServiceAsyncWithHttpx:
 
     def test_compound_service_no_manual_aclose_calls(self):
         """compound_service must not call .aclose() manually on httpx clients — FE-15/D-52."""
-        import inspect
         from backend.services import compound_service as cs_module
 
         src = inspect.getsource(cs_module)
@@ -424,7 +412,6 @@ class TestFE15CompoundServiceAsyncWithHttpx:
 
     def test_compound_service_uses_async_with_for_httpx_clients(self):
         """process_compound_job must use async with create_*_client() — FE-15/D-52."""
-        import inspect
         from backend.services.compound_service import process_compound_job
 
         src = inspect.getsource(process_compound_job)
@@ -445,7 +432,6 @@ class TestFE16GetActiveJobsReturnsNoneOnError:
 
     def test_get_active_jobs_source_has_no_empty_list_return_on_exception(self):
         """get_active_jobs must not return [] on RequestException — FE-16/D-28."""
-        import inspect
         from frontend.services.backend_client import ImpulatorAPIClient
 
         src = inspect.getsource(ImpulatorAPIClient.get_active_jobs)
@@ -701,7 +687,6 @@ class TestFE23CompoundRepositoryParentNameJoin:
 
     def test_get_compounds_paginated_uses_aliased(self):
         """get_compounds_paginated source must import and use aliased() — FE-23/D-08."""
-        import inspect
         from backend.repositories.compound_repository import CompoundRepository
 
         src = inspect.getsource(CompoundRepository.get_compounds_paginated)
@@ -712,7 +697,6 @@ class TestFE23CompoundRepositoryParentNameJoin:
 
     def test_get_compounds_paginated_uses_outerjoin_for_parent(self):
         """get_compounds_paginated must use outerjoin for parent name resolution — FE-23/D-08."""
-        import inspect
         from backend.repositories.compound_repository import CompoundRepository
 
         src = inspect.getsource(CompoundRepository.get_compounds_paginated)
@@ -723,7 +707,6 @@ class TestFE23CompoundRepositoryParentNameJoin:
 
     def test_get_compounds_paginated_returns_tuple_with_parent_name(self):
         """get_compounds_paginated return type must include parent_name as second tuple element."""
-        import inspect
         from backend.repositories.compound_repository import CompoundRepository
 
         src = inspect.getsource(CompoundRepository.get_compounds_paginated)
@@ -741,7 +724,6 @@ class TestFE24ValidatorsMockConfigAlignment:
 
     def test_validators_max_smiles_length_is_5000(self):
         """validators._MockConfig MAX_SMILES_LENGTH must be 5000 — FE-24."""
-        import inspect
         import frontend.utils.validators as validators_module
 
         src = inspect.getsource(validators_module)
@@ -755,7 +737,6 @@ class TestFE24ValidatorsMockConfigAlignment:
 
     def test_validators_max_compound_name_length_is_255(self):
         """validators._MockConfig MAX_COMPOUND_NAME_LENGTH must be 255 — FE-24."""
-        import inspect
         import frontend.utils.validators as validators_module
 
         src = inspect.getsource(validators_module)

@@ -22,9 +22,7 @@ test_api_client.py:
 asyncio_mode = auto in pytest.ini -- no @pytest.mark.asyncio needed.
 """
 
-import asyncio
 import json
-import time
 
 import httpx
 import pytest
@@ -34,12 +32,9 @@ pytest.importorskip("rdkit")
 
 from backend.modules.api_client import (
     _chembl_request,
-    _circuits,
     _fetch_activities_for_type,
-    _get_circuit,
     fetch_all_activities_single_batch,
     fetch_batch_molecule_data,
-    get_chembl_ids,
     POST_ID_THRESHOLD,
 )
 

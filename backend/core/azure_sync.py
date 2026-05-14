@@ -3,7 +3,6 @@ Azure Blob Storage utilities.
 Handles result ZIP storage and log archival in Azure Blob storage.
 """
 import gzip
-import os
 import re
 import logging
 import tempfile

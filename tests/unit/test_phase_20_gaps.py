@@ -276,7 +276,7 @@ class TestIntegrationSuiteExists:
         )
         # Must collect at least some tests
         collected_line = [
-            l for l in result.stdout.splitlines() if "collected" in l
+            line for line in result.stdout.splitlines() if "collected" in line
         ]
         assert collected_line, "No 'collected' line in pytest output"
         # Parse count
@@ -378,7 +378,7 @@ class TestGoldenFixturesAndIMPScoring:
         compounds = data["compounds"]
         assert isinstance(compounds, list), "'compounds' must be a JSON array"
         assert len(compounds) >= 1, (
-            f"'compounds' array is empty — golden fixtures provide no regression coverage"
+            "'compounds' array is empty — golden fixtures provide no regression coverage"
         )
 
     def test_golden_fixture_compound_has_expected_score_fields(self):
