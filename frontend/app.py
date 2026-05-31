@@ -17,12 +17,13 @@ import streamlit as st  # noqa: E402
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from frontend.utils import SessionState, VIEW_HOME, VIEW_ANALYZE, VIEW_COMPOUND_DETAILS  # noqa: E402
+from frontend.utils import SessionState, VIEW_HOME, VIEW_ANALYZE, VIEW_COMPOUND_DETAILS, VIEW_COLLECTIONS  # noqa: E402
 from frontend.ui.components import render_sidebar  # noqa: E402
 from frontend.ui.pages import (  # noqa: E402
     render_home_page,
     render_analyze_page,
     render_compound_detail_page,
+    render_collections_page,
 )
 from frontend.services import get_api_client, set_session_id  # noqa: E402
 
@@ -87,6 +88,9 @@ def main():
 
     elif current_view == VIEW_COMPOUND_DETAILS:
         render_compound_detail_page()
+
+    elif current_view == VIEW_COLLECTIONS:
+        render_collections_page()
 
     else:
         # Fallback to home

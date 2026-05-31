@@ -521,9 +521,17 @@ def _save_results_sync(
     all_similar_df: pd.DataFrame | None = None,
     entry_id: str | None = None,
     author_name: str | None = None,
+    results_dir: str | None = None,
 ) -> tuple:
-    """Save results to disk and create ZIP archive (CPU/disk I/O bound)."""
-    results_dir = settings.RESULTS_DIR
+    """Save results to disk and create ZIP archive (CPU/disk I/O bound).
+
+    Args:
+        results_dir: Optional output root. Defaults to ``settings.RESULTS_DIR``.
+            Collection members (Phase 23) pass a per-member-UNIQUE temp dir keyed
+            on entry_id so two same-named members never collide in RESULTS_DIR.
+    """
+    if results_dir is None:
+        results_dir = settings.RESULTS_DIR
     safe_name = sanitize_compound_name(compound_name)
     compound_folder = os.path.join(results_dir, safe_name)
     os.makedirs(compound_folder, exist_ok=True)
@@ -937,6 +945,243 @@ async def process_compound_job(  # pragma: no cover -- orchestration of 10+ exte
                         result_summary={},
                         completed_at=datetime.now(timezone.utc).isoformat(),
                     )
+
+
+# ---------------------------------------------------------------------------
+# Collection member reuse seam (Phase 23, Plan 01) -- RESEARCH Pattern 2 / A4
+# ---------------------------------------------------------------------------
+
+class CollectionMemberError(Exception):
+    """Member-scoped failure raised by process_collection_member.
+
+    Per seam rule (a)/(b): a failing collection member raises THIS instead of
+    failing the whole job. The fan-out coroutine (Plan 23-02) catches it to
+    record per-member failure (member_failed_count) while keeping the shared
+    COLLECTION job row untouched -- resilient partial success (D-09).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        member_name: str | None = None,
+        cascade_results: list[dict] | None = None,
+    ):
+        super().__init__(message)
+        self.member_name = member_name
+        self.cascade_results = cascade_results
+
+
+async def process_collection_member(
+    member_input: dict,
+    *,
+    results_dir: str | None = None,
+) -> tuple:
+    """Run the compound compute pipeline for ONE collection member.
+
+    This is the LOAD-BEARING reuse seam for Phase 23 (RESEARCH Pattern 2 / A4):
+    it runs the same compute steps as process_compound_job (ChEMBL search ->
+    activity fetch -> descriptors -> PAINS -> efficiency -> IMP/PDB ->
+    classification -> save) but as a member-scoped, side-effect-free unit:
+
+      (a) raises CollectionMemberError rather than failing the whole job;
+      (b) never touches job status (no PENDING_UPLOAD / completed / fail writes);
+      (c) never reports per-member job progress (N members would clobber the
+          shared job row -- the fan-out coroutine writes aggregate progress,
+          D-09);
+      (d) writes to a per-member-UNIQUE temp dir keyed on entry_id (avoids the
+          RESULTS_DIR/{sanitized_name} collision when two members share a name);
+      (e) forces a FRESH create + skips the global InChIKey lookup (D-08): the
+          compute seam performs NO compound-row persistence and NO global
+          InChIKey dedup lookup (that logic lives in job_service), so members
+          are isolated by construction -- they never reuse or hijack an existing
+          global compound row.
+
+    Members run as awaitable coroutines under a local asyncio.Semaphore(4)
+    (D-04) -- NEVER via executor.submit (re-entry deadlock).
+
+    Args:
+        member_input: One members_config entry (D-02):
+            {"name", "smiles", "author_name"?, "similarity_threshold"?,
+             "activity_types"?}.
+        results_dir: Output root under which the per-member-UNIQUE subdir is
+            created. Defaults to settings.RESULTS_DIR. Regardless of this value,
+            the member writes under `<results_dir>/_collection_members/<entry_id>`
+            so two same-named members (which sanitize to the same folder) NEVER
+            share a compound_folder -- one member's _save_results_sync cleanup
+            can otherwise rmtree another's in-flight files (d).
+
+    Returns:
+        (df_results, result_summary, files):
+            df_results -- the computed per-member DataFrame,
+            result_summary -- the metadata dict (with entry_id, storage_path),
+            files -- list of artifact paths produced (the member ZIP).
+
+    Raises:
+        CollectionMemberError: on any failure (no similar compounds, no
+            bioactivity data, or an unexpected compute error).
+    """
+    member_name = member_input.get("name") or "member"
+    smiles = member_input.get("smiles")
+    if not smiles:
+        raise CollectionMemberError(
+            "Member is missing a SMILES string", member_name=member_name
+        )
+
+    # `or 90` (not `.get(key, 90)`) so a present-but-None value — what
+    # CollectionMember.model_dump() stores when no per-member override was set —
+    # also defaults instead of crashing on int(None).
+    similarity_threshold = int(member_input.get("similarity_threshold") or 90)
+    activity_types = member_input.get("activity_types")
+    author_name = member_input.get("author_name")
+
+    # (d) Per-member-UNIQUE output root keyed on entry_id -> no collision when
+    # two members share a name (sanitize_compound_name maps both to the same
+    # folder otherwise, and _save_results_sync rmtree's that folder on cleanup,
+    # nuking a same-named member's in-flight files). entry_id also forces a fresh
+    # ZIP key (e). Uniqueness is UNCONDITIONAL: even when the caller passes a
+    # shared results_dir (the fan-out does), each member gets its own subdir.
+    entry_id = str(uuid.uuid4())
+    member_root = os.path.join(
+        results_dir or settings.RESULTS_DIR, "_collection_members", entry_id
+    )
+    os.makedirs(member_root, exist_ok=True)
+
+    loop = asyncio.get_running_loop()
+
+    try:
+        async with create_chembl_client() as chembl_client, \
+                   create_pdb_client() as pdb_client, \
+                   create_classifier_client() as classifier_client:
+            # Step 1: ChEMBL similarity search -- Network I/O
+            chembl_ids = await get_chembl_ids(chembl_client, smiles, similarity_threshold)
+            similarity_scores = {
+                d.get('ChEMBL ID'): d.get('Similarity', 0)
+                for d in chembl_ids if d.get('ChEMBL ID')
+            }
+            all_similar_chembl_ids = list(similarity_scores.keys())
+            if not chembl_ids:
+                cascade = []
+                try:
+                    cascade = await cascade_similarity_counts(
+                        chembl_client, smiles, similarity_threshold
+                    )
+                except (ConnectionError, TimeoutError, OSError) as e:
+                    logger.debug(f"Cascade probe skipped (ChEMBL unreachable): {e}")
+                raise CollectionMemberError(
+                    f"No similar compounds found in ChEMBL at "
+                    f"{similarity_threshold}% threshold",
+                    member_name=member_name,
+                    cascade_results=cascade,
+                )
+
+            # Step 2: Fetch bioactivity (member-scoped, no per-member progress)
+            all_results = await _fetch_activities_async(
+                chembl_client, chembl_ids, activity_types,
+                lambda pct, msg: asyncio.sleep(0),  # no-op callback (c)
+            )
+            if not all_results:
+                cascade = []
+                try:
+                    cascade = await cascade_similarity_counts(
+                        chembl_client, smiles, similarity_threshold
+                    )
+                except (ConnectionError, TimeoutError, OSError) as e:
+                    logger.debug(f"Cascade probe skipped (ChEMBL unreachable): {e}")
+                raise CollectionMemberError(
+                    "No bioactivity data found",
+                    member_name=member_name,
+                    cascade_results=cascade,
+                )
+
+            # Step 3: Descriptors / PAINS / efficiency -- CPU bound
+            df_results = pd.DataFrame(all_results)
+            df_results.replace("No data", np.nan, inplace=True)
+            if 'ChEMBL_ID' in df_results.columns:
+                df_results['Similarity'] = (
+                    df_results['ChEMBL_ID'].map(similarity_scores).fillna(0)
+                )
+            df_results = await loop.run_in_executor(
+                None, _calculate_molecular_descriptors_sync, df_results
+            )
+            df_results = await loop.run_in_executor(
+                None, _add_assay_interference_flags_sync, df_results
+            )
+            df_results = await loop.run_in_executor(
+                None, _calculate_advanced_metrics_sync, df_results
+            )
+
+            # Step 4: IMP scoring + PDB -- mixed network + CPU
+            pdb_unavailable = False
+            try:
+                df_results = await calculate_imp_score(
+                    pdb_client, df_results, use_pdb=True
+                )
+            except Exception as e:
+                logger.warning(f"Member '{member_name}' IMP scoring failed: {e}")
+                pdb_unavailable = True
+
+            # Step 5: IMP classification -- CPU
+            df_results = await loop.run_in_executor(
+                None, classify_imp_candidates, df_results, 2, True
+            )
+
+            # Step 6: Chemical classification -- Network I/O
+            df_results = await _add_chemical_classification_async(
+                classifier_client, df_results
+            )
+
+            # Step 6.5: All-similar catalog -- Network I/O (best-effort)
+            try:
+                all_similar_df = await _build_all_similar_df_async(
+                    chembl_client, classifier_client, all_similar_chembl_ids,
+                    similarity_scores, df_results,
+                )
+            except Exception as e:
+                logger.warning(f"Member '{member_name}' all-similar catalog failed: {e}")
+                all_similar_df = pd.DataFrame()
+
+            # Step 6.6: Drug indications -- Network I/O
+            indications_df = await _fetch_drug_indications_async(
+                chembl_client, df_results
+            )
+
+            # Step 7: Save member artifacts to the per-member-UNIQUE dir (d).
+            # NOTE: no job status writes (b), no per-member progress reporting
+            # (c), no global InChIKey lookup / in-place compound hijack (e).
+            result_path, result_summary = await loop.run_in_executor(
+                None, _save_results_sync,
+                member_name, smiles, similarity_threshold, activity_types,
+                df_results, indications_df, all_similar_df, entry_id, author_name,
+                member_root,
+            )
+            result_summary['entry_id'] = entry_id
+            result_summary['storage_path'] = get_collection_member_storage_key(entry_id)
+            if pdb_unavailable:
+                result_summary['pdb_unavailable'] = True
+
+            return df_results, result_summary, [result_path]
+
+    except CollectionMemberError:
+        raise
+    except Exception as e:
+        logger.exception(
+            f"Collection member '{member_name}' failed: {type(e).__name__}: {e}"
+        )
+        raise CollectionMemberError(
+            f"Member '{member_name}' failed: {type(e).__name__}: {e}",
+            member_name=member_name,
+        ) from e
+
+
+def get_collection_member_storage_key(entry_id: str) -> str:
+    """Sharded storage key for a member ZIP (mirrors entry_id sharding).
+
+    Distinct from get_storage_path_from_entry_id (D-12: collections live under a
+    separate Azure prefix); the actual collection prefix is applied when the
+    member ZIP is folded into the collection ZIP in Plan 23-02.
+    """
+    eid = str(entry_id).lower()
+    return f"{eid[:2]}/{eid}.zip"
 
 
 # ---------------------------------------------------------------------------

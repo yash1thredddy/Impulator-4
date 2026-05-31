@@ -35,6 +35,7 @@ def _default_factory(value: Any) -> Callable[[], Any]:
 VIEW_HOME = "home"
 VIEW_ANALYZE = "analyze"
 VIEW_COMPOUND_DETAILS = "compound_details"
+VIEW_COLLECTIONS = "collections"
 
 
 @dataclass
@@ -240,6 +241,12 @@ class SessionState:
         cls.set_view(VIEW_ANALYZE)
 
     @classmethod
+    def navigate_to_collections(cls) -> None:
+        """Navigate to the collections list view (Phase 23)."""
+        cls.set_view(VIEW_COLLECTIONS)
+        cls.set('selected_collection_id', None)
+
+    @classmethod
     def navigate_to_compound(cls, compound_name: str, entry_id: str = None, storage_path: str = None, is_duplicate: bool = False, duplicate_of_name: str = None) -> None:
         """Navigate to compound details view.
 
@@ -255,6 +262,9 @@ class SessionState:
         cls.set('selected_compound_storage_path', storage_path)
         cls.set('selected_compound_is_duplicate', is_duplicate)
         cls.set('selected_compound_duplicate_of_name', duplicate_of_name)
+        # Default to the ZIP root (single-compound view). Collection member
+        # drill-in overrides this AFTER navigating (D-12 internal_prefix seam).
+        cls.set('selected_compound_internal_prefix', "")
         cls.set('show_delete_confirmation', False)
         cls.set_view(VIEW_COMPOUND_DETAILS)
 
@@ -325,18 +335,24 @@ class SessionState:
 
     # File change detection
     @classmethod
-    def file_changed(cls, file) -> bool:
-        """Check if an uploaded file has changed."""
+    def file_changed(cls, file, key: str = 'uploaded_file_hash') -> bool:
+        """Check if an uploaded file has changed.
+
+        ``key`` names the session-state slot that holds the last-seen file hash.
+        Distinct keys let independent uploaders (e.g. the Batch and Collection
+        tabs, which both render every run) track their files without clobbering
+        each other. Default preserves the original Batch behaviour.
+        """
         if file is None:
             return False
 
         try:
             file_content = file.getvalue()
             current_hash = hashlib.sha256(file_content).hexdigest()
-            stored_hash = cls.get('uploaded_file_hash')
+            stored_hash = cls.get(key)
 
             if current_hash != stored_hash:
-                cls.set('uploaded_file_hash', current_hash)
+                cls.set(key, current_hash)
                 return True
 
             return False

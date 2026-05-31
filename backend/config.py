@@ -39,6 +39,10 @@ class Settings(BaseSettings):
 
     # Executor (async job processing)
     MAX_CONCURRENT_JOBS: int = 10  # Max concurrent async jobs (asyncio.Semaphore)
+    # D-04: a COLLECTION job holds exactly ONE global executor slot and fans its
+    # members out under this LOCAL asyncio.Semaphore -- members are awaited
+    # coroutines, NEVER executor.submit (re-entry deadlock against the 1 global slot).
+    COLLECTION_MEMBER_CONCURRENCY: int = 4
     JOB_TIMEOUT: int = 3600  # 1 hour max per job
     SHUTDOWN_TIMEOUT: int = 25  # Seconds to wait for in-flight jobs (HF Spaces has 30s grace)
 
@@ -56,6 +60,15 @@ class Settings(BaseSettings):
     # Cache (in-memory with TTL)
     CACHE_SIZE: int = 500  # Bounded at 500 to limit memory (STAB-04)
     CACHE_TTL_SECONDS: int = 3600  # 1 hour TTL
+
+    # ClassyFire pause toggle (2026-05-30).
+    # TEMPORARY OPERATIONAL PAUSE -- not a permanent feature default. All three
+    # ClassyFire mirrors (Fiehn/GNPS/Wishart) are flapping/429-ing, so collection
+    # and single jobs thrash on retry-backoff. Default False pauses ClassyFire in
+    # ALL environments via code alone (we don't edit .env). NPClassifier is a
+    # different, healthy endpoint and stays live. Re-enable when mirrors recover:
+    # set env CLASSYFIRE_ENABLED=true, or flip this default back to True.
+    CLASSYFIRE_ENABLED: bool = False
 
     # External APIs
     CHEMBL_API_URL: str = "https://www.ebi.ac.uk/chembl/api/data"

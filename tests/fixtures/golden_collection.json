@@ -1,0 +1,75 @@
+{
+  "metadata": {
+    "generated": "2026-05-29",
+    "version": "1.0",
+    "description": "Golden COLLECTION fixture for Phase 23 (Collections MVP). ONE collection with a small known member set (3 real compounds) under the members_config shape (D-02), plus an 'expected' block with per-member IMP/activity expectations and an aggregate bioactivity heatmap matrix (members x activity-types). The aggregate matrix shape (D-01/D-10) is the contract downstream fan-out + heatmap tests verify. Per-member 'expected' values are illustrative placeholders for the scaffold and are tightened by the plans that compute them (23-02 fan-out, 23-07 charts).",
+    "tolerance": 0.0001,
+    "supersedes_note": "Does NOT modify tests/fixtures/golden_compounds.json (the IMP-scoring baseline)."
+  },
+  "collection": {
+    "name": "Golden Kinase Triage Set",
+    "author_name": "Phase23 Fixture",
+    "description": "Three related small molecules processed as one COLLECTION job (D-02 members_config shape).",
+    "similarity_threshold": 90,
+    "activity_types": ["IC50", "Ki", "Kd"]
+  },
+  "members": [
+    {
+      "name": "Ethanol",
+      "smiles": "CCO",
+      "author_name": "Phase23 Fixture",
+      "similarity_threshold": 90,
+      "activity_types": ["IC50", "Ki", "Kd"]
+    },
+    {
+      "name": "Propanol",
+      "smiles": "CCCO",
+      "author_name": "Phase23 Fixture",
+      "similarity_threshold": 90,
+      "activity_types": ["IC50", "Ki", "Kd"]
+    },
+    {
+      "name": "Aspirin",
+      "smiles": "CC(=O)OC1=CC=CC=C1C(=O)O",
+      "author_name": "Phase23 Fixture",
+      "similarity_threshold": 90,
+      "activity_types": ["IC50", "Ki", "Kd"]
+    }
+  ],
+  "expected": {
+    "member_count": 3,
+    "min_members": 2,
+    "per_member": {
+      "Ethanol": {
+        "has_imp_score": true,
+        "imp_score_range": [0, 100],
+        "activity_types_present": ["IC50", "Ki"]
+      },
+      "Propanol": {
+        "has_imp_score": true,
+        "imp_score_range": [0, 100],
+        "activity_types_present": ["IC50", "Kd"]
+      },
+      "Aspirin": {
+        "has_imp_score": true,
+        "imp_score_range": [0, 100],
+        "activity_types_present": ["IC50", "Ki", "Kd"]
+      }
+    },
+    "aggregate": {
+      "rank_default_sort": "imp_score_desc",
+      "activity_types": ["IC50", "Ki", "Kd"],
+      "heatmap_matrix": {
+        "rows": ["Ethanol", "Propanol", "Aspirin"],
+        "columns": ["IC50", "Ki", "Kd"],
+        "values": [
+          [1, 1, 0],
+          [1, 0, 1],
+          [1, 1, 1]
+        ]
+      },
+      "imp_candidate_count": 1,
+      "unique_targets_min": 1
+    }
+  }
+}

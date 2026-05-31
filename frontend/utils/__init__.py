@@ -7,6 +7,7 @@ from frontend.utils.session_state import (
     VIEW_HOME,
     VIEW_ANALYZE,
     VIEW_COMPOUND_DETAILS,
+    VIEW_COLLECTIONS,
 )
 from frontend.utils.exceptions import (
     ImpulatorError,
@@ -73,6 +74,7 @@ __all__ = [
     "VIEW_HOME",
     "VIEW_ANALYZE",
     "VIEW_COMPOUND_DETAILS",
+    "VIEW_COLLECTIONS",
     # Exceptions
     "ImpulatorError",
     "InvalidSMILESError",

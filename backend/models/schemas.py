@@ -806,6 +806,189 @@ class BatchDeleteResponse(BaseModel):
 
 
 # ============================================================================
+# Collection Schemas (Phase 23)
+# ============================================================================
+
+# D-06 member-count bounds: a comparison needs >=2 members; the hard cap is 100
+# (collections are "related sets", NOT bulk batches which cap at 1000).
+COLLECTION_MIN_MEMBERS = 2
+COLLECTION_MAX_MEMBERS = 100
+
+
+class CollectionMember(BaseModel):
+    """A single member input-definition within a collection.
+
+    Mirrors a per-compound input: a display ``name`` plus its main ``smiles``,
+    with optional per-member overrides. Stored (with the rest of the list) in
+    ``collections.members_config`` JSONB (D-02).
+    """
+
+    name: CompoundName
+    smiles: SmilesString
+    similarity_threshold: SimilarityThreshold | None = None
+    activity_types: list[str] | None = None
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
+class CollectionJobCreate(BaseModel):
+    """Request schema for creating a collection job (client -> API).
+
+    Validates the collection ``name`` / ``author_name`` against
+    ``COMPOUND_NAME_PATTERN`` (D-03 path-traversal guard) and enforces the
+    D-06 member-count bounds (min 2, hard cap 100).
+    """
+
+    name: str = Field(..., min_length=1, max_length=255)
+    author_name: str = Field(..., min_length=1, max_length=100)
+    description: str | None = Field(None, max_length=2000)
+    members: list[CollectionMember] = Field(
+        ...,
+        description="Member input-definitions (2..100, D-06).",
+    )
+    # Session ID for user isolation (applied to the collection's job)
+    session_id: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        """Validate the collection name (D-03 path-traversal guard).
+
+        Reuses the module-level COMPOUND_NAME_PATTERN whitelist so that
+        ``../`` and other path characters are rejected at the schema boundary.
+        """
+        if not v or not v.strip():
+            raise ValueError("Collection name cannot be empty")
+        v = v.strip()
+        if len(v) > 255:
+            raise ValueError("Collection name too long (max 255 characters)")
+        if not COMPOUND_NAME_PATTERN.match(v):
+            raise ValueError("Collection name contains invalid characters")
+        if ".." in v or "/" in v or "\\" in v:
+            raise ValueError("Collection name contains invalid path characters")
+        if "\x00" in v:
+            raise ValueError("Collection name contains invalid characters")
+        return v
+
+    @field_validator("author_name")
+    @classmethod
+    def validate_author_name(cls, v: str) -> str:
+        """Validate the author name against COMPOUND_NAME_PATTERN (D-03)."""
+        if not v or not v.strip():
+            raise ValueError("Author name cannot be empty")
+        v = v.strip()
+        if len(v) > 100:
+            raise ValueError("Author name too long (max 100 characters)")
+        if not COMPOUND_NAME_PATTERN.match(v):
+            raise ValueError("Author name contains invalid characters")
+        if "\x00" in v:
+            raise ValueError("Author name contains invalid characters")
+        return v
+
+    @field_validator("members")
+    @classmethod
+    def validate_member_count(
+        cls, v: list[CollectionMember]
+    ) -> list[CollectionMember]:
+        """Enforce the D-06 member-count bounds: 2 <= len(members) <= 100."""
+        count = len(v)
+        if count < COLLECTION_MIN_MEMBERS:
+            raise ValueError(
+                f"A collection needs at least {COLLECTION_MIN_MEMBERS} members "
+                f"to compare (got {count})."
+            )
+        if count > COLLECTION_MAX_MEMBERS:
+            raise ValueError(
+                f"A collection may have at most {COLLECTION_MAX_MEMBERS} members "
+                f"(got {count})."
+            )
+        return v
+
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        json_schema_extra={
+            "example": {
+                "name": "Flavonoid Comparison",
+                "author_name": "Jane Doe",
+                "description": "Comparing common dietary flavonoids.",
+                "members": [
+                    {"name": "Quercetin", "smiles": "O=c1c(O)c(-c2ccc(O)c(O)c2)oc2cc(O)cc(O)c12"},
+                    {"name": "Kaempferol", "smiles": "O=c1c(O)c(-c2ccc(O)cc2)oc2cc(O)cc(O)c12"},
+                ],
+            }
+        },
+    )
+
+
+class CollectionSummary(BaseModel):
+    """Summary of a collection for list/sidebar display (ORM-backed)."""
+
+    id: uuid.UUID
+    name: str
+    author_name: str
+    job_id: uuid.UUID
+    compound_count: int = 0
+    member_failed_count: int = 0
+    avg_imp_score: float | None = None
+    imp_candidate_count: int = 0
+    unique_targets: int = 0
+    created_at: datetime | None = None
+    # Linked-job status, folded in by the endpoint (collections are global but
+    # their job is session-scoped — see CollectionResponse below).
+    status: str | None = None
+    progress: float | None = None
+    message: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CollectionResponse(BaseModel):
+    """Response for a single collection (ORM-backed)."""
+
+    id: uuid.UUID
+    name: str
+    description: str | None = None
+    author_name: str
+    job_id: uuid.UUID
+    storage_path: str | None = None
+    compound_count: int = 0
+    member_failed_count: int = 0
+    avg_imp_score: float | None = None
+    imp_candidate_count: int = 0
+    unique_targets: int = 0
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    # Linked-job status folded in by the collection endpoints. Collections are a
+    # GLOBAL resource (D-05) but the linked job is session-scoped, so the
+    # frontend reads status from here instead of the session-owned /jobs/{id}
+    # endpoint (which 403s for any non-owner session viewing a global collection).
+    status: str | None = None
+    progress: float | None = None
+    message: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CollectionDetailResponse(CollectionResponse):
+    """Detailed collection response including member input-definitions (D-02)."""
+
+    members_config: dict[str, Any] | None = None
+    failed_members: list[dict] | None = None  # D-PF-6: [{name, error, cascade_results}]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CollectionListResponse(BaseModel):
+    """Paginated list of collections."""
+
+    items: list[CollectionSummary]
+    total: int
+    page: int = 1
+    page_size: int = 50
+    pages: int = 1
+
+
+# ============================================================================
 # Health Schemas
 # ============================================================================
 

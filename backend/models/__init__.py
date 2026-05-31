@@ -8,6 +8,7 @@ from backend.models.job import Job
 from backend.models.compound import Compound
 from backend.models.deleted_compound import DeletedCompound
 from backend.models.audit import AuditEvent
+from backend.models.collection import Collection
 
 # Pydantic schemas
 from backend.models.schemas import (
@@ -22,6 +23,9 @@ from backend.models.schemas import (
     CompoundDeleteResponse, BatchDeleteResponse,
     CompoundVersionItem, CompoundVersionsResponse,
     CompoundStructure,
+    # Collection schemas
+    CollectionMember, CollectionJobCreate, CollectionSummary,
+    CollectionResponse, CollectionDetailResponse, CollectionListResponse,
     # Duplicate schemas
     CheckDuplicatesRequest, CheckDuplicatesResponse,
     DuplicateMatch, InternalDuplicateMatch,
@@ -44,7 +48,7 @@ __all__ = [
     # Base
     "PGBase",
     # ORM models
-    "Job", "Compound", "DeletedCompound", "AuditEvent",
+    "Job", "Compound", "DeletedCompound", "AuditEvent", "Collection",
     # Enums
     "JobStatus", "JobType", "AuditEventType", "DuplicateAction",
     # Job schemas
@@ -56,6 +60,9 @@ __all__ = [
     "CompoundDeleteResponse", "BatchDeleteResponse",
     "CompoundVersionItem", "CompoundVersionsResponse",
     "CompoundStructure",
+    # Collection schemas
+    "CollectionMember", "CollectionJobCreate", "CollectionSummary",
+    "CollectionResponse", "CollectionDetailResponse", "CollectionListResponse",
     # Duplicate schemas
     "CheckDuplicatesRequest", "CheckDuplicatesResponse",
     "DuplicateMatch", "InternalDuplicateMatch",

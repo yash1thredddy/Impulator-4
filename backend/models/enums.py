@@ -31,6 +31,7 @@ class JobType(str, enum.Enum):
 
     SINGLE = "single"
     BATCH = "batch"
+    COLLECTION = "collection"
 
 
 class AuditEventType(str, enum.Enum):

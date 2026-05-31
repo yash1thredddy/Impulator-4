@@ -83,3 +83,7 @@ scripts/quercetin_targets.csv
 scripts/test_gnps2_endpoints.py
 # GSD planning docs (local only)
 .planning/
+
+# Local manuscript drafts + scratch output (not part of the codebase)
+Paper/
+output.txt

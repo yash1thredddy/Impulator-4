@@ -1265,6 +1265,7 @@ class JobService:
         job_id: str,
         error_message: str,
         cascade_results: list = None,
+        failed_members: list = None,
     ) -> Job | None:
         """
         Mark job as failed.
@@ -1275,6 +1276,9 @@ class JobService:
             error_message: Error description
             cascade_results: Optional list of {threshold, count} dicts from
                 cascade similarity probing (stored in result_summary JSONB).
+            failed_members: Optional list of {name, error, cascade_results} rows
+                for a failed COLLECTION job (D-PF-6). Persisted in result_summary
+                JSONB so it survives the auto-delete of the collection row (D-11).
         """
         job = self._get_job_for_update(db, job_id)
         if not job:
@@ -1286,8 +1290,14 @@ class JobService:
         job.error_message = error_message
         job.completed_at = datetime.now(timezone.utc)
 
+        # Merge (not clobber) both diagnostic payloads into result_summary JSONB.
+        summary: dict = {}
         if cascade_results is not None:
-            job.result_summary = {"cascade_results": cascade_results}  # JSONB -- dict directly
+            summary["cascade_results"] = cascade_results
+        if failed_members is not None:
+            summary["failed_members"] = failed_members
+        if summary:
+            job.result_summary = summary
 
         db.commit()
         db.refresh(job)

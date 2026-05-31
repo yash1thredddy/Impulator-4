@@ -12,7 +12,7 @@ import structlog
 
 from backend.core.database import get_db_session
 from backend.core.logging import request_id_var, session_id_var
-from backend.models.enums import JobStatus
+from backend.models.enums import JobStatus, JobType
 from backend.repositories import job_repo
 
 logger = structlog.get_logger(__name__)
@@ -110,6 +110,16 @@ async def _process_pending() -> bool:
     # Extract job data outside DB session (expire_on_commit=False keeps attrs)
     job_params = []
     for job in jobs:
+        # BLOCKER-1 (HC-2): COLLECTION jobs carry no job-level smiles. Bypass the
+        # single-smiles guard BEFORE it can instant-fail them. Members are loaded
+        # from collections.members_config by job_id inside the coroutine (D-02);
+        # nothing about the member set is read here.
+        if job.job_type == JobType.COLLECTION:
+            job_params.append({
+                "job_id": job.id,
+                "job_type": JobType.COLLECTION,
+            })
+            continue
         if not job.compound_name or not job.smiles:
             # Mark invalid jobs as failed
             with get_db_session() as db:
@@ -133,6 +143,7 @@ async def _process_pending() -> bool:
 
     # Submit outside DB session
     from backend.services.compound_service import process_compound_job
+    from backend.services.collection_service import process_collection_job
 
     for params in job_params:
         try:
@@ -145,15 +156,26 @@ async def _process_pending() -> bool:
                 session_id="scheduler",
             )
 
-            await executor.submit(
-                params["job_id"],
-                process_compound_job,
-                compound_name=params["compound_name"],
-                smiles=params["smiles"],
-                similarity_threshold=params["similarity_threshold"],
-                activity_types=params["activity_types"],
-                author_name=params["author_name"],
-            )
+            # BLOCKER-2 (HC-2): branch on job_type. COLLECTION dispatches the
+            # async fan-out coroutine ONCE (1 global executor slot, D-04) with NO
+            # smiles/compound_name kwargs -- the coroutine loads members from
+            # collections.members_config by job_id (D-02). Everything else keeps
+            # the existing single-compound submit unchanged.
+            if params.get("job_type") == JobType.COLLECTION:
+                await executor.submit(
+                    params["job_id"],
+                    process_collection_job,
+                )
+            else:
+                await executor.submit(
+                    params["job_id"],
+                    process_compound_job,
+                    compound_name=params["compound_name"],
+                    smiles=params["smiles"],
+                    similarity_threshold=params["similarity_threshold"],
+                    activity_types=params["activity_types"],
+                    author_name=params["author_name"],
+                )
         except Exception as e:
             logger.error("scheduler_submit_error", error=str(e), job_id=str(params["job_id"]))
 

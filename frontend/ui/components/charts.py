@@ -9,13 +9,54 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+from sklearn.mixture import GaussianMixture
 from typing import Optional, Any
 
+from backend.modules.imp_gmm import DENSITY_GRID, component_curves
 from frontend.ui.components.molecule_viewer import (
     embed_structure_viewer,
     render_structure_viewer_hint,
     prepare_chart_customdata,
 )
+
+# Number of target columns retained in the collection bioactivity heatmap
+# (D-10). Targets are ranked by member-hit-count (how many members have any
+# activity against the target) then total activity, and the top-K are kept;
+# the page surfaces an "+N more targets" caption for the remainder.
+HEATMAP_TOP_K = 25
+
+# Max characters shown on a heatmap target tick label before truncation. The
+# full target name is preserved in the hover tooltip (D-01 / UI-SPEC §3).
+HEATMAP_TARGET_LABEL_MAXLEN = 24
+
+# Approximate pixel height allotted per member row so the heatmap grows with
+# member count instead of squashing rows (UI-SPEC §3 "~32px/row").
+HEATMAP_ROW_HEIGHT_PX = 32
+
+
+def _subscript(k: int) -> str:
+    """Return the Unicode subscript digit for ``k``.
+
+    Single-digit subscript only (k ∈ [0, 9]). Safe for Phase 22 because
+    ``MAX_COMPONENTS = 6``.
+    """
+    return chr(0x2080 + k)
+
+
+def _rgba_with_alpha(color: str, alpha: float) -> str:
+    """Convert a Plotly color string to an ``rgba(r, g, b, a)`` translucent variant.
+
+    Accepts either ``rgb(r,g,b)`` (Plotly qualitative palettes like ``Set2``
+    return this format) or ``#rrggbb`` hex strings. Used for translucent fills
+    under the GMM density-overlay component curves so the qualitative-palette
+    identity is preserved while reducing visual weight relative to the solid
+    component lines.
+    """
+    if color.startswith("rgb"):
+        r, g, b = px.colors.unlabel_rgb(color)
+    else:
+        r, g, b = px.colors.hex_to_rgb(color)
+    return f"rgba({int(r)}, {int(g)}, {int(b)}, {alpha})"
 
 
 def get_plotly_theme() -> dict:
@@ -180,6 +221,138 @@ def create_histogram(
     return apply_impulator_theme(fig)
 
 
+def create_gmm_density_overlay(
+    scores: np.ndarray,
+    model: GaussianMixture,
+    *,
+    x_axis_label: str = "IMP Score",
+) -> go.Figure:
+    """Histogram + GMM component-density overlay for the Phase 22 widget.
+
+    The histogram (corpus counts) sits on the left y-axis; the K per-component
+    weighted Gaussian PDFs (consumed from :func:`backend.modules.imp_gmm.component_curves`)
+    overlay on a twin right y-axis with translucent fills below each curve so
+    the qualitative palette stays readable when components overlap.
+
+    The chart deliberately does NOT mark the active compound's position with a
+    vertical line. Because the corpus is built from the active compound's
+    Tanimoto neighborhood (and per-record grain spreads a single compound
+    across many bioactivity rows), pinning a "this compound" marker on the
+    distribution it generated would be visually circular. The active
+    compound's cluster membership is communicated via the separate stacked
+    probability bar (see :func:`create_gmm_probability_bar`).
+
+    Args:
+        scores: 1-D ``np.ndarray`` of corpus IMP scores in INTEGER space
+            ``[0, 100]``. The Streamlit caller rescales raw ``[0, 1]`` scores
+            before passing.
+        model: Fitted ``GaussianMixture`` (from Plan 02 ``fit_gmm``). Cluster
+            ordering is sourced from ``component_curves``; this helper does
+            NOT re-sort.
+        x_axis_label: Override for the x-axis title. Defaults to ``"IMP Score"``.
+
+    Returns:
+        A ``go.Figure`` with trace z-order ``[histogram, K density curves]``.
+        Calls :func:`apply_impulator_theme` as the LAST step before returning.
+    """
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Histogram(
+            x=scores,
+            nbinsx=30,
+            marker_color="#6b7280",
+            opacity=0.6,
+            name="Corpus",
+            yaxis="y",
+        )
+    )
+
+    means, _weights, _sigmas, pdfs = component_curves(model, DENSITY_GRID)
+    for k in range(len(means)):
+        cluster_hex = px.colors.qualitative.Set2[k]
+        fig.add_trace(
+            go.Scatter(
+                x=DENSITY_GRID,
+                y=pdfs[k],
+                mode="lines",
+                line=dict(width=2.5, color=cluster_hex),
+                fill="tozeroy",
+                fillcolor=_rgba_with_alpha(cluster_hex, 0.15),
+                name=f"C{_subscript(k)}: μ={int(round(float(means[k])))}",
+                yaxis="y2",
+            )
+        )
+
+    fig.update_layout(
+        height=280,
+        margin=dict(t=40, b=30, l=30, r=10),
+        xaxis=dict(title=x_axis_label, range=[0, 100]),
+        yaxis=dict(title="Count"),
+        yaxis2=dict(title="Density", overlaying="y", side="right", showgrid=False),
+        legend=dict(orientation="h", y=-0.25),
+        showlegend=True,
+    )
+
+    return apply_impulator_theme(fig)
+
+
+def create_gmm_probability_bar(
+    memberships,
+    *,
+    cluster_means,
+) -> go.Figure:
+    """Stacked horizontal probability bar for ``P(cluster_k | score)``.
+
+    Args:
+        memberships: Sequence of length K, ``P(cluster_k | score)`` already
+            sorted by ascending cluster mean (consumed from
+            :func:`backend.modules.imp_gmm.cluster_membership`).
+        cluster_means: Sequence of length K, cluster means in INTEGER space,
+            used for legend labels ``Cₖ: μ=<int>``.
+
+    Returns:
+        A ``go.Figure`` with K stacked horizontal ``go.Bar`` traces.
+        Memberships are defensively normalized at construction time
+        (``mem / mem.sum()`` — Pitfall 2) so segments always sum to 100%.
+        Calls :func:`apply_impulator_theme` as the LAST step before returning.
+    """
+    mem = np.asarray(memberships, dtype=float)
+    total = mem.sum()
+    if total > 0:
+        mem = mem / total
+
+    means_arr = np.asarray(cluster_means, dtype=float)
+
+    fig = go.Figure()
+    for k in range(len(mem)):
+        p_k = float(mem[k])
+        fig.add_trace(
+            go.Bar(
+                x=[p_k],
+                y=["Membership"],
+                orientation="h",
+                name=f"C{_subscript(k)}: μ={int(round(float(means_arr[k])))}",
+                marker=dict(color=px.colors.qualitative.Set2[k]),
+                text=f"{int(round(p_k * 100))}%",
+                textposition="inside",
+                hovertemplate=f"P(C{k}) = {p_k:.4f}<extra></extra>",
+            )
+        )
+
+    fig.update_layout(
+        barmode="stack",
+        height=140,
+        margin=dict(t=10, b=70, l=10, r=10),
+        xaxis=dict(range=[0, 1], tickformat=".0%", showgrid=False),
+        yaxis=dict(showticklabels=False),
+        showlegend=True,
+        legend=dict(orientation="h", y=-0.6, yanchor="top"),
+    )
+
+    return apply_impulator_theme(fig)
+
+
 def create_box_plot(
     df: pd.DataFrame,
     y_col: str,
@@ -262,7 +435,8 @@ def create_bar_chart(
     color_col: Optional[str] = None,
     title: Optional[str] = None,
     subtitle: Optional[str] = None,
-    orientation: str = "v"
+    orientation: str = "v",
+    barmode: str = "group"
 ) -> go.Figure:
     """Create a bar chart.
 
@@ -274,6 +448,9 @@ def create_bar_chart(
         title: Chart title
         subtitle: Chart subtitle (Plotly v6)
         orientation: 'v' for vertical, 'h' for horizontal
+        barmode: How bars sharing an axis position are laid out — ``'group'``
+            (side-by-side, the default for collection member comparison) or
+            ``'stack'``. Passed through to Plotly's ``layout.barmode``.
 
     Returns:
         Plotly Figure
@@ -286,7 +463,124 @@ def create_bar_chart(
         color=color_col,
         title=title or f"{y_col} by {x_col}",
         template=theme["template"],
-        orientation=orientation
+        orientation=orientation,
+        barmode=barmode
+    )
+
+    if subtitle:
+        _apply_subtitle(fig, subtitle)
+
+    return apply_impulator_theme(fig)
+
+
+def _truncate_label(label: str, maxlen: int = HEATMAP_TARGET_LABEL_MAXLEN) -> str:
+    """Truncate a long axis label to ``maxlen`` chars with an ellipsis.
+
+    The full label is preserved separately for the hover tooltip; only the
+    displayed tick text is shortened so the heatmap x-axis stays legible.
+    """
+    label = str(label)
+    if len(label) <= maxlen:
+        return label
+    return label[: maxlen - 1].rstrip() + "…"
+
+
+def create_bioactivity_heatmap(
+    matrix: pd.DataFrame,
+    *,
+    top_k: int = HEATMAP_TOP_K,
+    title: Optional[str] = None,
+    subtitle: Optional[str] = None,
+    color_scale: str = "Viridis",
+) -> go.Figure:
+    """Build the collection bioactivity heatmap (D-01 headline viz / D-10).
+
+    Encoding contract (UI-SPEC §3):
+
+    * **rows (y)** = collection members / input compound names (the
+      ``matrix`` index),
+    * **columns (x)** = the top-``K`` ≈ 25 targets, ranked by
+      member-hit-count (how many members have any activity against the
+      target) then total activity, descending. ``K`` defaults to the
+      module-level :data:`HEATMAP_TOP_K`,
+    * **cell color** = the activity / hit value, on the **Viridis
+      sequential** scale (activity has no meaningful midpoint, so a
+      diverging scale would be misleading) — matching the scatter default
+      for visual consistency.
+
+    Target tick labels show the target name truncated to
+    :data:`HEATMAP_TARGET_LABEL_MAXLEN` chars, with the **full** name kept
+    in the hover tooltip. Figure height grows ``~32px`` per member row.
+    Styled via :func:`apply_impulator_theme` as the LAST step.
+
+    Empty / sparse handling: if ``matrix`` is empty (no members or no shared
+    targets), an empty themed :class:`~plotly.graph_objects.Figure` is
+    returned (``len(fig.data) == 0``) so the page can branch and render the
+    ``st.info`` "No shared targets" copy instead of an empty grid.
+
+    Args:
+        matrix: DataFrame indexed by member name, one column per target,
+            cell values = activity / hit count (NaN / 0 where a member has no
+            activity against a target).
+        top_k: Number of top targets to retain (D-10). Defaults to
+            :data:`HEATMAP_TOP_K`.
+        title: Optional chart title.
+        subtitle: Optional chart subtitle (Plotly v6).
+        color_scale: Continuous color scale. Defaults to ``"Viridis"``
+            (sequential) — overriding is discouraged for this chart.
+
+    Returns:
+        A themed Plotly ``go.Figure`` (a ``go.Heatmap``), or an empty themed
+        figure when there is nothing to plot.
+    """
+    # Empty / no-member / no-target input -> caller branches on len(fig.data).
+    if matrix is None or matrix.empty or matrix.shape[1] == 0:
+        return apply_impulator_theme(go.Figure())
+
+    numeric = matrix.apply(pd.to_numeric, errors="coerce")
+
+    # Rank targets (columns) by member-hit-count (number of members with any
+    # non-null, non-zero activity) then total activity — both descending —
+    # and keep the top-K (D-10).
+    hit_count = (numeric.fillna(0) != 0).sum(axis=0)
+    total_activity = numeric.fillna(0).sum(axis=0)
+    ranking = pd.DataFrame({"hits": hit_count, "activity": total_activity})
+    ranking = ranking.sort_values(
+        by=["hits", "activity"], ascending=[False, False]
+    )
+    top_targets = list(ranking.index[: max(int(top_k), 1)])
+    top = numeric[top_targets]
+
+    members = [str(m) for m in top.index]
+    full_targets = [str(t) for t in top.columns]
+    tick_labels = [_truncate_label(t) for t in full_targets]
+    z = top.to_numpy(dtype=float)
+
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=z,
+            x=full_targets,
+            y=members,
+            colorscale=color_scale,  # Viridis sequential (D-01)
+            colorbar=dict(title="Activity"),
+            hovertemplate=(
+                "Member: %{y}<br>Target: %{x}<br>Activity: %{z}<extra></extra>"
+            ),
+        )
+    )
+
+    fig.update_layout(
+        title=title or "Bioactivity by Target",
+        height=max(len(members) * HEATMAP_ROW_HEIGHT_PX + 160, 260),
+        xaxis=dict(
+            title="Target",
+            tickmode="array",
+            tickvals=full_targets,
+            ticktext=tick_labels,
+            tickangle=-45,
+        ),
+        yaxis=dict(title="Member", autorange="reversed"),
+        margin=dict(t=60, b=120, l=10, r=10),
     )
 
     if subtitle:

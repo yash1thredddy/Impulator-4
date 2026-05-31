@@ -15,6 +15,8 @@ from sqlalchemy.orm import Session, aliased
 
 from backend.models.compound import Compound
 from backend.models.deleted_compound import DeletedCompound
+from backend.models.enums import JobType
+from backend.models.job import Job
 from backend.repositories.job_repository import (
     _handle_integrity_error,
 )
@@ -81,6 +83,18 @@ class CompoundRepository:
         base = (
             select(Compound, parent.compound_name.label("parent_name"), version_count_sub)
             .outerjoin(parent, Compound.parent_id == parent.entry_id)
+        )
+
+        # Exclude COLLECTION-member compounds from the global entries list
+        # (Phase 23). Members belong to a COLLECTION job; they surface inside
+        # the collection detail view, not the compound catalog. NULL-safe:
+        # the ``job_id IS NULL`` arm preserves legacy/backfilled compounds that
+        # have no parent job, so they are NOT silently dropped.
+        base = base.outerjoin(Job, Compound.job_id == Job.id).where(
+            or_(
+                Compound.job_id.is_(None),
+                Job.job_type != JobType.COLLECTION,
+            )
         )
 
         # Originals-only filter (parent_id IS NULL = root compound)

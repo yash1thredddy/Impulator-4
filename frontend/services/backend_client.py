@@ -812,6 +812,173 @@ class ImpulatorAPIClient:
         except requests.exceptions.RequestException as e:
             return JobResponse(success=False, error=str(e))
 
+    # Collections (Phase 23) — mirror the compound/job client idiom:
+    # self._request + a {"success": True, **data} dict return, no new HTTP host.
+    # Endpoints live under /api/v1/collections (the backend router prefix is
+    # /collections; the API aggregator adds /api/v1).
+    def create_collection(
+        self,
+        name: str,
+        members: list[dict[str, Any]],
+        author_name: str = "",
+        similarity_threshold: int = None,
+        activity_types: list[str] = None,
+    ) -> dict[str, Any]:
+        """Create + submit a collection job.
+
+        Args:
+            name: Collection name (server validates against the compound-name
+                pattern — path-traversal names are rejected, D-03).
+            members: List of member dicts ({"name", "smiles", per-member
+                config}) matching the members_config shape (D-02).
+            author_name: Name of the author submitting the collection.
+            similarity_threshold: Shared similarity threshold for members
+                (default from config).
+            activity_types: Shared activity types for members (default from
+                config).
+
+        Returns:
+            Dict with success and, on success, the created ids
+            (collection_id, job_id) plus any other server fields. On failure,
+            ``{"success": False, "error": ...}``.
+        """
+        payload = {
+            "name": name,
+            "author_name": author_name,
+            "members": members,
+            "similarity_threshold": (
+                similarity_threshold or config.DEFAULT_SIMILARITY_THRESHOLD
+            ),
+            "activity_types": activity_types or list(config.DEFAULT_ACTIVITY_TYPES),
+        }
+
+        try:
+            response = self._request('POST', '/api/v1/collections', json=payload)
+
+            if response.status_code in (200, 201):
+                try:
+                    return {"success": True, **response.json()}
+                except (json.JSONDecodeError, ValueError) as e:
+                    logger.error(f"Invalid JSON in create collection response: {e}")
+                    return {"success": False, "error": "Invalid response from server"}
+            else:
+                try:
+                    error = response.json().get('detail', f"HTTP {response.status_code}")
+                except (json.JSONDecodeError, ValueError):
+                    error = f"HTTP {response.status_code}"
+                return {"success": False, "error": error}
+
+        except requests.exceptions.RequestException as e:
+            return {"success": False, "error": str(e)}
+
+    def list_collections(self) -> dict[str, Any]:
+        """List all collections (GLOBAL, not session-scoped — D-05).
+
+        Returns:
+            Dict with success and, on success, the collection list payload
+            (e.g. ``items``/``total``) merged in. On failure,
+            ``{"success": False, "error": ...}``.
+        """
+        try:
+            response = self._request('GET', '/api/v1/collections')
+
+            if response.status_code == 200:
+                try:
+                    return {"success": True, **response.json()}
+                except (json.JSONDecodeError, ValueError) as e:
+                    logger.error(f"Invalid JSON in list collections response: {e}")
+                    return {"success": False, "error": "Invalid response from server"}
+            else:
+                return {"success": False, "error": f"HTTP {response.status_code}"}
+
+        except requests.exceptions.RequestException as e:
+            return {"success": False, "error": str(e)}
+
+    def get_collection(self, collection_id: str) -> dict[str, Any]:
+        """Get a collection's detail (members + aggregate status).
+
+        Args:
+            collection_id: UUID of the collection.
+
+        Returns:
+            Dict with success and, on success, the detail payload merged in.
+            On failure, ``{"success": False, "error": ...}``.
+        """
+        try:
+            response = self._request('GET', f'/api/v1/collections/{collection_id}')
+
+            if response.status_code == 200:
+                try:
+                    return {"success": True, **response.json()}
+                except (json.JSONDecodeError, ValueError) as e:
+                    logger.error(f"Invalid JSON in get collection response: {e}")
+                    return {"success": False, "error": "Invalid response from server"}
+            elif response.status_code == 404:
+                return {"success": False, "error": "Collection not found"}
+            else:
+                return {"success": False, "error": f"HTTP {response.status_code}"}
+
+        except requests.exceptions.RequestException as e:
+            return {"success": False, "error": str(e)}
+
+    def delete_collection(self, collection_id: str) -> dict[str, Any]:
+        """Delete a collection (soft-delete + remove its ZIP).
+
+        Deletion stays backend-authoritative so database state, storage
+        cleanup, and audit logging remain consistent.
+
+        Args:
+            collection_id: UUID of the collection to delete.
+
+        Returns:
+            Dict with success and a message on success; on failure,
+            ``{"success": False, "error": ...}``.
+        """
+        try:
+            response = self._request(
+                'DELETE', f'/api/v1/collections/{collection_id}'
+            )
+
+            if response.status_code in (200, 204):
+                try:
+                    data = response.json()
+                    return {"success": True, **data}
+                except (json.JSONDecodeError, ValueError):
+                    return {"success": True, "message": "Collection deleted"}
+            elif response.status_code == 404:
+                return {"success": False, "error": "Collection not found"}
+            else:
+                try:
+                    error = response.json().get('detail', f"HTTP {response.status_code}")
+                except (json.JSONDecodeError, ValueError):
+                    error = f"HTTP {response.status_code}"
+                return {"success": False, "error": error}
+
+        except (requests.ConnectionError, requests.Timeout) as e:
+            logger.warning(f"Backend unreachable for collection deletion: {e}")
+            return {
+                "success": False,
+                "error": "Backend unavailable. Collection was not deleted.",
+            }
+
+        except requests.exceptions.RequestException as e:
+            return {"success": False, "error": str(e)}
+
+    def collection_download_url(self, collection_id: str) -> str:
+        """Build the collection ZIP download URL for ``st.link_button``.
+
+        Returns the absolute URL string only — does NOT issue a request or
+        buffer the ZIP (the page hands this to ``st.link_button`` so the
+        browser streams the download directly from the backend).
+
+        Args:
+            collection_id: UUID of the collection.
+
+        Returns:
+            Absolute URL to ``GET /api/v1/collections/{id}/download``.
+        """
+        return f"{self.base_url}/api/v1/collections/{collection_id}/download"
+
     # PubChem InChIKey Resolution
 
     @staticmethod

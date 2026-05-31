@@ -3,8 +3,10 @@
 Displays full analysis results with improved UX and organization.
 """
 
+import hashlib
 import html
 import logging
+import math
 import re
 from typing import Any, Optional
 from urllib.parse import quote_plus
@@ -15,6 +17,18 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 
+from backend.modules.imp_gmm import (
+    DEFAULT_COMPONENTS,
+    DEFAULT_RANDOM_STATE,
+    MAX_COMPONENTS,
+    MIN_COMPONENTS,
+    REFERENCE_CORPUS_KEY,
+    best_fit_k,
+    cluster_membership,
+    fit_gmm,
+    gmm_sentinel_message,
+    load_reference_corpus,
+)
 from backend.modules.imp_presentation import (
     IMP_SCORE_FLOOR,
     IMP_SCORE_CEILING,
@@ -30,7 +44,12 @@ from frontend.services import (
 )
 from frontend.utils import SessionState, sanitize_compound_name
 from frontend.ui.components import render_2d_structure, embed_structure_viewer
-from frontend.ui.components.charts import get_plotly_theme, apply_impulator_theme
+from frontend.ui.components.charts import (
+    apply_impulator_theme,
+    create_gmm_density_overlay,
+    create_gmm_probability_bar,
+    get_plotly_theme,
+)
 from frontend.ui.components.plotly_legend import plotly_legend_monitor
 
 logger = logging.getLogger(__name__)
@@ -75,6 +94,11 @@ def render_compound_detail_page() -> None:
     storage_path = SessionState.get("selected_compound_storage_path")
     is_duplicate = SessionState.get("selected_compound_is_duplicate", False)
     parent_name = SessionState.get("selected_compound_duplicate_of_name")
+    # D-12 (COLL-14): when drilling into a collection member, the page points at
+    # the collection ZIP + a "compounds/{safe_name}/" prefix so the UNMODIFIED
+    # renderer reads that member's section. Default "" keeps the single-compound
+    # behavior byte-identical.
+    internal_prefix = SessionState.get("selected_compound_internal_prefix", "") or ""
 
     # Fix UUID-as-name: if compound_name looks like a UUID, fetch the real name
     import re
@@ -134,7 +158,10 @@ def render_compound_detail_page() -> None:
 
     # Load data using storage_path (most reliable), fallback to entry_id, then compound_name
     data = _load_compound_data(
-        compound_name=compound_name, entry_id=entry_id, storage_path=storage_path
+        compound_name=compound_name,
+        entry_id=entry_id,
+        storage_path=storage_path,
+        internal_prefix=internal_prefix,
     )
     if data is None or "_error" in data:
         error_type = data.get("_error", "unknown") if data else "unknown"
@@ -241,17 +268,14 @@ def _render_quick_stats(data: dict[str, Any]) -> None:
 
     # Count unique IMP compounds (not activity rows)
     imp_count = 0
-    has_warning = False
     if (
         df is not None
         and "Is_IMP_Candidate" in df.columns
         and "ChEMBL_ID" in df.columns
     ):
         imp_count = df[df["Is_IMP_Candidate"]]["ChEMBL_ID"].nunique()
-        has_warning = imp_count > 0
     elif summary.get("has_imp_candidates", False):
         imp_count = summary.get("imp_candidates", 0)
-        has_warning = True
 
     with cols[0]:
         total_similar = summary.get("total_similar", 0)
@@ -3076,6 +3100,485 @@ def _render_imp_score_breakdown(df: pd.DataFrame) -> None:
             """)
 
 
+# =============================================================================
+# Phase 22 — GMM Cluster Membership widget (helpers + main render)
+# =============================================================================
+
+
+def _corpus_key_for_query(df: pd.DataFrame) -> str:
+    """SHA-1 cache discriminator for the 'This query' corpus.
+
+    Hashes the sorted list of compound identifiers so the cache hits remain
+    stable across DataFrame row reorderings. Falls back through
+    ``entry_id`` → ``Entry_ID`` → ``ChEMBL_ID`` → ``df.index`` depending on
+    which identifier column the host DataFrame carries.
+    """
+    if "entry_id" in df.columns:
+        id_col = "entry_id"
+    elif "Entry_ID" in df.columns:
+        id_col = "Entry_ID"
+    elif "ChEMBL_ID" in df.columns:
+        id_col = "ChEMBL_ID"
+    else:
+        id_col = None
+
+    if id_col is None:
+        ids = sorted(str(i) for i in df.index.tolist())
+    else:
+        ids = sorted(df[id_col].astype(str).tolist())
+
+    return hashlib.sha1("\n".join(ids).encode("utf-8")).hexdigest()
+
+
+@st.cache_data
+def _fit_gmm_cached(
+    scores_tuple: tuple,
+    n_components: int,
+    random_state: int,
+    corpus_key: str,
+    grain: str,
+):
+    """Cached wrapper around :func:`backend.modules.imp_gmm.fit_gmm`.
+
+    ``corpus_key`` and ``grain`` are unused inside the body — they exist
+    purely as cache-key discriminators per CONTEXT.md D-11.
+    """
+    scores = np.array(scores_tuple, dtype=float)
+    return fit_gmm(scores, n_components=n_components, random_state=random_state)
+
+
+@st.cache_data
+def _best_fit_k_cached(
+    scores_tuple: tuple,
+    random_state: int,
+    corpus_key: str,
+    grain: str,
+) -> int:
+    """Cached wrapper around :func:`backend.modules.imp_gmm.best_fit_k`.
+
+    Same cache-key discipline as ``_fit_gmm_cached`` — ``corpus_key`` and
+    ``grain`` are unused inside the body but distinguish equivalent
+    score-tuples across corpus/grain choices so the wrong K never bleeds
+    across views.
+    """
+    scores = np.array(scores_tuple, dtype=float)
+    return best_fit_k(scores, random_state=random_state)
+
+
+def _gmm_can_fit(
+    scores: np.ndarray, n_components: int, corpus_choice_label: str
+) -> tuple[bool, Optional[str]]:
+    """Sentinel-decision helper for the GMM widget.
+
+    Returns ``(True, None)`` when fitting is possible; otherwise
+    ``(False, locked_sentinel_message)`` with the appropriate variant
+    string interpolated.
+    """
+    if scores.size <= n_components:
+        return False, gmm_sentinel_message(
+            n_components, int(scores.size), corpus_choice_label, variant="small_corpus"
+        )
+    if float(np.var(scores)) == 0.0:
+        return False, gmm_sentinel_message(
+            n_components, int(scores.size), corpus_choice_label, variant="zero_variance"
+        )
+    n_unique = int(len(np.unique(scores)))
+    if n_unique < n_components:
+        return False, gmm_sentinel_message(
+            n_components,
+            int(scores.size),
+            corpus_choice_label,
+            variant="few_unique",
+            n_unique=n_unique,
+        )
+    return True, None
+
+
+def _render_gmm_widget(df: pd.DataFrame, job_id: str) -> None:
+    """Render the GMM Cluster Membership section.
+
+    Inserted between Phase 21's Detailed Score Breakdown and the IMP
+    Candidates section inside :func:`_render_imp_score_analysis`. Renders
+    inline (no expander wrapper); the GMM density overlay + cluster
+    probability bar always show when the corpus has enough scored compounds.
+    """
+    st.markdown("---")
+    st.markdown("### 🔀 GMM Cluster Membership")
+
+    # Guard: missing data or missing IMP_Final_Score column → sentinel.
+    if df is None or df.empty or "IMP_Final_Score" not in df.columns:
+        st.info(
+            "IMP scores are not available for this job. The GMM widget "
+            "needs scored compounds."
+        )
+        return
+
+    st.caption(
+        "Fit a Gaussian Mixture Model to the IMP score distribution. "
+        "The bar below shows how this compound's score breaks across "
+        "the clusters."
+    )
+
+    # Flash any auto-fallback notice set on the previous render (e.g. when
+    # Per-compound max was too small for K and the widget switched to
+    # Per-record on the user's behalf). Pop so it shows exactly once.
+    fallback_notice_key = f"gmm_fallback_notice_{job_id}"
+    if fallback_notice_key in st.session_state:
+        st.info(st.session_state.pop(fallback_notice_key))
+
+    # Apply any pending grain override set by a prior auto-fallback run BEFORE
+    # the segmented_control instantiates. Streamlit forbids writing to a
+    # widget key AFTER the widget renders in the same script execution, so
+    # the fallback writes to a separate "force" key and st.rerun()s; we
+    # transfer the value here, before the toggle below claims its key.
+    force_grain_key = f"gmm_force_grain_{job_id}"
+    if force_grain_key in st.session_state:
+        st.session_state[f"gmm_grain_{job_id}"] = st.session_state.pop(
+            force_grain_key
+        )
+
+    # --- Controls row A: corpus + (conditional) grain -----------------------
+    seg = getattr(st, "segmented_control", None)
+    col_a1, col_a2 = st.columns([1, 1])
+    with col_a1:
+        if seg is not None:
+            corpus_choice = seg(
+                "Fit on",
+                options=["This query", "Reference corpus"],
+                default="This query",
+                key=f"gmm_corpus_{job_id}",
+            )
+        else:
+            corpus_choice = st.radio(
+                "Fit on",
+                options=["This query", "Reference corpus"],
+                horizontal=True,
+                key=f"gmm_corpus_{job_id}",
+            )
+
+    grain_choice = None
+    with col_a2:
+        if corpus_choice == "This query":
+            if seg is not None:
+                grain_choice = seg(
+                    "Grain",
+                    options=["Per-compound max", "Per-record"],
+                    default="Per-compound max",
+                    key=f"gmm_grain_{job_id}",
+                )
+            else:
+                grain_choice = st.radio(
+                    "Grain",
+                    options=["Per-compound max", "Per-record"],
+                    horizontal=True,
+                    key=f"gmm_grain_{job_id}",
+                )
+
+    # --- Corpus + grain → scores array --------------------------------------
+    grain: Optional[str] = None
+    if corpus_choice == "This query":
+        if "entry_id" in df.columns:
+            group_col = "entry_id"
+        elif "Entry_ID" in df.columns:
+            group_col = "Entry_ID"
+        elif "ChEMBL_ID" in df.columns:
+            group_col = "ChEMBL_ID"
+        else:
+            group_col = None
+
+        if grain_choice == "Per-compound max" and group_col is not None:
+            scores_raw = (
+                df.groupby(group_col)["IMP_Final_Score"].max().dropna().values
+            )
+        else:
+            scores_raw = df["IMP_Final_Score"].dropna().values
+
+        corpus_key = _corpus_key_for_query(df)
+        corpus_choice_label = "query"
+    else:
+        corpus = load_reference_corpus()
+        if not corpus:
+            st.info(
+                "Reference corpus is not available in this build. "
+                "Falling back to 'This query'."
+            )
+            st.session_state[f"gmm_corpus_{job_id}"] = "This query"
+            st.rerun()
+            return
+        scores_raw = np.array(
+            [
+                c["imp_final_score"]
+                for c in corpus
+                if c.get("imp_final_score") is not None
+            ],
+            dtype=float,
+        )
+        corpus_key = REFERENCE_CORPUS_KEY
+        grain = "reference"
+        corpus_choice_label = "reference corpus"
+
+    # Rescale to integer space [0, 100] BEFORE the sentinel check so
+    # _gmm_can_fit and the fit see the same units.
+    scores_arr = np.asarray(scores_raw, dtype=float).ravel()
+    if scores_arr.size > 0 and scores_arr.max() <= 1.0:
+        scores = scores_arr * 100.0
+    else:
+        scores = scores_arr
+
+    # --- Grain literal (used for cache keys + best_fit_k cache discriminator)
+    if corpus_choice == "This query":
+        grain = (
+            (grain_choice or "Per-compound max")
+            .lower()
+            .replace(" ", "_")
+            .replace("-", "_")
+        )
+
+    # sorted for row-order-independent cache hits (GMM fits are
+    # sample-order-invariant; R7 fix from REVIEWS.md)
+    scores_tuple = tuple(sorted(float(s) for s in scores))
+
+    # --- Auto-select K via BIC and re-seed the slider on context changes ---
+    # We compute a "fingerprint" of (job, active compound, corpus, grain) and
+    # snap the slider to the BIC-suggested K whenever the fingerprint changes
+    # (opening a different compound, switching corpus, switching grain). When
+    # the fingerprint stays the same, the user's slider choice sticks — so
+    # they can override BIC and the override survives any number of reruns
+    # within the same context.
+    suggested_k: Optional[int] = None
+    if scores.size >= MIN_COMPONENTS:
+        suggested_k = _best_fit_k_cached(
+            scores_tuple, DEFAULT_RANDOM_STATE, corpus_key, grain
+        )
+
+    slider_key = f"gmm_n_components_{job_id}"
+    fingerprint_key = f"gmm_fingerprint_{job_id}"
+    active_id_for_fingerprint = str(
+        SessionState.get("selected_compound_entry_id")
+        or SessionState.get("selected_compound")
+        or "no_compound"
+    )
+    fingerprint = (
+        job_id,
+        active_id_for_fingerprint,
+        corpus_key,
+        grain or "",
+    )
+    if (
+        suggested_k is not None
+        and st.session_state.get(fingerprint_key) != fingerprint
+    ):
+        st.session_state[slider_key] = suggested_k
+        st.session_state[fingerprint_key] = fingerprint
+
+    # --- Controls row B: slider + refit + reset ----------------------------
+    col_b1, col_b2, col_b3 = st.columns([3, 1, 1])
+    with col_b1:
+        n_components = st.slider(
+            "Number of components",
+            min_value=MIN_COMPONENTS,
+            max_value=MAX_COMPONENTS,
+            value=DEFAULT_COMPONENTS,
+            step=1,
+            key=slider_key,
+        )
+    with col_b2:
+        if st.button(
+            "↻ Refit (new seed)",
+            type="secondary",
+            key=f"gmm_refit_{job_id}",
+        ):
+            st.session_state[f"gmm_seed_{job_id}"] = int(
+                np.random.randint(0, 2**31)
+            )
+            st.rerun()
+    with col_b3:
+        seed_key = f"gmm_seed_{job_id}"
+        if (
+            seed_key in st.session_state
+            and st.session_state[seed_key] != DEFAULT_RANDOM_STATE
+        ):
+            if st.button(
+                "Reset to default seed",
+                type="secondary",
+                key=f"gmm_reset_{job_id}",
+            ):
+                del st.session_state[seed_key]
+                st.rerun()
+
+    random_state = st.session_state.get(seed_key, DEFAULT_RANDOM_STATE)
+
+    if suggested_k is not None:
+        marker = " ← in use" if int(n_components) == int(suggested_k) else ""
+        st.caption(f"BIC suggests K = {suggested_k}{marker}.")
+
+    # --- Sentinel decision --------------------------------------------------
+    can_fit, message = _gmm_can_fit(scores, n_components, corpus_choice_label)
+    if not can_fit:
+        # Auto-fallback: if Per-compound max yields too few points for K, but
+        # Per-record would have enough activity rows, flip the grain toggle and
+        # rerun. The toggle visibly snaps to Per-record so the UI state matches
+        # what's being fit; the fingerprint logic above re-seeds the slider
+        # with the new BIC suggestion for the per-record corpus.
+        if (
+            corpus_choice == "This query"
+            and grain_choice == "Per-compound max"
+        ):
+            per_record_size = int(df["IMP_Final_Score"].dropna().size)
+            if per_record_size > int(n_components):
+                # Use a "force" key — the grain widget already rendered in
+                # this run, so we can't write to its key directly. The
+                # transfer happens on the next run before the widget
+                # instantiates (see force_grain_key handling above).
+                st.session_state[f"gmm_force_grain_{job_id}"] = "Per-record"
+                st.session_state[f"gmm_fallback_notice_{job_id}"] = (
+                    f"Per-compound corpus has only {int(scores.size)} compound(s) — "
+                    f"too few for K={int(n_components)}. Switched to Per-record "
+                    f"({per_record_size} activity records)."
+                )
+                st.rerun()
+                return
+
+        st.info(message)
+        return
+
+    model = _fit_gmm_cached(
+        scores_tuple, n_components, random_state, corpus_key, grain
+    )
+
+    # R6 fix: refuse to render a misleading chart when GMM did not converge.
+    if not getattr(model, "converged_", True):
+        st.info(
+            "GMM did not fully converge for this corpus + component "
+            "count. Try fewer components, or switch corpus."
+        )
+        return
+
+    # --- Resolve active compound (for probability bar only — no vline) ------
+    compound_name = SessionState.get("selected_compound")
+    entry_id_active = SessionState.get("selected_compound_entry_id")
+
+    active_rows = None
+    if entry_id_active is not None and "entry_id" in df.columns:
+        active_rows = df[df["entry_id"].astype(str) == str(entry_id_active)]
+    elif entry_id_active is not None and "Entry_ID" in df.columns:
+        active_rows = df[df["Entry_ID"].astype(str) == str(entry_id_active)]
+    if (
+        (active_rows is None or active_rows.empty)
+        and compound_name
+        and "Molecule_Name" in df.columns
+    ):
+        active_rows = df[df["Molecule_Name"] == compound_name]
+    if (
+        (active_rows is None or active_rows.empty)
+        and compound_name
+        and "ChEMBL_ID" in df.columns
+    ):
+        active_rows = df[df["ChEMBL_ID"] == compound_name]
+
+    if active_rows is None or active_rows.empty:
+        this_score = None
+    else:
+        valid_active = active_rows[active_rows["IMP_Final_Score"].notna()]
+        if valid_active.empty:
+            this_score = None
+        else:
+            row = valid_active.loc[valid_active["IMP_Final_Score"].idxmax()]
+            this_score_raw = row.get("IMP_Final_Score", None)
+            if this_score_raw is None or (
+                isinstance(this_score_raw, float) and math.isnan(this_score_raw)
+            ):
+                this_score = None
+            else:
+                this_score = (
+                    float(this_score_raw) * 100.0
+                    if float(this_score_raw) <= 1.0
+                    else float(this_score_raw)
+                )
+
+    # --- Density overlay (no vline — chart shows corpus structure only) -----
+    density_fig = create_gmm_density_overlay(scores, model)
+    st.plotly_chart(density_fig, width="stretch")
+
+    # --- Probability bar (conditional) -------------------------------------
+    if this_score is None:
+        st.caption(
+            "This compound has no IMP score in the current corpus; "
+            "cluster membership is undefined."
+        )
+    else:
+        memberships = cluster_membership(model, this_score)
+        cluster_means_sorted = sorted(float(m) for m in model.means_.flatten())
+        prob_fig = create_gmm_probability_bar(
+            memberships, cluster_means=np.array(cluster_means_sorted)
+        )
+        st.plotly_chart(prob_fig, width="stretch")
+
+    # --- Explanation panel --------------------------------------------------
+    with st.expander("What is GMM and how does this widget work?", expanded=False):
+        st.markdown(
+            """
+**Gaussian Mixture Models (GMMs)** assume a dataset is generated from a
+mixture of several Gaussian (normal) distributions. Each Gaussian — a
+"component" — has its own mean (μ), variance (σ²), and weight. Fitting a
+GMM means estimating those parameters via the **Expectation-Maximization
+(EM) algorithm**. Given a new score, the model returns the probability
+that the score was generated by each component
+(`P(cluster_k | score)`) — those probabilities are what the stacked bar
+above shows.
+
+Why GMMs for IMP scores: the IMP score distribution often shows a few
+latent sub-populations (e.g., "drug-like", "borderline", "promiscuous /
+PAINS-like"). A GMM lets us model that structure explicitly rather than
+collapsing it into a single histogram.
+
+**How "best fit K" works.** We don't pick the number of components by
+hand. The widget fits the GMM for every K in [2, 6], scores each model
+with the **Bayesian Information Criterion (BIC)**, and reports the K
+that minimizes BIC.
+
+```
+BIC = -2 · log-likelihood  +  k · log(n)
+```
+
+Lower is better. The first term rewards a model that explains the data
+well; the second term penalizes complexity (more components = more
+parameters). BIC strikes a balance between fit and parsimony, and it's
+the standard model-selection criterion for GMMs in the scikit-learn
+documentation. The "BIC suggests K = N" caption above the slider always
+shows the current recommendation — you can override it by moving the
+slider.
+
+**Sources.**
+
+- Pedregosa et al. *Scikit-learn: Machine Learning in Python.* JMLR 12,
+  2825–2830 (2011) — the `GaussianMixture` implementation used here.
+  ([link](https://jmlr.org/papers/v12/pedregosa11a.html))
+- Schwarz, G. *Estimating the dimension of a model.* The Annals of
+  Statistics 6 (2), 461–464 (1978) — the BIC criterion.
+  ([link](https://doi.org/10.1214/aos/1176344136))
+- Scikit-learn User Guide §2.1 — Gaussian mixture models.
+  ([link](https://scikit-learn.org/stable/modules/mixture.html))
+
+**Implementation notes.**
+
+- All fits use `covariance_type='full'` (each component gets its own
+  covariance matrix) with `random_state=42` so that re-runs with the
+  same corpus + same K yield identical clusters. The **Refit (new seed)**
+  button is for sensitivity-checking how much the cluster structure
+  depends on the random initialization.
+- Cluster ordering is fixed by ascending mean (so C₀ is always the
+  lowest-scoring cluster). The colors in the density chart and the
+  probability bar are matched (ColorBrewer Set2 palette).
+- The histogram shows the **corpus distribution** the model was fit on.
+  We do NOT mark the active compound's position on it, because the
+  corpus is built from the active compound's Tanimoto neighborhood — a
+  "this compound" vline on a histogram of its own neighbors would be
+  visually circular.
+"""
+        )
+
+
 def _render_contribution_chart(row: pd.Series) -> None:
     """Render a radar chart showing component scores + weighted contribution bar chart."""
     components = [
@@ -3344,6 +3847,10 @@ since NSEI and NBEI are derived from the same underlying activity data.
 
         # Detailed Score Breakdown Section
         _render_imp_score_breakdown(df)
+
+        # Phase 22: GMM Cluster Membership Section
+        job_id = SessionState.get("selected_compound_entry_id", "default") or "default"
+        _render_gmm_widget(df, job_id)
 
     # IMP Candidates section
     if has_imp:
@@ -5671,7 +6178,10 @@ def _render_drug_indications(data: dict[str, Any]) -> None:
 
 
 def _load_compound_data(
-    compound_name: str = None, entry_id: str = None, storage_path: str = None
+    compound_name: str = None,
+    entry_id: str = None,
+    storage_path: str = None,
+    internal_prefix: str = "",
 ) -> Optional[dict[str, Any]]:
     """Load compound data from storage.
 
@@ -5682,10 +6192,17 @@ def _load_compound_data(
         compound_name: Display name of the compound (for logging only)
         entry_id: UUID entry_id for storage lookup
         storage_path: Full Azure storage path from database (most reliable)
+        internal_prefix: Optional ZIP-entry prefix (D-12, COLL-14). Default "" keeps
+            the single-compound behavior byte-identical. A collection member is
+            nested under ``compounds/{safe_name}/`` inside the collection ZIP;
+            passing that prefix lets this UNMODIFIED renderer drill into the
+            member section via the plan-06 ``smart_load_*`` seam.
     """
     try:
         # Use smart loader with storage_path from database (UUID-based)
-        summary = smart_load_summary(entry_id=entry_id, storage_path=storage_path)
+        summary = smart_load_summary(
+            entry_id=entry_id, storage_path=storage_path, internal_prefix=internal_prefix
+        )
         if summary is None:
             logger.debug(
                 f"Could not load summary for {compound_name} (entry_id={entry_id}, storage_path={storage_path})"
@@ -5694,7 +6211,10 @@ def _load_compound_data(
 
         # Load results DataFrame using smart loader
         df = smart_load_dataframe(
-            "similar_compounds.csv", entry_id=entry_id, storage_path=storage_path
+            "similar_compounds.csv",
+            entry_id=entry_id,
+            storage_path=storage_path,
+            internal_prefix=internal_prefix,
         )
 
         if df is None:
@@ -5704,16 +6224,23 @@ def _load_compound_data(
                 f"{safe_name}_complete_results.csv",
                 entry_id=entry_id,
                 storage_path=storage_path,
+                internal_prefix=internal_prefix,
             )
 
         # Load drug indications (separate file)
         indications_df = smart_load_dataframe(
-            "drug_indications.csv", entry_id=entry_id, storage_path=storage_path
+            "drug_indications.csv",
+            entry_id=entry_id,
+            storage_path=storage_path,
+            internal_prefix=internal_prefix,
         )
 
         # Load all similar molecules catalog (may not exist for older compounds)
         all_similar_df = smart_load_dataframe(
-            "all_similar_molecules.csv", entry_id=entry_id, storage_path=storage_path
+            "all_similar_molecules.csv",
+            entry_id=entry_id,
+            storage_path=storage_path,
+            internal_prefix=internal_prefix,
         )
 
         # Get display name from summary (compound_name is in summary.json)
@@ -5971,13 +6498,10 @@ def _render_report_header(data: dict[str, Any], smiles: str) -> None:
 
         # Count unique IMP compounds (not activity rows)
         imp_count = 0
-        has_warning = False
         if "Is_IMP_Candidate" in df.columns and "ChEMBL_ID" in df.columns:
             imp_count = df[df["Is_IMP_Candidate"]]["ChEMBL_ID"].nunique()
-            has_warning = imp_count > 0
         elif summary.get("has_imp_candidates", False):
             imp_count = summary.get("imp_candidates", 0)
-            has_warning = True
 
         # Display stats in columns
         stat_cols = st.columns(5)

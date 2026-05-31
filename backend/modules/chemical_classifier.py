@@ -32,6 +32,7 @@ from tenacity import (
     wait_random_exponential,
 )
 
+from backend.config import settings
 from backend.core.metrics import metrics
 
 logger = structlog.get_logger()
@@ -185,6 +186,14 @@ async def get_classyfire_classification(
         >>> data = await get_classyfire_classification(client, "REFJWTPEDVJJIY-UHFFFAOYSA-N")
         >>> print(data['kingdom']['name'])  # "Organic compounds"
     """
+    # Operational pause toggle (2026-05-30). Read at call time so the flag can be
+    # flipped without restart-coupled import caching. When paused, skip the network
+    # entirely -- no circuit checks, no retries, no 429 thrash. debug-level so an
+    # intentional pause doesn't flood logs with one line per compound.
+    if not settings.CLASSYFIRE_ENABLED:
+        logger.debug("classyfire_paused", inchikey=inchikey)
+        return None
+
     endpoints = (
         (_CLASSYFIRE_FIEHN, "classyfire_fiehn", False),
         (_CLASSYFIRE_GNPS, "classyfire_gnps", True),  # self-signed TLS
@@ -375,7 +384,9 @@ async def get_complete_classification(
         cf_fields = extract_classyfire_fields(cf_data)
         classification.update(cf_fields)
         logger.info("classyfire_obtained", class_name=cf_fields.get("Class", "Unknown"))
-    else:
+    elif settings.CLASSYFIRE_ENABLED:
+        # Only warn when ClassyFire is live but failed -- a paused toggle is
+        # intentional, not an outage, so don't emit a warning per compound.
         logger.warning("classyfire_unavailable", inchikey=inchikey)
 
     # Process NPClassifier

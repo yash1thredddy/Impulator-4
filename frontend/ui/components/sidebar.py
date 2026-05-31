@@ -154,6 +154,13 @@ def render_sidebar() -> None:
                 SessionState.navigate_to_analyze()
                 st.rerun()
 
+        # Collections navigation (Phase 23)
+        if st.button("Collections", key="nav_collections", width='stretch'):
+            _mark_completed_jobs_viewed()
+            SessionState.navigate_to_collections()
+            st.query_params.clear()
+            st.rerun()
+
         # Select mode toggle (only on home page)
         if SessionState.get_current_view() == "home":
             select_mode = SessionState.get('compound_select_mode', False)

@@ -776,7 +776,8 @@ def smart_download_result(
 def smart_load_summary(
     entry_id: str = None,
     storage_path: str = None,
-    force_refresh: bool = False
+    force_refresh: bool = False,
+    internal_prefix: str = ""
 ) -> Optional[dict]:
     """
     Smart summary loader that tries multiple strategies.
@@ -789,6 +790,11 @@ def smart_load_summary(
         entry_id: UUID of the compound entry
         storage_path: Full storage path from database (most reliable)
         force_refresh: If True, skip cache
+        internal_prefix: Optional ZIP-entry path prefix (D-12). Default "" keeps
+            the single-compound behavior unchanged. A collection ZIP nests each
+            member under ``compounds/{safe_name}/``; passing
+            ``internal_prefix=f"compounds/{safe_name}/"`` lets the unmodified
+            compound_detail renderer drill into that member section.
 
     Returns:
         Summary dict, or None if not found
@@ -802,19 +808,20 @@ def smart_load_summary(
     if zip_data is None:
         return None
 
+    entry_name = f"{internal_prefix}summary.json"
     try:
         with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
-            if "summary.json" in zf.namelist():
-                if not _validate_zip_entry(zf, "summary.json"):
+            if entry_name in zf.namelist():
+                if not _validate_zip_entry(zf, entry_name):
                     return None
-                with zf.open("summary.json") as f:
+                with zf.open(entry_name) as f:
                     return json.load(f)
             else:
-                logger.debug(f"summary.json not found in ZIP (storage_path={storage_path}, entry_id={entry_id})")
+                logger.debug(f"{entry_name} not found in ZIP (storage_path={storage_path}, entry_id={entry_id})")
                 return None
 
     except Exception as e:
-        logger.error(f"Failed to extract summary.json: {e}")
+        logger.error(f"Failed to extract {entry_name}: {e}")
         return None
 
 
@@ -822,7 +829,8 @@ def smart_load_dataframe(
     filename: str,
     entry_id: str = None,
     storage_path: str = None,
-    force_refresh: bool = False
+    force_refresh: bool = False,
+    internal_prefix: str = ""
 ) -> Optional[pd.DataFrame]:
     """
     Smart dataframe loader that tries multiple strategies.
@@ -836,6 +844,10 @@ def smart_load_dataframe(
         entry_id: UUID of the compound entry
         storage_path: Full storage path from database (most reliable)
         force_refresh: If True, skip cache
+        internal_prefix: Optional ZIP-entry path prefix (D-12). Default "" keeps
+            the single-compound behavior unchanged. Passing
+            ``internal_prefix=f"compounds/{safe_name}/"`` reads ``filename`` from
+            a member section inside a collection ZIP via the unmodified renderer.
 
     Returns:
         DataFrame, or None if not found
@@ -849,17 +861,18 @@ def smart_load_dataframe(
     if zip_data is None:
         return None
 
+    entry_name = f"{internal_prefix}{filename}"
     try:
         with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
-            if filename in zf.namelist():
-                if not _validate_zip_entry(zf, filename):
+            if entry_name in zf.namelist():
+                if not _validate_zip_entry(zf, entry_name):
                     return None
-                with zf.open(filename) as f:
+                with zf.open(entry_name) as f:
                     return pd.read_csv(f)
             else:
-                logger.debug(f"{filename} not found in ZIP (storage_path={storage_path}, entry_id={entry_id})")
+                logger.debug(f"{entry_name} not found in ZIP (storage_path={storage_path}, entry_id={entry_id})")
                 return None
 
     except Exception as e:
-        logger.error(f"Failed to extract {filename}: {e}")
+        logger.error(f"Failed to extract {entry_name}: {e}")
         return None

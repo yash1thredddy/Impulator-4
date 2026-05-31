@@ -863,31 +863,33 @@ def _detect_column_mappings(df) -> dict[str, Optional[str]]:
         'inchikey', 'inchi_key', 'inchikeystandard', 'standard_inchikey',
     ]
 
-    result = {'compound_name': None, 'smiles': None, 'inchi': None, 'inchikey': None}
+    # Match by VARIANT preference, not column order: each variant list is ordered
+    # most-specific-first, so a column literally named 'smiles' wins over the
+    # generic 'structure' alias even when 'structure' appears earlier in the file.
+    field_variants = {
+        'compound_name': compound_name_variants,
+        'smiles': smiles_variants,
+        'inchi': inchi_variants,
+        'inchikey': inchikey_variants,
+    }
 
+    # First column wins for a given lowercased header (preserves prior behavior
+    # when duplicate-named columns exist).
+    col_by_lower: dict[str, str] = {}
     for col in df.columns:
-        col_lower = col.lower().strip()
+        col_by_lower.setdefault(col.lower().strip(), col)
 
-        # Check compound name variants (first match wins)
-        if result['compound_name'] is None and col_lower in compound_name_variants:
-            result['compound_name'] = col
-
-        # Check SMILES variants
-        if result['smiles'] is None and col_lower in smiles_variants:
-            result['smiles'] = col
-
-        # Check InChI variants
-        if result['inchi'] is None and col_lower in inchi_variants:
-            result['inchi'] = col
-
-        # Check InChIKey variants
-        if result['inchikey'] is None and col_lower in inchikey_variants:
-            result['inchikey'] = col
+    result = {'compound_name': None, 'smiles': None, 'inchi': None, 'inchikey': None}
+    for field, variants in field_variants.items():
+        for variant in variants:  # preference order
+            if variant in col_by_lower:
+                result[field] = col_by_lower[variant]
+                break
 
     return result
 
 
-def _render_column_mapping_ui(df) -> Optional[dict[str, str]]:
+def _render_column_mapping_ui(df, key_prefix: str = "") -> Optional[dict[str, str]]:
     """
     Render dropdown selectors for column mapping.
 
@@ -895,6 +897,10 @@ def _render_column_mapping_ui(df) -> Optional[dict[str, str]]:
 
     Args:
         df: pandas DataFrame with CSV data
+        key_prefix: Optional prefix for widget keys so the same mapping UI can be
+            rendered in more than one tab (e.g. Batch and Collection) without
+            Streamlit ``DuplicateWidgetID`` collisions. Default ``""`` preserves
+            the original Batch keys.
 
     Returns:
         Mapping dict if valid selection, None if incomplete
@@ -911,7 +917,7 @@ def _render_column_mapping_ui(df) -> Optional[dict[str, str]]:
     # Calculate default index based on suggestion or existing selection
     def get_default_index(field_key: str, suggestion_key: str) -> int:
         # First check if widget already has a selection (from previous render)
-        widget_key = f"csv_col_{field_key}_select"
+        widget_key = f"{key_prefix}csv_col_{field_key}_select"
         if widget_key in st.session_state:
             selected = st.session_state[widget_key]
             if selected in columns:
@@ -930,7 +936,7 @@ def _render_column_mapping_ui(df) -> Optional[dict[str, str]]:
             "Compound Name Column *",
             columns_with_none,
             index=get_default_index('name', 'compound_name'),
-            key="csv_col_name_select",
+            key=f"{key_prefix}csv_col_name_select",
             help="Column containing compound identifiers"
         )
 
@@ -940,7 +946,7 @@ def _render_column_mapping_ui(df) -> Optional[dict[str, str]]:
             "SMILES Column",
             columns_with_none,
             index=get_default_index('smiles', 'smiles'),
-            key="csv_col_smiles_select",
+            key=f"{key_prefix}csv_col_smiles_select",
             help="Column containing SMILES strings"
         )
 
@@ -952,7 +958,7 @@ def _render_column_mapping_ui(df) -> Optional[dict[str, str]]:
             "InChI Column (optional)",
             columns_with_none,
             index=get_default_index('inchi', 'inchi'),
-            key="csv_col_inchi_select",
+            key=f"{key_prefix}csv_col_inchi_select",
             help="Column containing InChI strings"
         )
 
@@ -962,7 +968,7 @@ def _render_column_mapping_ui(df) -> Optional[dict[str, str]]:
             "InChIKey Column (optional)",
             columns_with_none,
             index=get_default_index('inchikey', 'inchikey'),
-            key="csv_col_inchikey_select",
+            key=f"{key_prefix}csv_col_inchikey_select",
             help="Column containing InChIKey strings (resolved via PubChem)"
         )
 

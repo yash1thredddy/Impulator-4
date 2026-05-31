@@ -17,8 +17,10 @@ import inspect
 import time
 
 import httpx
+import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+from backend.config import settings
 from backend.modules.chemical_classifier import (
     _circuits,
     _get_circuit,
@@ -52,6 +54,16 @@ def _mock_response(status_code=200, json_data=None, headers=None):
             f"HTTP {status_code}", request=MagicMock(), response=resp
         )
     return resp
+
+
+@pytest.fixture(autouse=True)
+def _classyfire_enabled(monkeypatch):
+    """ClassyFire ships PAUSED by default (settings.CLASSYFIRE_ENABLED=False, 2026-05-30).
+
+    Every existing test in this module exercises the ENABLED network path, so we
+    force the flag on for the whole module. The dedicated paused-path test below
+    overrides this with its own test-local monkeypatch (function-local wins)."""
+    monkeypatch.setattr(settings, "CLASSYFIRE_ENABLED", True)
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +174,36 @@ class TestGetClassyfireClassification:
             client.get.assert_not_called()
         finally:
             _restore_classyfire_circuits(saved)
+
+
+class TestClassyfirePaused:
+    """ClassyFire pause toggle (settings.CLASSYFIRE_ENABLED=False, 2026-05-30)."""
+
+    async def test_disabled_returns_none_without_calling_endpoint(self, monkeypatch):
+        """When paused, return None immediately -- no network call, no retries."""
+        monkeypatch.setattr(settings, "CLASSYFIRE_ENABLED", False)
+        client = AsyncMock(spec=httpx.AsyncClient)
+        result = await get_classyfire_classification(client, "REFJWTPEDVJJIY-UHFFFAOYSA-N")
+        assert result is None
+        client.get.assert_not_called()
+
+    async def test_disabled_skips_classyfire_but_keeps_npclassifier(self, monkeypatch):
+        """get_complete_classification still runs NPClassifier (different endpoint)
+        while ClassyFire is paused; ClassyFire fields stay empty."""
+        monkeypatch.setattr(settings, "CLASSYFIRE_ENABLED", False)
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.get.return_value = _mock_response(200, {
+            "pathway_results": ["Shikimates and Phenylpropanoids"],
+            "superclass_results": ["Flavonoids"],
+            "class_results": ["Flavones"],
+            "isglycoside": False,
+        })
+        result = await get_complete_classification(
+            client, "c1ccc(cc1)O", "REFJWTPEDVJJIY-UHFFFAOYSA-N"
+        )
+        assert result["Class"] == ""  # ClassyFire paused
+        assert result["NP_Pathway"] == "Shikimates and Phenylpropanoids"  # NPClassifier live
+        assert result["classification_available"] is True
 
 
 # ---------------------------------------------------------------------------
