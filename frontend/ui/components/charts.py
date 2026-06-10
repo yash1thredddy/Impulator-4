@@ -179,6 +179,45 @@ def create_scatter_plot(
     return apply_impulator_theme(fig)
 
 
+def add_original_compound_marker(
+    fig: go.Figure,
+    x_val: float,
+    y_val: float,
+    label: str = "Original",
+    hover_label: str = "Original compound (query)",
+) -> go.Figure:
+    """Overlay a distinct marker at the original (query) compound's position.
+
+    Drawn as a gold star with a dark outline so it pops against the Viridis
+    analog cloud and is unmistakable from the existing mean-marker. The marker
+    is a native Plotly trace, so it is included in the figure's exported image
+    (camera icon) — i.e. it travels into manuscript figures, not just the live
+    view. Caller supplies coordinates already on the plot's axes (either the
+    original's existing cloud row or computed via
+    ``compute_query_structural_descriptors``).
+    """
+    fig.add_trace(
+        go.Scatter(
+            x=[x_val],
+            y=[y_val],
+            mode="markers+text",
+            marker=dict(
+                symbol="star",
+                size=20,
+                color="#FFD700",
+                line=dict(color="#1a1a1a", width=1.6),
+            ),
+            text=[label],
+            textposition="top center",
+            textfont=dict(color="#1a1a1a", size=12),
+            name=hover_label,
+            hovertemplate=f"<b>{hover_label}</b><br>%{{x}}, %{{y}}<extra></extra>",
+            showlegend=True,
+        )
+    )
+    return fig
+
+
 def create_histogram(
     df: pd.DataFrame,
     column: str,

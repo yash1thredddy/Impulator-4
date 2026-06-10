@@ -110,6 +110,33 @@ def test_skips_rows_with_no_resolvable_structure():
     assert report["skipped_no_structure"] == ["NoStructure"]
 
 
+def test_drops_rows_with_unparseable_smiles():
+    """A present-but-junk SMILES is dropped and reported, not sent downstream.
+
+    Regression guard: a non-empty SMILES that RDKit cannot parse passes the
+    empty-structure check, then 422s the *entire* availability batch (the
+    backend runs RDKit on every ``CompoundInput`` and rejects the whole POST on
+    one bad structure). Dropping + reporting it per-row keeps one junk cell from
+    sinking the collection.
+    """
+    df = pd.DataFrame(
+        {
+            "compound_name": ["Good", "Junk"],
+            "smiles": ["CCO", "!!!not-a-smiles!!!"],
+        }
+    )
+
+    members, report = _build_members_from_mapped(
+        df, similarity_threshold=90, activity_types=["IC50"]
+    )
+
+    assert [m["name"] for m in members] == ["Good"]
+    assert report["invalid_structure"] == ["Junk"]
+    # The new bucket does not disturb the existing exclusion buckets.
+    assert report["skipped_no_structure"] == []
+    assert report["invalid_names"] == []
+
+
 def test_skips_nan_compound_name_rows():
     """A trailing all-empty CSV row (NaN name + NaN smiles) is excluded."""
     import numpy as np

@@ -226,15 +226,18 @@ def _build_members_from_mapped(
     member is stored with ``similarity_threshold=None`` and crashes that member
     on ``int(None)``. Stamping is what makes the shared config actually apply.
 
-    Returns ``(members, report)`` with two exclusion buckets:
+    Returns ``(members, report)`` with three exclusion buckets:
     ``report["invalid_names"]`` lists rows whose name fails the D-03 name
-    whitelist (would 422 the whole POST), and ``report["skipped_no_structure"]``
-    lists rows that had no resolvable structure.
+    whitelist (would 422 the whole POST), ``report["skipped_no_structure"]``
+    lists rows that had no resolvable structure, and
+    ``report["invalid_structure"]`` lists rows whose SMILES is present but
+    unparseable by RDKit (would also 422 the whole availability batch).
     """
     inchikey_smiles_map = inchikey_smiles_map or {}
     members: list[dict[str, object]] = []
     skipped_no_structure: list[str] = []
     invalid_names: list[str] = []
+    invalid_structure: list[str] = []
 
     has_smiles = "smiles" in df_mapped.columns
     has_inchi = "inchi" in df_mapped.columns
@@ -270,6 +273,15 @@ def _build_members_from_mapped(
             skipped_no_structure.append(name)
             continue
 
+        # A present-but-unparseable SMILES clears the empty check above yet 422s
+        # the WHOLE availability batch: the backend runs RDKit on every
+        # CompoundInput and rejects the entire POST on one bad structure. Drop +
+        # report it per-row (same _compute_inchikey gate the dedupe path uses) so
+        # one junk cell can't sink the collection before the rest is probed.
+        if _compute_inchikey(smiles) is None:
+            invalid_structure.append(name)
+            continue
+
         members.append(
             {
                 "name": name,
@@ -282,6 +294,7 @@ def _build_members_from_mapped(
     return members, {
         "skipped_no_structure": skipped_no_structure,
         "invalid_names": invalid_names,
+        "invalid_structure": invalid_structure,
     }
 
 
@@ -358,6 +371,12 @@ def _run_collection_preflight(
         st.warning(
             f"{len(skipped)} row(s) had no usable structure and were left out: "
             f"{', '.join(skipped[:5])}" + ("…" if len(skipped) > 5 else "")
+        )
+    if build_report.get("invalid_structure"):
+        bad = build_report["invalid_structure"]
+        st.warning(
+            f"{len(bad)} row(s) had an unreadable SMILES and were left out: "
+            f"{', '.join(bad[:5])}" + ("…" if len(bad) > 5 else "")
         )
     if not members:
         st.error("No members with a usable structure were found in the uploaded CSV.")
@@ -825,6 +844,18 @@ def _submit_collection(
             "(SMILES/InChI/InChIKey) and were left out: "
             f"{', '.join(skipped_no_structure[:5])}"
             + ("…" if len(skipped_no_structure) > 5 else "")
+        )
+
+    # A present-but-unparseable SMILES would 422 the whole availability batch;
+    # _build_members_from_mapped already excluded these — surface them so the
+    # user can fix the offending cells rather than wonder why members vanished.
+    invalid_structure = build_report.get("invalid_structure", [])
+    if invalid_structure:
+        st.warning(
+            f"{len(invalid_structure)} row(s) had an unreadable SMILES and were "
+            "left out (check for typos or non-structure text in those cells): "
+            f"{', '.join(invalid_structure[:5])}"
+            + ("…" if len(invalid_structure) > 5 else "")
         )
     if not members:
         st.error(

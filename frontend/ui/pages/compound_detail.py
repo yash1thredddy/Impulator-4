@@ -45,12 +45,16 @@ from frontend.services import (
 from frontend.utils import SessionState, sanitize_compound_name
 from frontend.ui.components import render_2d_structure, embed_structure_viewer
 from frontend.ui.components.charts import (
+    add_original_compound_marker,
     apply_impulator_theme,
     create_gmm_density_overlay,
     create_gmm_probability_bar,
     get_plotly_theme,
 )
 from frontend.ui.components.plotly_legend import plotly_legend_monitor
+from frontend.ui.components.query_descriptors import (
+    compute_query_structural_descriptors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -812,6 +816,10 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
         horizontal=True,
         key=f"prop_view_mode_{_eid}",
     )
+    st.caption(
+        "“Summary Statistics” = the aggregate across all compounds; "
+        "“Individual Compounds” = pick one compound and see its own values."
+    )
 
     if view_mode == "Summary Statistics":
         property_display = {
@@ -1345,6 +1353,37 @@ def _render_computed_properties(df: pd.DataFrame) -> None:
                         xaxis_title="NPOL/NHA",
                         yaxis_title="10 × PSA/MW",
                     )
+
+                    # Mark the ORIGINAL (query) compound in the analog cloud.
+                    # A: reuse its row when it is itself a cloud member (a ChEMBL
+                    # compound at ~100% similarity); B: else compute its coords
+                    # from Query_SMILES (novel query not in ChEMBL). Both land on
+                    # the same spot — B is drift-checked against the cloud recipe.
+                    query_smiles = (
+                        str(unique_df["Query_SMILES"].dropna().iloc[0])
+                        if "Query_SMILES" in unique_df.columns
+                        and unique_df["Query_SMILES"].notna().any()
+                        else ""
+                    )
+                    orig_x = orig_y = None
+                    if query_smiles:
+                        if "SMILES" in plot_df.columns:
+                            self_row = plot_df[
+                                plot_df["SMILES"].astype(str) == query_smiles
+                            ]
+                        else:
+                            self_row = plot_df.iloc[0:0]
+                        if not self_row.empty:
+                            orig_x = float(self_row["NPOLoNHA"].iloc[0])
+                            orig_y = float(self_row["10xPSA_MW"].iloc[0])
+                        else:
+                            desc = compute_query_structural_descriptors(query_smiles)
+                            if desc and "NPOLoNHA" in desc and "10xPSA_MW" in desc:
+                                orig_x = float(desc["NPOLoNHA"])
+                                orig_y = float(desc["10xPSA_MW"])
+                    if orig_x is not None and orig_y is not None:
+                        add_original_compound_marker(fig, x_val=orig_x, y_val=orig_y)
+
                     apply_impulator_theme(fig)
                     st.plotly_chart(fig, width="stretch", key="psa_npol_scatter_chart")
                     if stats_caption:
@@ -2000,13 +2039,23 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
                     help="**Efficiency Modulus** = √(SEI² + BEI²)\nOverall efficiency magnitude. Higher = more efficient.\nThe best-in-class compound sets the distance benchmark for IMP scoring (20% weight).",
                 )
 
+            st.caption(
+                f"Angle & modulus above are the **mean across {len(angle_vals)} "
+                "compounds** — individual compounds vary. The red line on the "
+                "efficiency plane below marks this mean angle; each point is one "
+                "compound."
+            )
+
     st.markdown("---")
 
     # ── Section 2: SEI-BEI Efficiency Plane ───────────────────────────────
     if has_sei_bei:
         st.markdown("**SEI–BEI Efficiency Plane**")
         st.caption(
-            "The canonical IMP visualization. 45° angle = balanced development. Outliers in this space drive 45% of the IMP score."
+            "The canonical IMP visualization. Angle = arctan(BEI/SEI) (BEI on y): "
+            "45° = balanced development; <45° favors surface efficiency (SEI), "
+            ">45° favors binding efficiency (BEI). Outliers in this space drive 45% "
+            "of the IMP score."
         )
 
         plane_df = df.dropna(subset=["SEI", "BEI"]).copy()
@@ -2210,7 +2259,6 @@ def _render_efficiency_analysis(df: pd.DataFrame) -> None:
                         else None,
                         custom_data=ep_cd if ep_cd else None,
                         opacity=0.7,
-                        trendline="ols",
                     )
                     fig.update_traces(marker=dict(size=7))
                     fig.update_layout(
@@ -2952,9 +3000,11 @@ def _render_imp_score_breakdown(df: pd.DataFrame) -> None:
             ang_score = row.get("Angle_Score", 0)
             ang_contrib = row.get("Angle_Contribution", 0)
             st.metric(
-                "Angle",
+                "Angle Score",
                 f"{ang_score:.3f}" if pd.notna(ang_score) else "N/A",
-                help="Weight: 15%",
+                help="Weight: 15%. A normalized [0,1] IMP penalty for how far the "
+                "trajectory angle sits from the optimal 45° — this is NOT the angle "
+                "itself (the geometric angle in degrees is shown just below).",
             )
             if pd.notna(ang_score):
                 st.progress(max(0.0, min(1.0, float(ang_score))))
@@ -2963,7 +3013,7 @@ def _render_imp_score_breakdown(df: pd.DataFrame) -> None:
             )
             angle = row.get("Angle_SEI_BEI", None)
             if angle is not None and pd.notna(angle):
-                st.caption(f"Angle: {angle:.1f}° (optimal: 45°)")
+                st.caption(f"Trajectory angle: {angle:.1f}° (optimal 45°)")
 
         with comp_cols[3]:
             int_score = row.get("Interference_Score", 0)
@@ -7028,7 +7078,7 @@ def _render_report_efficiency_boxplots(df: pd.DataFrame) -> None:
         **SEI (Surface Efficiency Index)** ✓ *Used in IMP Score*
         - Formula: `pActivity × 100 / PSA`
         - Measures potency efficiency relative to polar surface area
-        - Higher values indicate better size efficiency
+        - Higher values indicate better surface efficiency
         - Typical range: 5-20 (good), >20 (exceptional)
 
         **NSEI (Normalized SEI)**
@@ -7252,7 +7302,7 @@ def _render_report_efficiency_plane(df: pd.DataFrame) -> None:
 
     st.markdown("""
     **Angle Interpretation:**
-    - **< 45°:** Compound favors **size efficiency** (SEI) - efficient use of polar surface area
+    - **< 45°:** Compound favors **surface efficiency** (SEI) - efficient use of polar surface area
     - **= 45°:** **Balanced development** (OPTIMAL) - equal efficiency in size and binding
     - **> 45°:** Compound favors **binding efficiency** (BEI) - efficient use of molecular weight
 
@@ -7854,8 +7904,18 @@ def _create_html_efficiency_scatter(df: pd.DataFrame) -> str:
     # Calculate mean values
     mean_sei = plot_df["SEI"].mean()
     mean_bei = plot_df["BEI"].mean()
-    mean_angle = np.degrees(np.arctan2(mean_bei, mean_sei))
-    mean_modulus = np.sqrt(mean_sei**2 + mean_bei**2)
+    # Mirror the tab: mean of per-compound Angle/Modulus columns when present,
+    # falling back to the centroid formula only when those columns are absent.
+    mean_angle = (
+        df["Angle_SEI_BEI"].mean()
+        if "Angle_SEI_BEI" in df.columns
+        else np.degrees(np.arctan2(mean_bei, mean_sei))
+    )
+    mean_modulus = (
+        df["Modulus_SEI_BEI"].mean()
+        if "Modulus_SEI_BEI" in df.columns
+        else np.sqrt(mean_sei**2 + mean_bei**2)
+    )
 
     fig = go.Figure()
 
@@ -7983,18 +8043,18 @@ def _create_html_pdb_quality_bar(df: pd.DataFrame, data: dict[str, Any]) -> str:
         poor_q = int((pdb_summary_df["Quality"] == "*").sum())
     elif "PDB_High_Quality" in df.columns:
         high_q = (
-            int(df["PDB_High_Quality"].max())
+            int(df["PDB_High_Quality"].sum())
             if df["PDB_High_Quality"].notna().any()
             else 0
         )
         med_q = (
-            int(df["PDB_Medium_Quality"].max())
+            int(df["PDB_Medium_Quality"].sum())
             if "PDB_Medium_Quality" in df.columns
             and df["PDB_Medium_Quality"].notna().any()
             else 0
         )
         poor_q = (
-            int(df["PDB_Poor_Quality"].max())
+            int(df["PDB_Poor_Quality"].sum())
             if "PDB_Poor_Quality" in df.columns and df["PDB_Poor_Quality"].notna().any()
             else 0
         )
@@ -8080,8 +8140,10 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
                 img_b64 = base64.b64encode(buffered.getvalue()).decode()
                 # Display at 300x250 but use 600x500 source for crisp rendering
                 structure_img_html = f'<img src="data:image/png;base64,{img_b64}" style="width: 300px; height: 250px; border: 1px solid #ddd; border-radius: 8px;">'
-        except Exception:
-            pass
+        except Exception as e:
+            structure_img_html = (
+                f"<p>Structure unavailable: {html.escape(str(e))}</p>"
+            )
 
     # Use pre-computed InChI and InChIKey from data (escaped for HTML safety)
     inchikey = html.escape(data.get("inchikey") or "N/A")
@@ -8139,7 +8201,16 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
         ]
         for col, label, unit in prop_cols:
             if col in best_row.index and not pd.isna(best_row[col]):
-                props_html += f"<tr><td>{label}</td><td>{best_row[col]:.3f}</td><td>{unit}</td></tr>"
+                props_html += f"<tr><td>{label}</td><td>{best_row[col]:.2f}</td><td>{unit}</td></tr>"
+
+        # Add LogP row (matches tab's get_val("MolLogP") or get_val("LogP") source)
+        logp_val = None
+        if "MolLogP" in best_row.index and not pd.isna(best_row["MolLogP"]):
+            logp_val = best_row["MolLogP"]
+        elif "LogP" in best_row.index and not pd.isna(best_row["LogP"]):
+            logp_val = best_row["LogP"]
+        if logp_val is not None and not pd.isna(logp_val):
+            props_html += f"<tr><td>LogP</td><td>{logp_val:.2f}</td><td>Lipophilicity</td></tr>"
 
         # Add computed 10PSA/MW
         tpsa_br = best_row["TPSA"] if "TPSA" in best_row.index else None
@@ -8156,7 +8227,7 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
             and mw_br > 0
         ):
             psa_mw_val = 10 * tpsa_br / mw_br
-            props_html += f"<tr><td>10PSA/MW</td><td>{psa_mw_val:.3f}</td><td>Compound Polarity vs Atom Fingerprint (= BEI/SEI)</td></tr>"
+            props_html += f"<tr><td>10PSA/MW</td><td>{psa_mw_val:.2f}</td><td>Compound Polarity vs Atom Fingerprint (= BEI/SEI)</td></tr>"
 
     # Build efficiency metrics table from best compound
     efficiency_html = ""
@@ -8236,7 +8307,7 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
     # Bioactivity distribution
     bioactivity_html = ""
     if "Activity_Type" in df.columns:
-        type_counts = df["Activity_Type"].value_counts().head(5)
+        type_counts = df["Activity_Type"].value_counts().head(10)
         for stype, count in type_counts.items():
             pct = count / len(df) * 100
             bioactivity_html += f"<tr><td>{html.escape(str(stype))}</td><td>{count}</td><td>{pct:.1f}%</td></tr>"
@@ -8270,8 +8341,18 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
         and not pd.isna(mean_sei)
         and not pd.isna(mean_bei)
     ):
-        angle_val = np.degrees(np.arctan2(mean_bei, mean_sei))
-        modulus_val = np.sqrt(mean_sei**2 + mean_bei**2)
+        # Mirror the tab: mean of per-compound Angle/Modulus columns when present,
+        # falling back to the centroid formula only when those columns are absent.
+        angle_val = (
+            df["Angle_SEI_BEI"].mean()
+            if "Angle_SEI_BEI" in df.columns
+            else np.degrees(np.arctan2(mean_bei, mean_sei))
+        )
+        modulus_val = (
+            df["Modulus_SEI_BEI"].mean()
+            if "Modulus_SEI_BEI" in df.columns
+            else np.sqrt(mean_sei**2 + mean_bei**2)
+        )
     else:
         angle_val = (
             best_row["Angle_SEI_BEI"]
@@ -8308,14 +8389,14 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
             angle_status = "OPTIMAL ✓"
             angle_status_color = "#28a745"
             angle_status_bg = "#d4edda"
-        elif 35 <= angle_val <= 55:
+        elif 30 <= angle_val < 40 or 50 < angle_val <= 60:
             angle_status = "ACCEPTABLE"
-            angle_status_color = "#17a2b8"
-            angle_status_bg = "#d1ecf1"
-        else:
-            angle_status = "UNBALANCED"
             angle_status_color = "#fd7e14"
             angle_status_bg = "#fff3cd"
+        else:
+            angle_status = "UNBALANCED ⚠️"
+            angle_status_color = "#dc3545"
+            angle_status_bg = "#f8d7da"
     else:
         angle_status = "N/A"
         angle_status_color = "#6c757d"
@@ -8363,10 +8444,10 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
             )
             poor_q = int((pdb_summary_df_html["_res"] > 3.0).sum())
     else:
-        # Fallback to dataframe columns
+        # Fallback to summing from dataframe columns (matches tab's .sum() aggregation)
         if "PDB_Num_Structures" in df.columns:
             pdb_total = (
-                int(df["PDB_Num_Structures"].max())
+                int(df["PDB_Num_Structures"].sum())
                 if df["PDB_Num_Structures"].notna().any()
                 else 0
             )
@@ -8376,17 +8457,17 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
             and "PDB_Poor_Quality" in df.columns
         ):
             high_q = (
-                int(df["PDB_High_Quality"].max())
+                int(df["PDB_High_Quality"].sum())
                 if df["PDB_High_Quality"].notna().any()
                 else 0
             )
             med_q = (
-                int(df["PDB_Medium_Quality"].max())
+                int(df["PDB_Medium_Quality"].sum())
                 if df["PDB_Medium_Quality"].notna().any()
                 else 0
             )
             poor_q = (
-                int(df["PDB_Poor_Quality"].max())
+                int(df["PDB_Poor_Quality"].sum())
                 if df["PDB_Poor_Quality"].notna().any()
                 else 0
             )
@@ -8403,7 +8484,7 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
         pdb_conf_color = "#28a745"
         pdb_conf_bg = "#d4edda"
     elif mean_pdb_score >= 0.4:
-        pdb_confidence = "MODERATE CONFIDENCE"
+        pdb_confidence = "MEDIUM CONFIDENCE"
         pdb_conf_icon = "✓✓"
         pdb_conf_color = "#17a2b8"
         pdb_conf_bg = "#d1ecf1"
@@ -8489,7 +8570,10 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
     class_cols = ["Kingdom", "Superclass", "Class", "Subclass"]
     for col in class_cols:
         if col in df.columns and df[col].notna().any():
-            val = html.escape(str(df[col].iloc[0]))
+            mode_vals = df[col].mode()
+            val = html.escape(
+                str(mode_vals.iloc[0]) if not mode_vals.empty else "N/A"
+            )
             classyfire_html += f"<tr><td>{col}</td><td>{val}</td></tr>"
 
     # NPClassifier
@@ -8498,7 +8582,10 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
     np_labels = ["Pathway", "Superclass", "Class"]
     for col, label in zip(np_cols, np_labels):
         if col in df.columns and df[col].notna().any():
-            val = html.escape(str(df[col].iloc[0]))
+            mode_vals = df[col].mode()
+            val = html.escape(
+                str(mode_vals.iloc[0]) if not mode_vals.empty else "N/A"
+            )
             npclassifier_html += f"<tr><td>{label}</td><td>{val}</td></tr>"
 
     # Drug indications
@@ -8507,7 +8594,7 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
     unique_indications = 0
     compounds_with_indications = 0
 
-    indications_df = data.get("indications_df")
+    indications_df = data.get("indications")
     if indications_df is not None and not indications_df.empty:
         # Calculate summary statistics
         max_clinical_phase = (
@@ -8536,6 +8623,33 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
         for indication, phase in top_indications.items():
             indications_html += f"<tr><td>{html.escape(str(indication))}</td><td>Phase {int(phase)}</td></tr>"
 
+    # Recommended actions (mirrors _render_report_recommendation tab logic).
+    # Threshold runs off the best-compound score (tab's misnamed `mean_score` = .max()).
+    rec_actions = []
+    if final_score is not None and not pd.isna(final_score) and final_score >= 0.7:
+        rec_actions.append(
+            ("HIGH", "Validate with orthogonal binding assay (SPR/ITC/MST)")
+        )
+        rec_actions.append(("HIGH", "Counter-screen against aggregation"))
+    if "PAINS_Violation" in df.columns and df["PAINS_Violation"].any():
+        rec_actions.append(("HIGH", "Counter-screen PAINS-flagged compounds"))
+    if "QED" in df.columns and df["QED"].mean() < 0.5:
+        rec_actions.append(
+            ("LOW", "Consider SAR optimization to improve drug-likeness")
+        )
+    if "PDB_Score" in df.columns and df["PDB_Score"].mean() < 0.3:
+        rec_actions.append(
+            ("LOW", "Obtain structural evidence (X-ray/cryo-EM) before advancing")
+        )
+    _rec_icon = {"HIGH": "🔴", "MEDIUM": "🟠", "LOW": "🟡"}
+    recommended_actions_html = ""
+    for _priority, _action in rec_actions:
+        _icon = _rec_icon.get(_priority, "🟢")
+        recommended_actions_html += (
+            f"<li>{_icon} <strong>[{_priority}]</strong> "
+            f"{html.escape(_action)}</li>"
+        )
+
     # Get base score and QED multiplier from best compound
     base_score = (
         best_row["IMP_Base_Score"]
@@ -8559,6 +8673,11 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
     )
     qed_val_str = (
         f"{qed_val:.3f}" if qed_val is not None and not pd.isna(qed_val) else "N/A"
+    )
+    # Executive Summary QED = mean across query (matches tab's mean_qed), NaN-guarded.
+    mean_qed = df["QED"].mean() if "QED" in df.columns else None
+    mean_qed_str = (
+        f"{mean_qed:.3f}" if mean_qed is not None and not pd.isna(mean_qed) else "N/A"
     )
     final_score_str = (
         f"{final_score:.3f}"
@@ -8691,7 +8810,7 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
         <div style="font-size: 14px; color: #6b7280; margin-top: 4px;">Mean IMP score across this query (0–100 global scale)</div>
         {global_bar_svg if final_score_int is not None else ""}
         <p style="margin-top: 10px;"><strong>QED:</strong> {
-        qed_val:.3f} | <strong>Red Flags:</strong> {total_flags} active</p>
+        mean_qed_str} | <strong>Red Flags:</strong> {total_flags} active</p>
     </div>
 
     <!-- 3. COMPOUND PROPERTIES -->
@@ -8795,11 +8914,11 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
         "".join(
             [
                 f'''
-        <div style="flex: 1; min-width: 200px; text-align: center; padding: 15px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid {metric_colors_html[metric]};">
-            <div style="color: #fff; font-size: 0.95em; margin-bottom: 5px;">{metric}{"" if not stats["used"] else " ✓"}</div>
+        <div style="flex: 1; min-width: 200px; text-align: center; padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid {metric_colors_html[metric]};">
+            <div style="color: #666; font-size: 0.95em; margin-bottom: 5px;">{metric}{"" if not stats["used"] else " ✓"}</div>
             <div style="font-size: 1.5em; color: {metric_colors_html[metric]}; font-weight: bold;">{stats["mean"]:.2f}</div>
-            <div style="color: #aaa; font-size: 0.8em; margin-top: 3px;">Mean Value</div>
-            <div style="color: #888; font-size: 0.75em; margin-top: 3px;">Range: {stats["min"]:.1f}-{stats["max"]:.1f}</div>
+            <div style="color: #888; font-size: 0.8em; margin-top: 3px;">Mean Value</div>
+            <div style="color: #999; font-size: 0.75em; margin-top: 3px;">Range: {stats["min"]:.1f}-{stats["max"]:.1f}</div>
         </div>
         '''
                 for metric, stats in efficiency_metrics_stats.items()
@@ -8836,33 +8955,33 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
 
     <!-- Metric Cards Row -->
     <div style="display: flex; gap: 15px; margin-bottom: 15px;">
-        <div style="flex: 1; text-align: center; padding: 15px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #636EFA;">
+        <div style="flex: 1; text-align: center; padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #636EFA;">
             <div style="font-size: 1.4em; color: #636EFA; font-weight: bold;">{
         angle_str
     }°</div>
-            <div style="color: #fff; font-size: 0.95em; margin-top: 5px;">Mean Angle</div>
-            <div style="color: #aaa; font-size: 0.8em; margin-top: 3px;">Development trajectory</div>
+            <div style="color: #666; font-size: 0.95em; margin-top: 5px;">Mean Angle</div>
+            <div style="color: #888; font-size: 0.8em; margin-top: 3px;">Development trajectory</div>
         </div>
-        <div style="flex: 1; text-align: center; padding: 15px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #00CC96;">
+        <div style="flex: 1; text-align: center; padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #00CC96;">
             <div style="font-size: 1.4em; color: #00CC96; font-weight: bold;">{
         modulus_str
     }</div>
-            <div style="color: #fff; font-size: 0.95em; margin-top: 5px;">Modulus</div>
-            <div style="color: #aaa; font-size: 0.8em; margin-top: 3px;">Overall efficiency</div>
+            <div style="color: #666; font-size: 0.95em; margin-top: 5px;">Modulus</div>
+            <div style="color: #888; font-size: 0.8em; margin-top: 3px;">Overall efficiency</div>
         </div>
-        <div style="flex: 1; text-align: center; padding: 15px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #EF553B;">
+        <div style="flex: 1; text-align: center; padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #EF553B;">
             <div style="font-size: 1.4em; color: #EF553B; font-weight: bold;">{
         mean_sei_str
     }</div>
-            <div style="color: #fff; font-size: 0.95em; margin-top: 5px;">Mean SEI</div>
-            <div style="color: #aaa; font-size: 0.8em; margin-top: 3px;">Surface efficiency</div>
+            <div style="color: #666; font-size: 0.95em; margin-top: 5px;">Mean SEI</div>
+            <div style="color: #888; font-size: 0.8em; margin-top: 3px;">Surface efficiency</div>
         </div>
-        <div style="flex: 1; text-align: center; padding: 15px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #FFA15A;">
+        <div style="flex: 1; text-align: center; padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #FFA15A;">
             <div style="font-size: 1.4em; color: #FFA15A; font-weight: bold;">{
         mean_bei_str
     }</div>
-            <div style="color: #fff; font-size: 0.95em; margin-top: 5px;">Mean BEI</div>
-            <div style="color: #aaa; font-size: 0.8em; margin-top: 3px;">Binding efficiency</div>
+            <div style="color: #666; font-size: 0.95em; margin-top: 5px;">Mean BEI</div>
+            <div style="color: #888; font-size: 0.8em; margin-top: 3px;">Binding efficiency</div>
         </div>
     </div>
 
@@ -8872,14 +8991,14 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
         <div>
             <h3>Angle Interpretation</h3>
             <ul style="line-height: 1.8;">
-                <li><strong>&lt; 45°:</strong> Favors size efficiency (SEI) - Compound optimized more for surface area efficiency</li>
+                <li><strong>&lt; 45°:</strong> Favors surface efficiency (SEI) - Compound optimized more for polar surface area efficiency</li>
                 <li><strong>≈ 45°:</strong> Balanced development (OPTIMAL) - Ideal balance between size and binding efficiency</li>
                 <li><strong>&gt; 45°:</strong> Favors binding efficiency (BEI) - Compound optimized more for binding potency</li>
             </ul>
             <div class="info" style="margin-top: 15px;">
                 <strong>📊 What This Means:</strong><br>
                 The 45° optimal angle represents balanced development where compounds achieve efficiency improvements
-                through both size reduction (SEI) and potency enhancement (BEI). Most drugs exhibit angles between 50-70°
+                through both size reduction (SEI) and potency enhancement (BEI). Most approved drugs have angles between 40-60°
                 due to typical PSA/MW ratios.
             </div>
             <p style="margin-top: 10px;"><strong>Modulus Formula:</strong> <code>sqrt(SEI² + BEI²)</code></p>
@@ -8910,35 +9029,35 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
 
     <!-- Quality Distribution Cards -->
     <div style="display: flex; gap: 15px; margin-bottom: 15px;">
-        <div style="flex: 1; text-align: center; padding: 15px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #636EFA;">
+        <div style="flex: 1; text-align: center; padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #636EFA;">
             <div style="font-size: 1.5em; color: #636EFA; font-weight: bold;">{
         pdb_total
     }</div>
-            <div style="color: #fff; font-size: 0.95em; margin-top: 5px;">Total Structures</div>
-            <div style="color: #aaa; font-size: 0.8em; margin-top: 3px;">PDB entries found</div>
+            <div style="color: #666; font-size: 0.95em; margin-top: 5px;">Total Structures</div>
+            <div style="color: #888; font-size: 0.8em; margin-top: 3px;">PDB entries found</div>
         </div>
-        <div style="flex: 1; text-align: center; padding: 15px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #28a745;">
+        <div style="flex: 1; text-align: center; padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #28a745;">
             <div style="font-size: 1.5em; color: #28a745; font-weight: bold;">{
         high_q
     }</div>
-            <div style="color: #fff; font-size: 0.95em; margin-top: 5px;">High Quality</div>
-            <div style="color: #aaa; font-size: 0.8em; margin-top: 3px;">&lt;2.0Å ({
+            <div style="color: #666; font-size: 0.95em; margin-top: 5px;">High Quality</div>
+            <div style="color: #888; font-size: 0.8em; margin-top: 3px;">&lt;2.0Å ({
         high_q_pct:.0f}%) ★★★★★</div>
         </div>
-        <div style="flex: 1; text-align: center; padding: 15px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #fd7e14;">
+        <div style="flex: 1; text-align: center; padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #fd7e14;">
             <div style="font-size: 1.5em; color: #fd7e14; font-weight: bold;">{
         med_q
     }</div>
-            <div style="color: #fff; font-size: 0.95em; margin-top: 5px;">Medium Quality</div>
-            <div style="color: #aaa; font-size: 0.8em; margin-top: 3px;">2-3Å ({
+            <div style="color: #666; font-size: 0.95em; margin-top: 5px;">Medium Quality</div>
+            <div style="color: #888; font-size: 0.8em; margin-top: 3px;">2-3Å ({
         med_q_pct:.0f}%) ★★★</div>
         </div>
-        <div style="flex: 1; text-align: center; padding: 15px; background: #2d2d2d; border-radius: 8px; border-left: 4px solid #dc3545;">
+        <div style="flex: 1; text-align: center; padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #dc3545;">
             <div style="font-size: 1.5em; color: #dc3545; font-weight: bold;">{
         poor_q
     }</div>
-            <div style="color: #fff; font-size: 0.95em; margin-top: 5px;">Poor Quality</div>
-            <div style="color: #aaa; font-size: 0.8em; margin-top: 3px;">&gt;3Å ({
+            <div style="color: #666; font-size: 0.95em; margin-top: 5px;">Poor Quality</div>
+            <div style="color: #888; font-size: 0.8em; margin-top: 3px;">&gt;3Å ({
         poor_q_pct:.0f}%) ★</div>
         </div>
     </div>
@@ -9041,6 +9160,15 @@ def _generate_html_report(data: dict[str, Any], df: pd.DataFrame) -> str:
         obs_min_str
     }</span><span>{obs_max_str}</span></div>
     </div>
+
+    <h3>Recommended Actions:</h3>
+    <ul style="line-height: 1.8;">
+        {
+        recommended_actions_html
+        if recommended_actions_html
+        else "<li>No specific actions flagged.</li>"
+    }
+    </ul>
 
     <!-- IMP GUIDE -->
     <h2>📚 IMP Interpretation Guide</h2>
