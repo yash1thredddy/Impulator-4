@@ -1390,11 +1390,21 @@ def _render_bioactivity_tab(
         if not type_counts.empty:
             type_options = list(type_counts.index)
             # Default to the MOST COMMON Activity_Type present.
+            # The option set is DYNAMIC (depends on member selection + active
+            # collection). Streamlit raises StreamlitAPIException if the stored
+            # widget value falls out of ``options`` — e.g. the user narrows the
+            # member multiselect so the previously selected type is no longer
+            # present, or switches collections. Drop a stale value so the widget
+            # re-defaults to the most-common type instead of crashing.
+            # (Ported from parallel worktree fix 37c8e7a.)
+            _type_key = f"collection_activity_type_{id(combined_df)}"
+            if st.session_state.get(_type_key) not in type_options:
+                st.session_state.pop(_type_key, None)
             active_type = st.selectbox(
                 "Activity type",
                 options=type_options,
                 index=0,
-                key=f"collection_activity_type_{id(combined_df)}",
+                key=_type_key,
                 help=(
                     "Filters THIS tab only. Each assay type (IC50, Ki, EC50…) is a "
                     "different measurement — pooling them re-introduces the exact "
