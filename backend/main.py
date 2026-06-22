@@ -10,7 +10,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.exceptions import RequestValidationError
 
@@ -278,7 +278,6 @@ app = FastAPI(
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
-    default_response_class=ORJSONResponse,
 )
 
 # Register standard error response handlers
@@ -299,7 +298,7 @@ async def limit_request_size(request: Request, call_next):
     except ValueError:
         content_length_int = 0
     if content_length_int > MAX_CONTENT_SIZE:
-        return ORJSONResponse(
+        return JSONResponse(
             status_code=413,
             content={
                 "detail": "Request body too large. Maximum size is 10MB.",
@@ -369,7 +368,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     elif isinstance(exc, TimeoutError):
         error_message = "The operation timed out. Please try again."
 
-    return ORJSONResponse(
+    return JSONResponse(
         status_code=500,
         content={
             "detail": error_message,

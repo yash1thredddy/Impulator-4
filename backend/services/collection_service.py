@@ -37,6 +37,8 @@ is the route's job (no HTTP error types here).
 """
 
 import asyncio
+import io
+import json
 import logging
 import os
 import shutil
@@ -70,6 +72,22 @@ __all__ = [
 # memory from a pathological collection (many members x many rows). Per-member ZIP
 # sections are ALWAYS complete -- only the merged convenience table is truncated.
 COMBINED_ROW_CAP = 250_000
+
+# D-S2-ARCH / T-24-04-02: the Option-A aggregate re-reads the per-member
+# all_similar_molecules.csv catalog into collection_aggregate.json at finalize.
+# Bound the per-member row count so a pathological member ZIP cannot blow up
+# finalize RAM (the 250k cap only protects combined_activities.csv). Indications
+# and PDB frames are small by construction and left uncapped.
+AGGREGATE_ALL_SIMILAR_ROW_CAP = 5_000
+
+# D-S2-SOURCE (Option A): the 3 Tier-3 CSVs written by ``_save_results_sync`` at
+# the ROOT of every member ZIP (arcname = os.path.relpath(file, compound_folder)).
+# The aggregate re-reads ONLY these known filenames -- never arbitrary entries.
+_AGGREGATE_TIER3_FILES = {
+    "indications": "drug_indications.csv",
+    "all_similar": "all_similar_molecules.csv",
+    "pdb": "pdb_summary.csv",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +526,19 @@ def _assemble_and_upload_zip_sync(
                 "imp_candidates": rs.get("imp_candidates", 0),
                 "total_compounds": rs.get("total_compounds", 0),
                 "total_activities": rs.get("total_activities", 0),
+                # D-S2 free Triage leaderboard columns -- already in member_summary
+                # at finalize (zero recompute). .get() defaults so a missing key
+                # degrades to None/0, never KeyError (T-24-04-03).
+                "pains_count": rs.get("pains_count", 0),
+                "brenk_count": rs.get("brenk_count", 0),
+                "nih_count": rs.get("nih_count", 0),
+                "qed": rs.get("qed"),
+                "num_outliers": rs.get("num_outliers", 0),
+                "pdb_structures_count": rs.get("pdb_structures_count", 0),
+                "drug_indications_count": rs.get("drug_indications_count", 0),
+                "compounds_with_indications": rs.get("compounds_with_indications", 0),
+                "total_similar": rs.get("total_similar", 0),
+                "classification_available": rs.get("classification_available"),
             }
         )
 
@@ -542,6 +573,14 @@ def _assemble_and_upload_zip_sync(
             zf.writestr("collection_summary.csv", summary_df.to_csv(index=False))
             zf.writestr(
                 "combined_activities.csv", combined_df.to_csv(index=False)
+            )
+            # D-S2-ARCH: ONE structured aggregate artifact the Evidence view loads
+            # directly (no on-demand fallback). Option A re-reads the 3 Tier-3 CSVs
+            # from each member ZIP ROOT under the same arcname guard (D-S2-SOURCE).
+            aggregate = _build_collection_aggregate(succeeded, member_entry_ids)
+            zf.writestr(
+                "collection_aggregate.json",
+                json.dumps(aggregate, default=str),
             )
             if truncated:
                 zf.writestr(
@@ -589,6 +628,126 @@ def _nest_member_zip(zf: zipfile.ZipFile, member_zip: str, folder: str) -> None:
                 continue
             arcname = f"compounds/{folder}/{inner}"
             zf.writestr(arcname, src.read(info.filename))
+
+
+def _read_tier3_csv(src: zipfile.ZipFile, names: set[str], filename: str) -> list[dict]:
+    """Re-read ONE known Tier-3 CSV from a member ZIP ROOT (Option A, D-S2-SOURCE).
+
+    Returns a list of row dicts, or ``[]`` when the CSV is absent (a member with
+    no drug indications writes no ``drug_indications.csv``). Honors the SAME
+    arcname guard ``_nest_member_zip`` uses (reject leading ``/`` or ``..``) as
+    defence in depth even though only the 3 KNOWN root filenames are ever read --
+    a traversal-named impostor (e.g. ``../drug_indications.csv``) never matches
+    the exact root name AND would be rejected by the guard regardless (T-24-04-01).
+    """
+    if filename not in names:
+        return []
+    # Defence in depth: never read an entry whose stored name escapes the root.
+    if filename.startswith("/") or ".." in filename.split("/"):
+        logger.warning("Skipping unsafe Tier-3 arcname: %r", filename)
+        return []
+    try:
+        with src.open(filename) as fh:
+            frame = pd.read_csv(io.BytesIO(fh.read()))
+    except Exception as e:  # a malformed CSV in one member must not abort finalize
+        logger.warning("Could not parse Tier-3 CSV %r: %s", filename, e)
+        return []
+    if frame.empty:
+        return []
+    # JSON-safe: collection_aggregate.json is the SINGLE source the Evidence view
+    # (24-05) loads with no fallback, so numbers must arrive as numbers. Replace
+    # NaN -> None (bare ``NaN`` is invalid strict JSON) and let _json_safe coerce
+    # any numpy scalar to a native int/float (np.int64 is NOT an int subclass, so
+    # json.dumps(default=str) would otherwise silently STRINGIFY it).
+    frame = frame.where(pd.notnull(frame), None)
+    return [
+        {k: _json_safe(v) for k, v in row.items()}
+        for row in frame.to_dict(orient="records")
+    ]
+
+
+def _json_safe(value: Any) -> Any:
+    """Coerce a numpy/pandas scalar to a JSON-native type (no silent stringify).
+
+    ``np.int64`` is not an ``int`` subclass, so ``json.dumps(..., default=str)``
+    would turn it into a string; ``np.float64`` is a ``float`` subclass and is
+    fine. Float ``NaN`` -> ``None`` (bare ``NaN`` is invalid strict JSON).
+    Anything already native passes through unchanged.
+    """
+    if value is None:
+        return None
+    # numpy scalars expose .item() -> the native Python equivalent.
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            value = item()
+        except (ValueError, TypeError):
+            return value
+    if isinstance(value, float) and value != value:  # NaN
+        return None
+    return value
+
+
+def _build_collection_aggregate(
+    succeeded: list["MemberResult"],
+    member_entry_ids: list[str],
+) -> dict[str, dict]:
+    """Build the ``collection_aggregate.json`` payload via the Option-A re-read.
+
+    For each succeeded member, open each member ZIP and re-read ONLY the 3 KNOWN
+    Tier-3 CSVs at the ROOT (drug_indications / all_similar_molecules / pdb_summary)
+    -- never iterating arbitrary entries (T-24-04-01). Absent CSVs degrade to ``[]``
+    (T-24-04-03). The result is a dict keyed by member ``entry_id`` ->
+    ``{indications, all_similar, pdb, classification}`` (RESEARCH Open Q2). The
+    per-member ``all_similar`` catalog is row-capped (T-24-04-02 DoS bound).
+
+    ``member_entry_ids`` is the SAME list ``_assemble_and_upload_zip_sync`` already
+    computed for ``collection_summary.csv`` / ``combined_activities.csv`` -- passed
+    in (not recomputed) so the aggregate key joins to those tables on entry_id even
+    when a member lacks ``entry_id`` (a recomputed ``uuid4()`` would diverge).
+    """
+    aggregate: dict[str, dict] = {}
+    for r, entry_id in zip(succeeded, member_entry_ids):
+        rs = r.member_summary or {}
+        indications: list[dict] = []
+        all_similar: list[dict] = []
+        pdb: list[dict] = []
+        for member_zip in r.files:
+            if not member_zip or not os.path.exists(member_zip):
+                continue
+            try:
+                with zipfile.ZipFile(member_zip, "r") as src:
+                    names = set(src.namelist())
+                    indications.extend(
+                        _read_tier3_csv(src, names, _AGGREGATE_TIER3_FILES["indications"])
+                    )
+                    all_similar.extend(
+                        _read_tier3_csv(src, names, _AGGREGATE_TIER3_FILES["all_similar"])
+                    )
+                    pdb.extend(
+                        _read_tier3_csv(src, names, _AGGREGATE_TIER3_FILES["pdb"])
+                    )
+            except zipfile.BadZipFile as e:
+                logger.warning("Skipping unreadable member ZIP %r: %s", member_zip, e)
+                continue
+        # T-24-04-02: bound the per-member all_similar catalog (DoS guard).
+        if len(all_similar) > AGGREGATE_ALL_SIMILAR_ROW_CAP:
+            all_similar = all_similar[:AGGREGATE_ALL_SIMILAR_ROW_CAP]
+        # Classification / IMP dims already ride in member_summary at finalize
+        # (combined.csv carries the per-row detail; this is the headline rollup).
+        classification = {
+            "classification_available": rs.get("classification_available"),
+            "imp_score": rs.get("imp_score"),
+            "imp_candidates": rs.get("imp_candidates"),
+        }
+        aggregate[entry_id] = {
+            "member_name": r.member_name,
+            "indications": indications,
+            "all_similar": all_similar,
+            "pdb": pdb,
+            "classification": classification,
+        }
+    return aggregate
 
 
 # ---------------------------------------------------------------------------

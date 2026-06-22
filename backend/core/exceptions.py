@@ -11,7 +11,7 @@ from enum import StrEnum
 
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.core.logging import request_id_var
@@ -87,7 +87,7 @@ class AppException(Exception):
 
 async def http_exception_handler(
     request: Request, exc: StarletteHTTPException
-) -> ORJSONResponse:
+) -> JSONResponse:
     """Handle StarletteHTTPException (and FastAPI HTTPException which inherits it).
 
     Infers error_code from status code via STATUS_TO_ERROR_CODE.
@@ -104,7 +104,7 @@ async def http_exception_handler(
         error_code = detail.pop("error_code")
         detail = detail.get("detail", str(detail))
 
-    return ORJSONResponse(
+    return JSONResponse(
         status_code=exc.status_code,
         headers=getattr(exc, "headers", None),
         content={
@@ -117,14 +117,14 @@ async def http_exception_handler(
 
 async def validation_exception_handler(
     request: Request, exc: RequestValidationError
-) -> ORJSONResponse:
+) -> JSONResponse:
     """Handle Pydantic RequestValidationError (422 responses).
 
     Returns standard error shape with additional 'errors' array
     containing field-level validation details.
     """
     rid = request_id_var.get("")
-    return ORJSONResponse(
+    return JSONResponse(
         status_code=422,
         content={
             "detail": "Validation error",
@@ -144,10 +144,10 @@ async def validation_exception_handler(
 
 async def app_exception_handler(
     request: Request, exc: "AppException"
-) -> ORJSONResponse:
+) -> JSONResponse:
     """Handle AppException with explicit error_code."""
     rid = request_id_var.get("")
-    return ORJSONResponse(
+    return JSONResponse(
         status_code=exc.status_code,
         content={
             "detail": exc.detail,

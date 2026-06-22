@@ -15,6 +15,7 @@ Docker) so they run green here AND in CI:
 """
 import asyncio
 import inspect
+import os
 
 import pandas as pd
 import pytest
@@ -354,6 +355,112 @@ class TestMemberResultCascade:
 # ---------------------------------------------------------------------------
 # Plan 3 (D-PF-6): aggregate failed_members into stats + failed-job result_summary
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Plan 24-04 (D-S2-ARCH / D-S2-SOURCE Option A): the collection_aggregate.json
+# artifact is written at finalize by re-reading the 3 Tier-3 CSVs from each
+# member ZIP ROOT, honoring the _nest_member_zip arcname guard (no traversal).
+# ---------------------------------------------------------------------------
+
+def test_aggregate_artifact(tmp_path, monkeypatch):
+    """`_assemble_and_upload_zip_sync` writes a `collection_aggregate.json`
+    keyed by member entry_id, populated from the 3 Tier-3 CSVs re-read at the
+    ROOT of each member ZIP (Option A). A traversal-named inner entry that
+    masquerades as a Tier-3 CSV is rejected by the arcname guard and never
+    leaks into the aggregate.
+    """
+    import json
+    import zipfile as _zipfile
+
+    from backend.services import collection_service as cs
+    from tests.unit.fixtures.collection_member_zip_builder import build_member_zip
+
+    # No Azure: the finalize upload becomes a no-op and the ZIP stays on disk.
+    monkeypatch.setattr(cs, "is_azure_configured", lambda: False)
+    monkeypatch.setattr(cs.settings, "RESULTS_DIR", str(tmp_path), raising=False)
+
+    # Build a member ZIP carrying all 3 Tier-3 CSVs at root.
+    indications = pd.DataFrame(
+        {"chembl_id": ["CHEMBL25"], "indication": ["headache"]}
+    )
+    similar = pd.DataFrame({"chembl_id": ["CHEMBL1", "CHEMBL2"], "similarity": [99, 80]})
+    pdb = pd.DataFrame({"pdb_id": ["1ABC"], "resolution": [1.8]})
+    member_zip = build_member_zip(
+        tmp_path, "Ethanol", indications=indications, similar=similar, pdb=pdb
+    )
+
+    # A member with NO indications writes no drug_indications.csv (graceful absence).
+    member_zip2 = build_member_zip(
+        tmp_path, "Aspirin", indications=None, similar=None,
+        pdb=pd.DataFrame({"pdb_id": ["2XYZ"], "resolution": [2.1]}),
+    )
+
+    # A malicious member ZIP that stores a Tier-3-named CSV behind a traversal
+    # path -- the guard must reject it so it never reaches the aggregate.
+    evil_zip = os.path.join(str(tmp_path), "evil.zip")
+    with _zipfile.ZipFile(evil_zip, "w") as zf:
+        zf.writestr("../drug_indications.csv", "chembl_id,indication\nX,evil\n")
+
+    succeeded = [
+        MemberResult(
+            ok=True, member_name="Ethanol",
+            df=pd.DataFrame({"ChEMBL_ID": ["CHEMBL25"], "v": [1]}),
+            member_summary={"entry_id": "id-ethanol", "imp_score": 0.7},
+            files=[member_zip],
+        ),
+        MemberResult(
+            ok=True, member_name="Aspirin",
+            df=pd.DataFrame({"ChEMBL_ID": ["CHEMBL2"], "v": [2]}),
+            member_summary={"entry_id": "id-aspirin", "imp_score": 0.4},
+            files=[member_zip2],
+        ),
+        MemberResult(
+            ok=True, member_name="Evil",
+            df=pd.DataFrame({"ChEMBL_ID": ["CHEMBL3"], "v": [3]}),
+            member_summary={"entry_id": "id-evil", "imp_score": 0.1},
+            files=[evil_zip],
+        ),
+    ]
+
+    stats = cs._assemble_and_upload_zip_sync("11111111-1111-1111-1111-111111111111", succeeded)
+
+    dest = os.path.join(str(tmp_path), stats["storage_path"])
+    assert os.path.exists(dest), "assembled collection ZIP must be on disk"
+
+    with _zipfile.ZipFile(dest, "r") as zf:
+        names = set(zf.namelist())
+        assert "collection_aggregate.json" in names, (
+            "collection_aggregate.json must be written at finalize"
+        )
+        aggregate = json.loads(zf.read("collection_aggregate.json"))
+
+    # Keyed by member entry_id, with the 4 expected dimensions per member.
+    assert set(aggregate.keys()) == {"id-ethanol", "id-aspirin", "id-evil"}
+    eth = aggregate["id-ethanol"]
+    assert set(eth.keys()) >= {"indications", "pdb", "all_similar", "classification"}
+    assert len(eth["indications"]) == 1
+    assert eth["indications"][0]["indication"] == "headache"
+    assert len(eth["all_similar"]) == 2
+    assert len(eth["pdb"]) == 1
+    # Numbers must arrive as numbers, never stringified by json default=str. The
+    # Evidence view (24-05) is the SINGLE source with no fallback, so a numeric
+    # similarity of 99 must round-trip as int 99 (not "99") and 1.8 as float.
+    sim0 = eth["all_similar"][0]["similarity"]
+    assert sim0 == 99 and isinstance(sim0, int) and not isinstance(sim0, bool)
+    res0 = eth["pdb"][0]["resolution"]
+    assert res0 == 1.8 and isinstance(res0, float)
+
+    # Graceful absence: a member with no indications has an empty list, never KeyError.
+    asp = aggregate["id-aspirin"]
+    assert asp["indications"] == []
+    assert asp["all_similar"] == []
+    assert len(asp["pdb"]) == 1
+
+    # Traversal guard: the ../drug_indications.csv entry was rejected, so the evil
+    # member's indications stay empty (the malicious row never leaked in).
+    evil = aggregate["id-evil"]
+    assert evil["indications"] == [], "traversal-named Tier-3 entry must be rejected"
+
 
 class TestFailedMembersAggregation:
     def test_build_failed_members_payload(self):

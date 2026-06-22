@@ -437,3 +437,64 @@ class TestProcessCollectionMemberCascade:
                     results_dir=str(tmp_path),
                 )
             assert ei.value.cascade_results in (None, [])
+
+
+# ---------------------------------------------------------------------------
+# Plan 24-04 (D-S2-SOURCE Option A): static-source guard for the Tier-3 CSV
+# root arcnames. The aggregate re-read in collection_service matches the 3
+# Tier-3 CSVs by EXACT filename at the member ZIP ROOT. If _save_results_sync
+# (compound_service) ever renames or relocates them into a subfolder, the
+# Evidence aggregate silently goes empty -- this guard trips first (mirrors the
+# existing process_collection_member body-assertion guards). RESEARCH Pitfall 4.
+# ---------------------------------------------------------------------------
+
+class TestTier3RootArcnames:
+
+    def test_tier3_csv_arcnames(self, tmp_path):
+        """The 3 Tier-3 CSVs the Option-A aggregate re-reads must sit at the
+        member ZIP ROOT (no subfolder). Built via the 24-01 member-ZIP builder,
+        which mirrors _save_results_sync's
+        arcname = os.path.relpath(file_path, compound_folder)."""
+        import zipfile
+
+        from tests.unit.fixtures.collection_member_zip_builder import (
+            ALL_SIMILAR_MOLECULES_CSV,
+            DRUG_INDICATIONS_CSV,
+            PDB_SUMMARY_CSV,
+            build_member_zip,
+        )
+
+        member_zip = build_member_zip(
+            tmp_path,
+            "Ethanol",
+            indications=pd.DataFrame({"chembl_id": ["CHEMBL25"], "indication": ["x"]}),
+            similar=pd.DataFrame({"chembl_id": ["CHEMBL1"], "similarity": [99]}),
+            pdb=pd.DataFrame({"pdb_id": ["1ABC"]}),
+        )
+
+        with zipfile.ZipFile(member_zip, "r") as zf:
+            names = set(zf.namelist())
+
+        # The exact root names the aggregate re-read keys on. A rename or a move
+        # into a subfolder (e.g. "tier3/drug_indications.csv") breaks this.
+        for root_name in (
+            DRUG_INDICATIONS_CSV,
+            ALL_SIMILAR_MOLECULES_CSV,
+            PDB_SUMMARY_CSV,
+        ):
+            assert root_name in names, (
+                f"{root_name!r} must live at the member ZIP ROOT -- the Option-A "
+                f"aggregate re-read (collection_service) matches it by exact name"
+            )
+            assert "/" not in root_name, "Tier-3 CSV must NOT be nested in a subfolder"
+
+    def test_aggregate_reread_uses_exact_root_filenames(self):
+        """Static guard: collection_service's Tier-3 filename map must hold the
+        3 canonical root names. If the source CSVs are renamed in
+        compound_service, BOTH this map and the builder constants must change in
+        lockstep -- this test plus test_tier3_csv_arcnames bracket that drift."""
+        from backend.services.collection_service import _AGGREGATE_TIER3_FILES
+
+        assert _AGGREGATE_TIER3_FILES["indications"] == "drug_indications.csv"
+        assert _AGGREGATE_TIER3_FILES["all_similar"] == "all_similar_molecules.csv"
+        assert _AGGREGATE_TIER3_FILES["pdb"] == "pdb_summary.csv"

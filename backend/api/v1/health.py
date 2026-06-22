@@ -83,7 +83,7 @@ async def readiness_check(db: DbDep):
     Unhealthy = database down OR scheduler dead with PENDING jobs.
     """
     import shutil
-    from fastapi.responses import ORJSONResponse
+    from fastapi.responses import JSONResponse
     from backend.core import scheduler
 
     status = "healthy"
@@ -95,14 +95,14 @@ async def readiness_check(db: DbDep):
         checks["database"] = "healthy"
     except Exception:
         checks["database"] = "unhealthy"
-        return ORJSONResponse(status_code=503, content={"status": "unhealthy", "checks": checks})
+        return JSONResponse(status_code=503, content={"status": "unhealthy", "checks": checks})
 
     # Scheduler liveness (critical if PENDING jobs exist -- STAB-12)
     pending_count = db.scalar(select(func.count()).select_from(Job).where(Job.status == JobStatus.PENDING))
     scheduler_alive = scheduler.is_running()
     if pending_count > 0 and not scheduler_alive:
         checks["scheduler"] = "unhealthy"
-        return ORJSONResponse(status_code=503, content={
+        return JSONResponse(status_code=503, content={
             "status": "unhealthy",
             "checks": checks,
             "detail": f"Scheduler dead with {pending_count} PENDING jobs",
@@ -126,7 +126,7 @@ async def readiness_check(db: DbDep):
     except Exception:
         checks["disk"] = {"status": "unknown"}
 
-    return ORJSONResponse(status_code=200, content={"status": status, "checks": checks})
+    return JSONResponse(status_code=200, content={"status": status, "checks": checks})
 
 
 @router.get("/live")
