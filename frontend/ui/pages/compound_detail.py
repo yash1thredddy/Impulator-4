@@ -3414,6 +3414,12 @@ def _render_gmm_widget(df: pd.DataFrame, job_id: str) -> None:
         corpus_key,
         grain or "",
     )
+    # Seed the slider's default once; session_state is the single source of
+    # truth thereafter (the BIC auto-seeding below writes the same key, and the
+    # widget reads it via `key=`). Passing `value=` alongside this would make
+    # Streamlit warn that the default is ignored.
+    if slider_key not in st.session_state:
+        st.session_state[slider_key] = DEFAULT_COMPONENTS
     if (
         suggested_k is not None
         and st.session_state.get(fingerprint_key) != fingerprint
@@ -3428,7 +3434,6 @@ def _render_gmm_widget(df: pd.DataFrame, job_id: str) -> None:
             "Number of components",
             min_value=MIN_COMPONENTS,
             max_value=MAX_COMPONENTS,
-            value=DEFAULT_COMPONENTS,
             step=1,
             key=slider_key,
         )

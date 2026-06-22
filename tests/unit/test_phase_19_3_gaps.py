@@ -32,84 +32,102 @@ import pytest
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# OPT-06: orjson / ORJSONResponse must be the FastAPI default response class
+# OPT-06 (SUPERSEDED): ORJSONResponse removed — FastAPI now serializes via Pydantic
 # ─────────────────────────────────────────────────────────────────────────────
+#
+# ORIGINAL OPT-06/D-14/D-16: wire ORJSONResponse as the default response class
+# and replace all explicit JSONResponse calls with ORJSONResponse for a 3-6x
+# JSON serialization speedup.
+#
+# REVERSAL (FastAPI >=0.135, 2026-06): FastAPI deprecated ORJSONResponse and
+# UJSONResponse (FastAPIDeprecationWarning). When a return type or response_model
+# is set, FastAPI now serializes data directly to JSON bytes via Pydantic (Rust),
+# which is faster than routing through an orjson response class and needs no
+# custom class. Keeping default_response_class=ORJSONResponse emitted a
+# deprecation warning on every request (routing.py). We therefore reverted to the
+# stock JSONResponse and removed default_response_class. orjson remains declared
+# in pyproject.toml (see test_orjson_declared_in_pyproject) but is now unused by
+# the response layer. Ref:
+# https://fastapi.tiangolo.com/advanced/custom-response/#orjson-or-response-model
+
+def _module_references_orjson(module) -> bool:
+    """AST check: does *module* actually reference the ORJSONResponse name?
+
+    Uses the AST (imports / Name / Attribute nodes) rather than a raw substring
+    scan, so a mention in a comment or docstring — which carries no runtime
+    usage — doesn't trip a false positive.
+    """
+    import ast
+    import inspect as ins
+
+    tree = ast.parse(ins.getsource(module))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "ORJSONResponse":
+            return True
+        if isinstance(node, ast.Attribute) and node.attr == "ORJSONResponse":
+            return True
+        if isinstance(node, ast.ImportFrom) and any(
+            alias.name == "ORJSONResponse" for alias in node.names
+        ):
+            return True
+    return False
+
 
 class TestOPT06OrjsonDefaultResponse:
     """
-    OPT-06 requirement: orjson as FastAPI default response class (3-6x faster
-    JSON serialization). D-14: default_response_class=ORJSONResponse on app.
-    D-16: Replace ALL explicit JSONResponse calls with ORJSONResponse.
+    Post-reversal contract: the app must NOT use the deprecated ORJSONResponse.
+    These tests guard against re-introducing the deprecation warning.
     """
 
-    def test_fastapi_app_uses_orjson_default_response_class(self):
+    def test_fastapi_app_does_not_use_deprecated_orjson_response_class(self):
         """
-        FastAPI app must have default_response_class=ORJSONResponse.
-        Checks app.router.default_response_class — the FastAPI-internal location
-        where the resolved response class is stored after construction.
+        FastAPI app must not pin the deprecated ORJSONResponse. The stock default
+        (JSONResponse) lets FastAPI serialize via Pydantic on the Rust side.
         """
         from fastapi.responses import ORJSONResponse
         from backend.main import app
 
         actual = app.router.default_response_class
-        assert actual is ORJSONResponse, (
-            f"Expected app.router.default_response_class=ORJSONResponse, "
-            f"got {actual!r}. "
-            "D-14 requires: app = FastAPI(..., default_response_class=ORJSONResponse)"
+        assert actual is not ORJSONResponse, (
+            f"app.router.default_response_class is the deprecated ORJSONResponse "
+            f"({actual!r}). FastAPI >=0.135 deprecated it; remove "
+            "default_response_class=ORJSONResponse and rely on the Pydantic path."
         )
 
-    def test_main_py_has_no_plain_jsonresponse_calls(self):
-        """
-        main.py must not import or return plain JSONResponse after OPT-06.
-        All explicit JSON responses should use ORJSONResponse.
-        """
+    def test_main_py_has_no_orjson_response_calls(self):
+        """main.py must not import or reference the deprecated ORJSONResponse."""
         import backend.main as main_module
-        import inspect as ins
 
-        source = ins.getsource(main_module)
-        # Allow the import line itself to mention JSONResponse only IF it's
-        # importing ORJSONResponse.  Forbidden: standalone JSONResponse(...)
-        # calls or from fastapi.responses import JSONResponse without ORJSON.
-        calls = re.findall(r'return\s+JSONResponse\s*\(', source)
-        assert not calls, (
-            f"Found {len(calls)} plain JSONResponse(...) return(s) in main.py. "
-            "D-16 requires all explicit JSONResponse calls replaced with ORJSONResponse."
+        assert not _module_references_orjson(main_module), (
+            "ORJSONResponse still referenced in main.py — it is deprecated in "
+            "FastAPI >=0.135. Use JSONResponse or rely on response models."
         )
 
-    def test_exceptions_py_has_no_plain_jsonresponse_calls(self):
-        """exceptions.py exception handlers must use ORJSONResponse, not JSONResponse."""
+    def test_exceptions_py_has_no_orjson_response_calls(self):
+        """exceptions.py exception handlers must not use the deprecated ORJSONResponse."""
         import backend.core.exceptions as exc_module
-        import inspect as ins
 
-        source = ins.getsource(exc_module)
-        calls = re.findall(r'return\s+JSONResponse\s*\(', source)
-        assert not calls, (
-            f"Found {len(calls)} plain JSONResponse return(s) in exceptions.py. "
-            "D-16 requires ORJSONResponse throughout."
+        assert not _module_references_orjson(exc_module), (
+            "ORJSONResponse still referenced in exceptions.py — deprecated in "
+            "FastAPI >=0.135. Use JSONResponse."
         )
 
-    def test_health_py_has_no_plain_jsonresponse_calls(self):
-        """health.py readiness checks must use ORJSONResponse."""
+    def test_health_py_has_no_orjson_response_calls(self):
+        """health.py readiness checks must not use the deprecated ORJSONResponse."""
         import backend.api.v1.health as health_module
-        import inspect as ins
 
-        source = ins.getsource(health_module)
-        calls = re.findall(r'return\s+JSONResponse\s*\(', source)
-        assert not calls, (
-            f"Found {len(calls)} plain JSONResponse return(s) in health.py. "
-            "D-16 requires ORJSONResponse throughout."
+        assert not _module_references_orjson(health_module), (
+            "ORJSONResponse still referenced in health.py — deprecated in "
+            "FastAPI >=0.135. Use JSONResponse."
         )
 
-    def test_jobs_py_has_no_plain_jsonresponse_calls(self):
-        """jobs.py duplicate/skip responses must use ORJSONResponse."""
+    def test_jobs_py_has_no_orjson_response_calls(self):
+        """jobs.py duplicate/skip responses must not use the deprecated ORJSONResponse."""
         import backend.api.v1.jobs as jobs_module
-        import inspect as ins
 
-        source = ins.getsource(jobs_module)
-        calls = re.findall(r'return\s+JSONResponse\s*\(', source)
-        assert not calls, (
-            f"Found {len(calls)} plain JSONResponse return(s) in jobs.py. "
-            "D-16 requires ORJSONResponse throughout."
+        assert not _module_references_orjson(jobs_module), (
+            "ORJSONResponse still referenced in jobs.py — deprecated in "
+            "FastAPI >=0.135. Use JSONResponse."
         )
 
 
