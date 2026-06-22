@@ -513,7 +513,9 @@ class TestTier3RootArcnames:
 
         import backend.services.compound_service as cs
 
-        src = ins.getsource(cs)
+        # Scope to the writer function itself (not the whole module) so the guard
+        # can't be satisfied by an unrelated mention of these filenames elsewhere.
+        src = ins.getsource(cs._save_results_inner)
         for fname in (
             "drug_indications.csv",
             "all_similar_molecules.csv",
