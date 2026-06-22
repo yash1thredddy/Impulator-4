@@ -44,6 +44,8 @@ reproducibility.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import structlog
 from sklearn.decomposition import PCA
@@ -120,7 +122,11 @@ def build_descriptor_matrix(combined_df):
 
     matrix = per_member.to_numpy(dtype=float)
     # Impute remaining NaN with per-column member mean; all-NaN columns → 0.0.
-    col_means = np.nanmean(matrix, axis=0)
+    with warnings.catch_warnings():
+        # An all-NaN column makes np.nanmean emit "Mean of empty slice"; the NaN
+        # result is handled on the next line, so silence the noise.
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        col_means = np.nanmean(matrix, axis=0)
     col_means = np.where(np.isnan(col_means), 0.0, col_means)
     nan_mask = np.isnan(matrix)
     if nan_mask.any():
@@ -168,7 +174,9 @@ def project_pca(X):
         :data:`DEFAULT_RANDOM_STATE`.
     """
     X_arr = np.asarray(X, dtype=float)
-    n_components = min(2, X_arr.shape[1]) if X_arr.ndim == 2 else 2
+    if X_arr.ndim != 2:
+        raise ValueError(f"project_pca expects a 2D matrix; got shape {X_arr.shape!r}")
+    n_components = min(2, X_arr.shape[1])
     coords = PCA(
         n_components=n_components,
         random_state=DEFAULT_RANDOM_STATE,
@@ -300,7 +308,9 @@ def _project_umap(X, *, n_members: int):
         return project_pca(X)
 
     X_arr = np.asarray(X, dtype=float)
-    n_neighbors = min(15, max(2, int(n_members) - 1))  # Pitfall 2 clamp
+    # Clamp to the ACTUAL row count, not the n_members hint — UMAP requires
+    # n_neighbors < n_samples, and the two can disagree.
+    n_neighbors = min(15, max(2, X_arr.shape[0] - 1))  # Pitfall 2 clamp
     reducer = umap.UMAP(
         n_components=2,
         random_state=DEFAULT_RANDOM_STATE,

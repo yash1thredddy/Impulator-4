@@ -29,7 +29,8 @@ dependencies = [
     "numpy>=2.4.3,<3.0.0",
     "scipy>=1.11.0",
     "statsmodels>=0.14.0",
-    "scikit-learn>=1.5.0,<2.0.0",
+    # Floor is 1.6.0 because umap-learn>=0.5.12 requires scikit-learn>=1.6.
+    "scikit-learn>=1.6.0,<2.0.0",
     # Stage-3 Chemical Space UMAP toggle (Phase 24, D-S3-DEP); PCA remains the no-dep default.
     # Pulls a heavy LLVM JIT transitive set: numba, llvmlite, pynndescent, tqdm.
     "umap-learn>=0.5.12",

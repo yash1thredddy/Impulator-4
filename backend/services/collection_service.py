@@ -37,7 +37,6 @@ is the route's job (no HTTP error types here).
 """
 
 import asyncio
-import io
 import json
 import logging
 import os
@@ -630,7 +629,13 @@ def _nest_member_zip(zf: zipfile.ZipFile, member_zip: str, folder: str) -> None:
             zf.writestr(arcname, src.read(info.filename))
 
 
-def _read_tier3_csv(src: zipfile.ZipFile, names: set[str], filename: str) -> list[dict]:
+def _read_tier3_csv(
+    src: zipfile.ZipFile,
+    names: set[str],
+    filename: str,
+    *,
+    nrows: int | None = None,
+) -> list[dict]:
     """Re-read ONE known Tier-3 CSV from a member ZIP ROOT (Option A, D-S2-SOURCE).
 
     Returns a list of row dicts, or ``[]`` when the CSV is absent (a member with
@@ -647,8 +652,12 @@ def _read_tier3_csv(src: zipfile.ZipFile, names: set[str], filename: str) -> lis
         logger.warning("Skipping unsafe Tier-3 arcname: %r", filename)
         return []
     try:
+        # Stream straight from the ZIP entry with an optional row cap so a
+        # pathological CSV can't be fully materialized before the cap applies
+        # (the all_similar catalog passes nrows=AGGREGATE_ALL_SIMILAR_ROW_CAP,
+        # bounding memory during the read itself, not just after).
         with src.open(filename) as fh:
-            frame = pd.read_csv(io.BytesIO(fh.read()))
+            frame = pd.read_csv(fh, nrows=nrows)
     except Exception as e:  # a malformed CSV in one member must not abort finalize
         logger.warning("Could not parse Tier-3 CSV %r: %s", filename, e)
         return []
@@ -722,7 +731,12 @@ def _build_collection_aggregate(
                         _read_tier3_csv(src, names, _AGGREGATE_TIER3_FILES["indications"])
                     )
                     all_similar.extend(
-                        _read_tier3_csv(src, names, _AGGREGATE_TIER3_FILES["all_similar"])
+                        _read_tier3_csv(
+                            src,
+                            names,
+                            _AGGREGATE_TIER3_FILES["all_similar"],
+                            nrows=AGGREGATE_ALL_SIMILAR_ROW_CAP,
+                        )
                     )
                     pdb.extend(
                         _read_tier3_csv(src, names, _AGGREGATE_TIER3_FILES["pdb"])

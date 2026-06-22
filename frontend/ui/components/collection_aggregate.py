@@ -58,17 +58,16 @@ def parse_aggregate(data: object) -> dict[str, AggregateEntry]:
         if not isinstance(record, dict):
             logger.warning("aggregate_member_record_skipped", entry_id=str(entry_id))
             continue
-        try:
-            result[str(entry_id)] = AggregateEntry(
-                entry_id=str(entry_id),
-                indications=_as_list(record.get("indications")),
-                pdb=_as_list(record.get("pdb")),
-                all_similar=_as_list(record.get("all_similar")),
-                classification=_as_dict(record.get("classification")),
-            )
-        except (TypeError, ValueError):
-            logger.warning("aggregate_member_parse_failed", entry_id=str(entry_id))
-            continue
+        # The _as_list / _as_dict helpers coerce any shape to safe defaults and
+        # AggregateEntry takes already-normalized values, so construction can't
+        # raise here — no try/except needed (it was dead code).
+        result[str(entry_id)] = AggregateEntry(
+            entry_id=str(entry_id),
+            indications=_as_list(record.get("indications")),
+            pdb=_as_list(record.get("pdb")),
+            all_similar=_as_list(record.get("all_similar")),
+            classification=_as_dict(record.get("classification")),
+        )
     return result
 
 

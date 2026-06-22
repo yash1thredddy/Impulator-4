@@ -126,8 +126,12 @@ def druglikeness_flag_counts(combined_df: pd.DataFrame) -> pd.DataFrame:
 
     parts: list[pd.Series] = []
     for col in bool_cols:
-        # astype(bool) so 1/0 or True/False both count as flagged rows.
-        parts.append(combined_df[col].astype(bool).groupby(combined_df[GROUP_COL]).sum().rename(col))
+        # fillna(False) first: astype(bool) maps NaN -> True (NumPy truthiness),
+        # which would inflate flag counts for rows missing the flag. Then 1/0 or
+        # True/False both count as flagged rows.
+        parts.append(
+            combined_df[col].fillna(False).astype(bool).groupby(combined_df[GROUP_COL]).sum().rename(col)
+        )
     if has_ro5:
         flagged = (combined_df[RO5_VIOLATION_COL] > 0)
         parts.append(flagged.groupby(combined_df[GROUP_COL]).sum().rename(RO5_VIOLATION_COL))

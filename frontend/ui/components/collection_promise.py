@@ -179,6 +179,10 @@ def compute_promise(
     # Promiscuity (inverse distinct-target count).
     if TARGET_COL in df.columns:
         distinct = df.groupby(GROUP_COL)[TARGET_COL].nunique().reindex(members)
+        # nunique() returns 0 for a member whose Target_Name is entirely missing.
+        # Left as 0 it would map to a *perfect* promiscuity score; treat "no
+        # target data" as missing (NaN) so the member is excluded, not rewarded.
+        distinct = distinct.mask(distinct == 0)
         promisc = _promiscuity_component(distinct)
     else:
         logger.warning("promise_component_column_absent", column=TARGET_COL)

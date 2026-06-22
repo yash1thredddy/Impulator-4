@@ -498,3 +498,30 @@ class TestTier3RootArcnames:
         assert _AGGREGATE_TIER3_FILES["indications"] == "drug_indications.csv"
         assert _AGGREGATE_TIER3_FILES["all_similar"] == "all_similar_molecules.csv"
         assert _AGGREGATE_TIER3_FILES["pdb"] == "pdb_summary.csv"
+
+    def test_production_writer_emits_tier3_csvs_at_root(self):
+        """Tie the guard to the REAL writer, not just the fixture/reader.
+
+        ``test_tier3_csv_arcnames`` only proves the *fixture* builder writes the
+        Tier-3 CSVs at the ZIP root, and ``test_aggregate_reread_uses_exact_root_filenames``
+        only proves the *reader* expects those names. This asserts the production
+        writer (``compound_service._save_results_inner``) actually writes each CSV
+        to the ``compound_folder`` ROOT under its canonical name — so a rename or a
+        relocate into a subfolder there (which would silently empty the Evidence
+        aggregate) trips even though the fixture keeps passing."""
+        import inspect as ins
+
+        import backend.services.compound_service as cs
+
+        src = ins.getsource(cs)
+        for fname in (
+            "drug_indications.csv",
+            "all_similar_molecules.csv",
+            "pdb_summary.csv",
+        ):
+            assert f'os.path.join(compound_folder, "{fname}")' in src, (
+                f"{fname!r} is no longer written to the compound_folder ROOT by "
+                "_save_results_inner -- the Option-A aggregate re-read will silently "
+                "go empty. Update the builder constants and _AGGREGATE_TIER3_FILES "
+                "in lockstep."
+            )

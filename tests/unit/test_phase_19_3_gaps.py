@@ -50,6 +50,29 @@ import pytest
 # the response layer. Ref:
 # https://fastapi.tiangolo.com/advanced/custom-response/#orjson-or-response-model
 
+def _module_references_orjson(module) -> bool:
+    """AST check: does *module* actually reference the ORJSONResponse name?
+
+    Uses the AST (imports / Name / Attribute nodes) rather than a raw substring
+    scan, so a mention in a comment or docstring — which carries no runtime
+    usage — doesn't trip a false positive.
+    """
+    import ast
+    import inspect as ins
+
+    tree = ast.parse(ins.getsource(module))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "ORJSONResponse":
+            return True
+        if isinstance(node, ast.Attribute) and node.attr == "ORJSONResponse":
+            return True
+        if isinstance(node, ast.ImportFrom) and any(
+            alias.name == "ORJSONResponse" for alias in node.names
+        ):
+            return True
+    return False
+
+
 class TestOPT06OrjsonDefaultResponse:
     """
     Post-reversal contract: the app must NOT use the deprecated ORJSONResponse.
@@ -72,12 +95,10 @@ class TestOPT06OrjsonDefaultResponse:
         )
 
     def test_main_py_has_no_orjson_response_calls(self):
-        """main.py must not import or return the deprecated ORJSONResponse."""
+        """main.py must not import or reference the deprecated ORJSONResponse."""
         import backend.main as main_module
-        import inspect as ins
 
-        source = ins.getsource(main_module)
-        assert "ORJSONResponse" not in source, (
+        assert not _module_references_orjson(main_module), (
             "ORJSONResponse still referenced in main.py — it is deprecated in "
             "FastAPI >=0.135. Use JSONResponse or rely on response models."
         )
@@ -85,10 +106,8 @@ class TestOPT06OrjsonDefaultResponse:
     def test_exceptions_py_has_no_orjson_response_calls(self):
         """exceptions.py exception handlers must not use the deprecated ORJSONResponse."""
         import backend.core.exceptions as exc_module
-        import inspect as ins
 
-        source = ins.getsource(exc_module)
-        assert "ORJSONResponse" not in source, (
+        assert not _module_references_orjson(exc_module), (
             "ORJSONResponse still referenced in exceptions.py — deprecated in "
             "FastAPI >=0.135. Use JSONResponse."
         )
@@ -96,10 +115,8 @@ class TestOPT06OrjsonDefaultResponse:
     def test_health_py_has_no_orjson_response_calls(self):
         """health.py readiness checks must not use the deprecated ORJSONResponse."""
         import backend.api.v1.health as health_module
-        import inspect as ins
 
-        source = ins.getsource(health_module)
-        assert "ORJSONResponse" not in source, (
+        assert not _module_references_orjson(health_module), (
             "ORJSONResponse still referenced in health.py — deprecated in "
             "FastAPI >=0.135. Use JSONResponse."
         )
@@ -107,10 +124,8 @@ class TestOPT06OrjsonDefaultResponse:
     def test_jobs_py_has_no_orjson_response_calls(self):
         """jobs.py duplicate/skip responses must not use the deprecated ORJSONResponse."""
         import backend.api.v1.jobs as jobs_module
-        import inspect as ins
 
-        source = ins.getsource(jobs_module)
-        assert "ORJSONResponse" not in source, (
+        assert not _module_references_orjson(jobs_module), (
             "ORJSONResponse still referenced in jobs.py — deprecated in "
             "FastAPI >=0.135. Use JSONResponse."
         )
