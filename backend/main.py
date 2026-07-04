@@ -123,8 +123,8 @@ async def lifespan(app: FastAPI):  # pragma: no cover -- startup/shutdown lifecy
         logger.info("TESTING mode — skipping Alembic migrations")
     elif not settings.RUN_MIGRATIONS_ON_STARTUP:
         logger.warning(
-            "startup_migrations_disabled",
-            reason="RUN_MIGRATIONS_ON_STARTUP=false — schema NOT auto-upgraded",
+            "RUN_MIGRATIONS_ON_STARTUP=false — skipping Alembic migrations "
+            "(schema NOT auto-upgraded)"
         )
     else:
         try:
