@@ -116,8 +116,17 @@ async def lifespan(app: FastAPI):  # pragma: no cover -- startup/shutdown lifecy
     # No-op if already at head (one quick SELECT on alembic_version).
     # If migration fails, startup aborts -- container orchestrator restarts.
     # Skip in tests -- pg_engine fixture already ran migrations on the testcontainer.
+    # Skip when RUN_MIGRATIONS_ON_STARTUP=false -- guards against a misconfigured
+    # (e.g. dev) boot silently migrating whatever DB it points at (2026-07-04 leak).
     import os as _os
-    if not _os.environ.get("TESTING"):
+    if _os.environ.get("TESTING"):
+        logger.info("TESTING mode — skipping Alembic migrations")
+    elif not settings.RUN_MIGRATIONS_ON_STARTUP:
+        logger.warning(
+            "startup_migrations_disabled",
+            reason="RUN_MIGRATIONS_ON_STARTUP=false — schema NOT auto-upgraded",
+        )
+    else:
         try:
             from pathlib import Path as _Path
             from alembic.config import Config as AlembicConfig
@@ -142,8 +151,6 @@ async def lifespan(app: FastAPI):  # pragma: no cover -- startup/shutdown lifecy
         except Exception as exc:
             logger.error("Alembic migration failed: %s", exc, exc_info=True)
             raise
-    else:
-        logger.info("TESTING mode — skipping Alembic migrations")
 
     # Note: Legacy compound table sync removed - database is the source of truth
     # for all compound metadata. UUID-based storage paths are the only supported format.

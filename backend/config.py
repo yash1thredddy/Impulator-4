@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     DB_POOL_TIMEOUT: int = 10  # Connection pool checkout timeout in seconds
     DB_ECHO: bool = False  # SQL logging (disabled in production)
     DIRECT_DATABASE_URL: str = ""  # Direct Supabase connection (port 5432) for DDL/migrations. Falls back to DATABASE_URL if empty.
+    # Gate for the startup auto-migrate (alembic upgrade head in main.py lifespan).
+    # Default True preserves prod deploy behaviour (HF single-container migrates on
+    # boot). Set RUN_MIGRATIONS_ON_STARTUP=false in dev/local env so a misconfigured
+    # boot can NEVER silently migrate a DB it happens to point at -- this is the
+    # guard for the 2026-07-04 prod migration leak (streamlit-auth 0008-0011 hit prod).
+    RUN_MIGRATIONS_ON_STARTUP: bool = True
 
     # Testing mode (CI compatibility -- allows SQLite)
     TESTING: bool = False
