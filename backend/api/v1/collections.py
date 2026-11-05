@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from backend.api.deps import DbDep, SessionDep
 from backend.config import settings
 from backend.core.azure_sync import is_azure_configured
-from backend.core.storage_paths import get_collection_storage_path
+from backend.core.storage_paths import get_collection_storage_path, resolve_within_dir
 from backend.models.schemas import (
     CollectionJobCreate,
     CollectionResponse,
@@ -161,7 +161,10 @@ async def download_collection(collection_id: uuid.UUID, db: DbDep):
     filename = f"{collection.name}.zip"
 
     # Local results tree first (FileResponse streams from disk, no buffering).
-    local_path = os.path.join(str(settings.RESULTS_DIR), storage_path)
+    try:
+        local_path = resolve_within_dir(str(settings.RESULTS_DIR), storage_path)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Collection ZIP not found")
     if os.path.exists(local_path):
         return FileResponse(
             local_path, media_type="application/zip", filename=filename

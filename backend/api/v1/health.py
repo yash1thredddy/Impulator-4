@@ -234,7 +234,8 @@ async def detailed_health_check(db: DbDep) -> dict[str, Any]:
         "active": sched_stats["active"],
         "poll_interval": sched_stats["poll_interval"],
         "consecutive_errors": sched_stats.get("consecutive_errors", 0),
-        "crash_reason": sched_stats.get("crash_reason", None),
+        # Flag only: the exception text stays in the logs, never in an HTTP body.
+        "crashed": sched_stats.get("crash_reason") is not None,
     }
 
     # Azure connectivity (informational -- Postgres is the database, Azure is for ZIPs/logs)
