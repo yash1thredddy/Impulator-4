@@ -9,6 +9,10 @@ on:
       - master
   workflow_dispatch:
 
+# Tests only read the repo (checkout); codecov uploads with its own token.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
