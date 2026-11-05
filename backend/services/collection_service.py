@@ -890,10 +890,12 @@ def _delete_collection_zip(collection_id: str, storage_path: str | None) -> None
     try:
         local_path = resolve_within_dir(str(settings.RESULTS_DIR), rel)
     except ValueError:
+        # A path that escapes RESULTS_DIR is not trusted for ANY backend:
+        # skip the local and the Azure delete.
         logger.warning("Refusing to delete collection ZIP outside RESULTS_DIR: %s", rel)
-        local_path = None
+        return
     try:
-        if local_path and os.path.exists(local_path):
+        if os.path.exists(local_path):
             os.remove(local_path)
     except OSError as e:
         logger.warning(f"Could not remove local collection ZIP {local_path}: {e}")

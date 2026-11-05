@@ -18,11 +18,16 @@ def test_relative_path_resolves_inside_base(tmp_path):
 
 @pytest.mark.parametrize(
     "rel",
-    ["../escape.zip", "collections/../../escape.zip", "/etc/passwd"],
+    ["../escape.zip", "collections/../../escape.zip", "/etc/passwd", ".", ""],
 )
 def test_paths_escaping_base_are_rejected(tmp_path, rel):
     with pytest.raises(ValueError):
         resolve_within_dir(str(tmp_path), rel)
+
+
+def test_filesystem_root_as_base_accepts_descendants():
+    # base "/" must not turn the prefix into "//" and reject everything.
+    assert resolve_within_dir("/", "tmp/x.zip") == os.path.realpath("/tmp/x.zip")
 
 
 def test_symlink_pointing_outside_base_is_rejected(tmp_path):
@@ -33,3 +38,25 @@ def test_symlink_pointing_outside_base_is_rejected(tmp_path):
     (base / "link").symlink_to(outside)
     with pytest.raises(ValueError):
         resolve_within_dir(str(base), "link/file.zip")
+
+
+def test_delete_with_escaping_path_touches_neither_disk_nor_azure(tmp_path, monkeypatch):
+    """A rejected storage_path must not fall through to the Azure delete."""
+    import sys
+    import types
+    from unittest.mock import MagicMock
+
+    from backend.services import collection_service
+
+    monkeypatch.setattr(collection_service.settings, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(collection_service, "is_azure_configured", lambda: True)
+    # The function lazily does `from backend.core.azure_sync import _get_blob_client`,
+    # so install the fake module in sys.modules (order-independent across tests).
+    blob_factory = MagicMock()
+    fake_azure = types.ModuleType("backend.core.azure_sync")
+    fake_azure._get_blob_client = blob_factory
+    monkeypatch.setitem(sys.modules, "backend.core.azure_sync", fake_azure)
+
+    collection_service._delete_collection_zip("abc", "../other/victim.zip")
+
+    blob_factory.assert_not_called()

@@ -137,10 +137,11 @@ class TestSchedulerCrashRecovery:
         assert sched.get("crash_reason") is None or sched["crash_reason"] is None
 
     def test_health_detailed_does_not_expose_crash_text(self, client):
-        """A scheduler crash is reported as a flag; the exception text stays in logs.
+        """Scheduler error text stays in logs; never in the HTTP body.
 
         CodeQL py/stack-trace-exposure (alert #9): /health/detailed used to
-        return ``str(e)`` of the scheduler crash.
+        return ``str(e)`` of the last scheduler error. Current error state is
+        conveyed by ``consecutive_errors``.
         """
         from backend.core import scheduler
 
@@ -155,8 +156,8 @@ class TestSchedulerCrashRecovery:
             scheduler._crash_reason = original
         assert resp.status_code == 200
         sched = resp.json()["checks"]["scheduler"]
-        assert sched["crashed"] is True
         assert "crash_reason" not in sched
+        assert "consecutive_errors" in sched
         assert "secret-internal-detail" not in resp.text
 
     def test_health_executor_endpoint_ok(self, client):

@@ -72,6 +72,7 @@ def resolve_within_dir(base_dir: str, rel_path: str) -> str:
     """
     base = os.path.realpath(base_dir)
     candidate = os.path.realpath(os.path.join(base, rel_path))
-    if not candidate.startswith(base + os.sep):
+    prefix = base if base.endswith(os.sep) else base + os.sep  # base "/" stays "/"
+    if candidate == base or not candidate.startswith(prefix):
         raise ValueError(f"storage path escapes base directory: {rel_path!r}")
     return candidate
