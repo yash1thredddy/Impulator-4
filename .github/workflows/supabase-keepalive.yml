@@ -7,6 +7,9 @@ on:
   workflow_dispatch:
     # Allow manual triggering for testing
 
+# The job only runs psql with a secret; it needs no GITHUB_TOKEN scopes.
+permissions: {}
+
 jobs:
   ping:
     name: Query Supabase Database
