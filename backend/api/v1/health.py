@@ -234,7 +234,8 @@ async def detailed_health_check(db: DbDep) -> dict[str, Any]:
         "active": sched_stats["active"],
         "poll_interval": sched_stats["poll_interval"],
         "consecutive_errors": sched_stats.get("consecutive_errors", 0),
-        "crash_reason": sched_stats.get("crash_reason", None),
+        # The last error's text stays in the logs (scheduler_error), never in an
+        # HTTP body; consecutive_errors above conveys the current error state.
     }
 
     # Azure connectivity (informational -- Postgres is the database, Azure is for ZIPs/logs)

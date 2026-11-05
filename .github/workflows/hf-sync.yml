@@ -8,6 +8,10 @@ on:
       - completed
   workflow_dispatch:  # Allows manual triggering from GitHub Actions UI
 
+# Only checkout needs the GITHUB_TOKEN; the upload authenticates with HF_TOKEN.
+permissions:
+  contents: read
+
 jobs:
   sync:
     # Auto-sync only after CI tests succeed on master pushes.

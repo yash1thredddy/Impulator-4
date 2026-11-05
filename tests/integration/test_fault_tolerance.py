@@ -136,6 +136,30 @@ class TestSchedulerCrashRecovery:
         # crash_reason should be None (no crash in fresh test)
         assert sched.get("crash_reason") is None or sched["crash_reason"] is None
 
+    def test_health_detailed_does_not_expose_crash_text(self, client):
+        """Scheduler error text stays in logs; never in the HTTP body.
+
+        CodeQL py/stack-trace-exposure (alert #9): /health/detailed used to
+        return ``str(e)`` of the last scheduler error. Current error state is
+        conveyed by ``consecutive_errors``.
+        """
+        from backend.core import scheduler
+
+        original = scheduler._crash_reason
+        try:
+            scheduler._crash_reason = "secret-internal-detail: boom at /app/x.py"
+            resp = client.get(
+                "/api/v1/health/detailed",
+                headers={"X-Session-ID": TEST_SESSION_ID},
+            )
+        finally:
+            scheduler._crash_reason = original
+        assert resp.status_code == 200
+        sched = resp.json()["checks"]["scheduler"]
+        assert "crash_reason" not in sched
+        assert "consecutive_errors" in sched
+        assert "secret-internal-detail" not in resp.text
+
     def test_health_executor_endpoint_ok(self, client):
         """GET /api/v1/health/executor returns 200 with executor stats."""
         resp = client.get(

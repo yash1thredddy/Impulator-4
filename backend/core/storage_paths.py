@@ -3,6 +3,8 @@
 All modules that need to convert an entry_id to a storage path should import
 from here. backend.core.azure_sync re-exports this for backward compatibility.
 """
+import os
+
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -55,3 +57,22 @@ def get_collection_storage_path(collection_id: str) -> str:
     collection_id = str(collection_id).lower()
     prefix = collection_id[:2]
     return f"collections/{prefix}/{collection_id}.zip"
+
+
+def resolve_within_dir(base_dir: str, rel_path: str) -> str:
+    """Join *rel_path* onto *base_dir* and refuse anything that escapes it.
+
+    Resolves symlinks and ``..`` segments with :func:`os.path.realpath`, then
+    requires the result to stay under the resolved base. Storage paths are
+    server-generated today; this guard keeps a tampered or malformed stored
+    path from reading or deleting files outside the results tree.
+
+    Raises:
+        ValueError: if the resolved path is outside *base_dir*.
+    """
+    base = os.path.realpath(base_dir)
+    candidate = os.path.realpath(os.path.join(base, rel_path))
+    prefix = base if base.endswith(os.sep) else base + os.sep  # base "/" stays "/"
+    if candidate == base or not candidate.startswith(prefix):
+        raise ValueError(f"storage path escapes base directory: {rel_path!r}")
+    return candidate

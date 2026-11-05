@@ -54,7 +54,7 @@ from backend.config import settings
 from backend.core import sanitize_compound_name
 from backend.core.azure_sync import is_azure_configured
 from backend.core.database import get_db_session
-from backend.core.storage_paths import get_collection_storage_path
+from backend.core.storage_paths import get_collection_storage_path, resolve_within_dir
 from backend.models.enums import AuditEventType, JobStatus, JobType
 from backend.repositories import collection_repo
 
@@ -887,7 +887,13 @@ def _delete_collection_zip(collection_id: str, storage_path: str | None) -> None
     """Remove the collection ZIP locally and from Azure (best-effort, D-11)."""
     rel = storage_path or get_collection_storage_path(collection_id)
     # Local copy.
-    local_path = os.path.join(str(settings.RESULTS_DIR), rel)
+    try:
+        local_path = resolve_within_dir(str(settings.RESULTS_DIR), rel)
+    except ValueError:
+        # A path that escapes RESULTS_DIR is not trusted for ANY backend:
+        # skip the local and the Azure delete.
+        logger.warning("Refusing to delete collection ZIP outside RESULTS_DIR: %s", rel)
+        return
     try:
         if os.path.exists(local_path):
             os.remove(local_path)
