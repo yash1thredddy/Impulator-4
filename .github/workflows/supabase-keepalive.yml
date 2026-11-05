@@ -36,7 +36,9 @@ jobs:
           # A bare `SELECT 1` did not stop the project from being paused
           # (it was paused 2026-09-23..25 despite a successful ping on 09-22),
           # so touch real data. Everything runs in a READ ONLY transaction.
-          psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 --pset=pager=off <<'SQL' || { echo "::error::Keep-alive queries FAILED"; exit 1; }
+          # Bound the call well inside the 5-min job timeout: a hang must end as a
+          # normal step failure (so the failure() alert runs), not a job cancel.
+          PGCONNECT_TIMEOUT=20 timeout 180 psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 --pset=pager=off <<'SQL' || { echo "::error::Keep-alive queries FAILED"; exit 1; }
           BEGIN READ ONLY;
           SET LOCAL statement_timeout = '30s';
 
@@ -80,7 +82,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           title="Supabase keep-alive is failing"
-          n=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          n=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number,title --jq "[.[] | select(.title == \"$title\")][0].number // empty")
           if [ -n "$n" ]; then
             gh issue comment "$n" --repo "$GITHUB_REPOSITORY" --body "Failed again: $RUN_URL"
           else
@@ -96,6 +98,6 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           title="Supabase keep-alive is failing"
-          for n in $(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq '.[].number'); do
+          for n in $(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number,title --jq ".[] | select(.title == \"$title\") | .number"); do
             gh issue close "$n" --repo "$GITHUB_REPOSITORY" --comment "Recovered: $RUN_URL"
           done
