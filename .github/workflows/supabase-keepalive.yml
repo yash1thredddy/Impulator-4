@@ -12,6 +12,12 @@ on:
 permissions:
   issues: write
 
+# Queue overlapping runs (schedule + manual dispatch) so the alert step's
+# list-then-create can never race into duplicate issues.
+concurrency:
+  group: supabase-keepalive
+  cancel-in-progress: false
+
 jobs:
   ping:
     name: Query Supabase Database
