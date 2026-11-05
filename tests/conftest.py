@@ -42,7 +42,9 @@ def postgres_url():
         yield ci_test_url
     else:
         from testcontainers.postgres import PostgresContainer
-        with PostgresContainer("postgres:15", driver="psycopg2") as pg:
+        # driver=None -> plain postgresql:// URL, so local testcontainer runs use
+        # SQLAlchemy's default driver, as CI (TEST_DATABASE_URL) and prod already do.
+        with PostgresContainer("postgres:15", driver=None) as pg:
             yield pg.get_connection_url()
 
 

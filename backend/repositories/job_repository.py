@@ -39,9 +39,9 @@ class ValidationError(Exception):  # noqa: A001
 def _handle_integrity_error(e: IntegrityError) -> None:
     """Convert SQLAlchemy IntegrityError to domain-specific exception.
 
-    Inspects the underlying ``psycopg2`` error to classify the violation.
+    Inspects the underlying ``psycopg`` (v3) error to classify the violation.
     """
-    from psycopg2.errors import (  # type: ignore[import-untyped]
+    from psycopg.errors import (
         CheckViolation,
         ForeignKeyViolation,
         UniqueViolation,

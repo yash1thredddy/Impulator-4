@@ -9,7 +9,7 @@ import uuid
 from typing import Any
 
 import structlog
-from sqlalchemy import delete, desc, func, or_, select
+from sqlalchemy import any_, delete, desc, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
@@ -291,7 +291,7 @@ class CompoundRepository:
                 select(
                     func.lower(func.trim(Compound.compound_name))
                 ).where(
-                    func.lower(func.trim(Compound.compound_name)) == func.any_(
+                    func.lower(func.trim(Compound.compound_name)) == any_(
                         pg_array(normalized_names)
                     )
                 )

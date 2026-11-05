@@ -7,14 +7,17 @@ on:
   workflow_dispatch:
     # Allow manual triggering for testing
 
+# The job only runs psql with a secret; it needs no GITHUB_TOKEN scopes.
+permissions: {}
+
 jobs:
   ping:
-    name: Ping Supabase Database
+    name: Query Supabase Database
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 5
 
     steps:
-      - name: Ping database with SELECT 1
+      - name: Run read-only queries against real tables
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
@@ -22,4 +25,42 @@ jobs:
             echo "::error::DATABASE_URL secret is not set"
             exit 1
           fi
-          psql "$DATABASE_URL" -c "SELECT 1 AS keepalive;" && echo "::notice::Ping OK - database is active" || { echo "::error::Ping FAILED"; exit 1; }
+          # A bare `SELECT 1` did not stop the project from being paused
+          # (it was paused 2026-09-23..25 despite a successful ping on 09-22),
+          # so touch real data. Everything runs in a READ ONLY transaction.
+          psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 --pset=pager=off <<'SQL' || { echo "::error::Keep-alive queries FAILED"; exit 1; }
+          BEGIN READ ONLY;
+          SET LOCAL statement_timeout = '30s';
+
+          -- Row counts per table
+          SELECT 'jobs' AS tbl, count(*) FROM jobs
+          UNION ALL SELECT 'compounds', count(*) FROM compounds
+          UNION ALL SELECT 'collections', count(*) FROM collections
+          UNION ALL SELECT 'deleted_compounds', count(*) FROM deleted_compounds
+          UNION ALL SELECT 'audit_events', count(*) FROM audit_events;
+
+          -- Job mix and recency
+          SELECT job_type, status, count(*) AS n, max(created_at) AS latest
+          FROM jobs GROUP BY job_type, status ORDER BY job_type, status;
+
+          -- IMP score distribution
+          SELECT count(imp_score) AS scored,
+                 round(avg(imp_score)::numeric, 4) AS mean,
+                 round((percentile_cont(0.5) WITHIN GROUP (ORDER BY imp_score))::numeric, 4) AS median,
+                 round(max(imp_score)::numeric, 4) AS max
+          FROM compounds;
+
+          -- Structural siblings (same InChIKey structure key) — top 5
+          SELECT inchikey_structure_key, count(*) AS versions
+          FROM compounds WHERE inchikey_structure_key IS NOT NULL
+          GROUP BY inchikey_structure_key HAVING count(*) > 1
+          ORDER BY versions DESC LIMIT 5;
+
+          -- Recent audit activity by type (last 30 days)
+          SELECT event_type, count(*) AS n
+          FROM audit_events WHERE created_at > now() - interval '30 days'
+          GROUP BY event_type ORDER BY n DESC;
+
+          COMMIT;
+          SQL
+          echo "::notice::Keep-alive OK - real queries ran against the database"

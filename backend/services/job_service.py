@@ -1233,7 +1233,7 @@ class JobService:
             # D-28, D-30: Constraint-aware IntegrityError attribution
             db.rollback()
             try:
-                from psycopg2.errors import UniqueViolation  # type: ignore[import-untyped]
+                from psycopg.errors import UniqueViolation
                 if isinstance(e.orig, UniqueViolation):
                     constraint = getattr(e.orig.diag, 'constraint_name', None)
                     if constraint == 'compounds_pkey':
