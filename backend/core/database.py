@@ -38,6 +38,9 @@ def get_engine() -> Engine:
                     connect_args={
                         "application_name": "impulator",
                         "options": "-c statement_timeout=60000 -c idle_in_transaction_session_timeout=30000",
+                        # psycopg 3: never prepare server-side. Prod uses the Supabase
+                        # transaction pooler (6543), which breaks prepared statements.
+                        "prepare_threshold": None,
                     },
                 )
                 SessionLocal = sessionmaker(
