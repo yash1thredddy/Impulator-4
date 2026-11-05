@@ -23,6 +23,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
+          echo "::error::TEMP forced failure to test alerting"; exit 1  # TEMP-ALERT-TEST
           if [ -z "$DATABASE_URL" ]; then
             echo "::error::DATABASE_URL secret is not set"
             exit 1
