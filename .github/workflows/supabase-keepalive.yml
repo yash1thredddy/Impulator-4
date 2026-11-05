@@ -7,8 +7,16 @@ on:
   workflow_dispatch:
     # Allow manual triggering for testing
 
-# The job only runs psql with a secret; it needs no GITHUB_TOKEN scopes.
-permissions: {}
+# issues:write only, so a failed run can open/update the alert issue below.
+# The keep-alive was red for six weeks (2026-09-25..11-04) with no one notified.
+permissions:
+  issues: write
+
+# Queue overlapping runs (schedule + manual dispatch) so the alert step's
+# list-then-create can never race into duplicate issues.
+concurrency:
+  group: supabase-keepalive
+  cancel-in-progress: false
 
 jobs:
   ping:
@@ -28,7 +36,9 @@ jobs:
           # A bare `SELECT 1` did not stop the project from being paused
           # (it was paused 2026-09-23..25 despite a successful ping on 09-22),
           # so touch real data. Everything runs in a READ ONLY transaction.
-          psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 --pset=pager=off <<'SQL' || { echo "::error::Keep-alive queries FAILED"; exit 1; }
+          # Bound the call well inside the 5-min job timeout: a hang must end as a
+          # normal step failure (so the failure() alert runs), not a job cancel.
+          PGCONNECT_TIMEOUT=20 timeout 180 psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 --pset=pager=off <<'SQL' || { echo "::error::Keep-alive queries FAILED"; exit 1; }
           BEGIN READ ONLY;
           SET LOCAL statement_timeout = '30s';
 
@@ -64,3 +74,30 @@ jobs:
           COMMIT;
           SQL
           echo "::notice::Keep-alive OK - real queries ran against the database"
+
+      - name: Open or update the alert issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Supabase keep-alive is failing"
+          n=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number,title --jq "[.[] | select(.title == \"$title\")][0].number // empty")
+          if [ -n "$n" ]; then
+            gh issue comment "$n" --repo "$GITHUB_REPOSITORY" --body "Failed again: $RUN_URL"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "The scheduled Supabase keep-alive failed: $RUN_URL
+
+          If the log shows \`tenant/user ... not found\`, the project is paused: restore it in the Supabase dashboard. This issue closes automatically on the next successful run."
+          fi
+
+      - name: Close the alert issue once the keep-alive recovers
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Supabase keep-alive is failing"
+          for n in $(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number,title --jq ".[] | select(.title == \"$title\") | .number"); do
+            gh issue close "$n" --repo "$GITHUB_REPOSITORY" --comment "Recovered: $RUN_URL"
+          done
